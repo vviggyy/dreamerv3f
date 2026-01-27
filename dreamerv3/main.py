@@ -92,6 +92,14 @@ def main(argv=None):
         bind(make_logger, config),
         args)
 
+  elif config.script == 'eval_trajectory':
+    from . import eval_trajectory
+    eval_trajectory.eval_trajectory(
+        bind(make_agent, config),
+        bind(make_env, config),
+        bind(make_logger, config),
+        args)
+
   elif config.script == 'parallel':
     embodied.run.parallel.combined(
         bind(make_agent, config),

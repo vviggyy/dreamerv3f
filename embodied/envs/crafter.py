@@ -29,6 +29,7 @@ class Crafter(embodied.Env):
         'is_last': elements.Space(bool),
         'is_terminal': elements.Space(bool),
         'log/reward': elements.Space(np.float32),
+        'player_pos': elements.Space(np.float32, (2,)),
     }
     if self._logs:
       spaces.update({
@@ -64,12 +65,15 @@ class Crafter(embodied.Env):
   def _obs(
       self, image, reward, info,
       is_first=False, is_last=False, is_terminal=False):
+    # Get player position from internal crafter env
+    player_pos = np.array(self._env._player.pos, dtype=np.float32)
     obs = dict(
         image=image,
         reward=np.float32(reward),
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,
+        player_pos=player_pos,
         **{'log/reward': np.float32(info['reward'] if info else 0.0)},
     )
     if self._logs:
