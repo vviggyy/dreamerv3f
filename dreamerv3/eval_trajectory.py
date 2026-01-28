@@ -45,7 +45,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   completed_episodes = []
   episode_count = [0]  # Use list for mutability in closure
 
-  def logfn(tran, worker):
+  def logfn(tran, worker): #OBSERVER
     if worker != 0:
       return
 
@@ -91,8 +91,8 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   env = make_env(0)
   env_seed = getattr(env, '_seed', None)  # Try to get Crafter seed
   fns = [bind(make_env, i) for i in range(1)]  # Single env for trajectory recording
-  driver = embodied.Driver(fns, parallel=False)
-  driver.on_step(logfn)
+  driver = embodied.Driver(fns, parallel=False) #CONTROLLER
+  driver.on_step(logfn) #logfn is a callback
 
   # Load checkpoint
   cp = elements.Checkpoint()
