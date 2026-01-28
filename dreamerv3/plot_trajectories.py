@@ -9,7 +9,8 @@ Plot types:
   heatmap       - 2D visitation frequency
   activation    - Unit activation by position
   spatial       - Find spatially-tuned units
-  world         - Trajectories on stitched world view
+  world         - Trajectories on stitched world view (from observations)
+  fullworld     - Trajectories on full Crafter world (requires env_seed)
   all           - Generate all plots
 """
 
@@ -22,21 +23,33 @@ import numpy as np
 
 
 def load_episodes(data_path):
-    """Load all episodes from trajectory data."""
+    """Load all episodes from trajectory data.
+
+    Returns:
+        episodes: List of episode dicts
+        metadata: Dict with env_seed, task, etc (or None for old format)
+    """
     data_path = Path(data_path)
+    metadata = None
 
     # Try loading all_episodes.pkl first
     all_file = data_path / 'all_episodes.pkl'
     if all_file.exists():
         with open(all_file, 'rb') as f:
-            return pickle.load(f)
+            data = pickle.load(f)
+        # Handle new format with metadata
+        if isinstance(data, dict) and 'episodes' in data:
+            metadata = {k: v for k, v in data.items() if k != 'episodes'}
+            return data['episodes'], metadata
+        # Old format - just list of episodes
+        return data, None
 
     # Otherwise load individual episode files
     episodes = []
     for ep_file in sorted(data_path.glob('episode_*.pkl')):
         with open(ep_file, 'rb') as f:
             episodes.append(pickle.load(f))
-    return episodes
+    return episodes, None
 
 
 def plot_trajectories(episodes, save_path=None):
@@ -216,6 +229,89 @@ def plot_world_overlay(episodes, tile_size=7, save_path=None):
     plt.show()
 
 
+def plot_fullworld_overlay(episodes, metadata=None, tile_size=8, save_path=None):
+    """Plot trajectories on full Crafter world map.
+
+    Requires crafter package and env_seed in metadata to recreate the world.
+    """
+    try:
+        import crafter
+    except ImportError:
+        print("Crafter not installed, skipping fullworld plot")
+        return
+
+    # Get seed from metadata or use default
+    env_seed = metadata.get('env_seed') if metadata else None
+    if env_seed is None:
+        print("No env_seed in metadata, using seed=42 (world may not match)")
+        env_seed = 42
+
+    # Create environment with same seed
+    env = crafter.Env(area=(64, 64), view=(9, 9), size=(64, 64), seed=env_seed)
+    env.reset()
+
+    # Access internal world
+    world = env._world
+    textures = env._textures
+    mat_map = world._mat_map
+    mat_names = world._mat_names
+
+    # Render full world
+    world_img = np.zeros((mat_map.shape[0] * tile_size, mat_map.shape[1] * tile_size, 3), dtype=np.uint8)
+
+    for x in range(mat_map.shape[0]):
+        for y in range(mat_map.shape[1]):
+            mat_id = mat_map[x, y]
+            mat_name = mat_names.get(mat_id, 'unknown')
+            if mat_name:
+                texture = textures.get(mat_name, (tile_size, tile_size))
+                if texture.shape[-1] == 4:
+                    texture = texture[..., :3]
+                px, py = x * tile_size, y * tile_size
+                world_img[px:px+tile_size, py:py+tile_size] = texture
+
+    # Render objects (player spawn area objects)
+    for obj in world.objects:
+        texture = textures.get(obj.texture, (tile_size, tile_size))
+        if texture.shape[-1] == 4:
+            alpha = texture[..., 3:].astype(np.float32) / 255
+            rgb = texture[..., :3].astype(np.float32)
+            px, py = int(obj.pos[0]) * tile_size, int(obj.pos[1]) * tile_size
+            if 0 <= px < world_img.shape[0] - tile_size and 0 <= py < world_img.shape[1] - tile_size:
+                current = world_img[px:px+tile_size, py:py+tile_size].astype(np.float32)
+                blended = alpha * rgb + (1 - alpha) * current
+                world_img[px:px+tile_size, py:py+tile_size] = blended.astype(np.uint8)
+
+    # Transpose for display (y-up in world coords)
+    world_img = world_img.transpose(1, 0, 2)[::-1]
+
+    # Plot with trajectory overlay
+    fig, ax = plt.subplots(figsize=(14, 14))
+    ax.imshow(world_img)
+
+    # Overlay trajectories (convert world coords to pixel coords)
+    colors = plt.cm.tab10(np.linspace(0, 1, len(episodes)))
+    for i, ep in enumerate(episodes):
+        pos = ep['player_pos']
+        # Convert to pixel coords: x -> px, y -> py (with y flip)
+        px = pos[:, 0] * tile_size + tile_size // 2
+        py = world_img.shape[0] - (pos[:, 1] * tile_size + tile_size // 2)
+        ax.plot(px, py, '-', color=colors[i], linewidth=2, alpha=0.8,
+                label=f"Ep {ep['episode']} (r={ep['total_reward']:.0f})")
+        ax.plot(px[0], py[0], 'o', color='lime', markersize=10, zorder=5)
+        ax.plot(px[-1], py[-1], 'X', color='red', markersize=12, zorder=5)
+
+    ax.set_title(f'Agent Trajectories on Full World (seed={env_seed})')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.axis('off')
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved fullworld overlay to {save_path}")
+
+    plt.show()
+
+
 def find_spatial_units(episodes, layer='deter', top_k=10):
     """Find units most correlated with position."""
     if layer not in episodes[0]:
@@ -257,7 +353,7 @@ def main():
     parser.add_argument('--data', type=str, required=True,
                         help='Path to trajectory data directory')
     parser.add_argument('--plot', type=str, default='all',
-                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'all'],
+                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'all'],
                         help='Type of plot to generate')
     parser.add_argument('--unit', type=int, default=0,
                         help='Unit index for activation plot')
@@ -269,8 +365,10 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading episodes from {args.data}")
-    episodes = load_episodes(args.data)
+    episodes, metadata = load_episodes(args.data)
     print(f"Loaded {len(episodes)} episodes")
+    if metadata:
+        print(f"Metadata: {metadata}")
 
     save_dir = Path(args.save) if args.save else None
     if save_dir:
@@ -294,6 +392,10 @@ def main():
     if args.plot in ('world', 'all'):
         save_path = save_dir / 'world_overlay.png' if save_dir else None
         plot_world_overlay(episodes, save_path=save_path)
+
+    if args.plot in ('fullworld', 'all'):
+        save_path = save_dir / 'fullworld_overlay.png' if save_dir else None
+        plot_fullworld_overlay(episodes, metadata, save_path=save_path)
 
 
 if __name__ == '__main__':

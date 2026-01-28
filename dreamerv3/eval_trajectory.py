@@ -88,6 +88,8 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
         print(f"  Saved to {ep_file}")
 
   # Create environment
+  env = make_env(0)
+  env_seed = getattr(env, '_seed', None)  # Try to get Crafter seed
   fns = [bind(make_env, i) for i in range(1)]  # Single env for trajectory recording
   driver = embodied.Driver(fns, parallel=False)
   driver.on_step(logfn)
@@ -105,11 +107,18 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   while episode_count[0] < num_episodes:
     driver(policy, steps=100)
 
-  # Save all episodes together
+  # Save all episodes together with metadata
   all_file = save_path / 'all_episodes.pkl'
+  save_data = {
+      'episodes': completed_episodes,
+      'env_seed': env_seed,
+      'task': 'crafter',  # For now assume crafter
+  }
   with open(str(all_file), 'wb') as f:
-    pickle.dump(completed_episodes, f)
+    pickle.dump(save_data, f)
   print(f"\nSaved all {len(completed_episodes)} episodes to {all_file}")
+  if env_seed:
+    print(f"Environment seed: {env_seed}")
 
   # Print summary
   print("\n=== Trajectory Recording Summary ===")
