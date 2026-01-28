@@ -2,7 +2,15 @@
 Trajectory visualization script for interpretability analysis.
 
 Usage:
-  python dreamerv3/plot_trajectories.py --data ./logdir/crafter_run1/trajectories
+  python dreamerv3/plot_trajectories.py --data ./trajectories --plot all --save ./plots
+
+Plot types:
+  trajectories  - Overlay all episode paths
+  heatmap       - 2D visitation frequency
+  activation    - Unit activation by position
+  spatial       - Find spatially-tuned units
+  world         - Trajectories on stitched world view
+  all           - Generate all plots
 """
 
 import argparse
@@ -134,6 +142,80 @@ def plot_activation_by_position(episodes, unit_idx=0, layer='deter', save_path=N
     plt.show()
 
 
+def plot_world_overlay(episodes, tile_size=7, save_path=None):
+    """Plot trajectories overlaid on stitched world view from observations."""
+    # Collect all positions and images
+    all_pos = []
+    all_imgs = []
+    for ep in episodes:
+        for i in range(len(ep['player_pos'])):
+            all_pos.append(ep['player_pos'][i])
+            all_imgs.append(ep['image'][i])
+
+    all_pos = np.array(all_pos)
+    all_imgs = np.array(all_imgs)
+    obs_size = all_imgs[0].shape[0]  # Usually 64
+
+    # Get position bounds
+    x_min, x_max = int(all_pos[:, 0].min()), int(all_pos[:, 0].max())
+    y_min, y_max = int(all_pos[:, 1].min()), int(all_pos[:, 1].max())
+
+    # Build world canvas by averaging overlapping observations
+    canvas_h = (y_max - y_min + 1) * tile_size + obs_size
+    canvas_w = (x_max - x_min + 1) * tile_size + obs_size
+    world_img = np.zeros((canvas_h, canvas_w, 3), dtype=np.float32)
+    world_count = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+
+    for pos, img in zip(all_pos, all_imgs):
+        x_idx = int(pos[0] - x_min) * tile_size
+        y_idx = int(pos[1] - y_min) * tile_size
+        # Flip y for image coordinates
+        y_idx = canvas_h - y_idx - obs_size
+
+        # Compute valid region bounds
+        y_end = min(y_idx + obs_size, canvas_h)
+        x_end = min(x_idx + obs_size, canvas_w)
+        y_start = max(y_idx, 0)
+        x_start = max(x_idx, 0)
+
+        img_y_start = y_start - y_idx
+        img_x_start = x_start - x_idx
+        img_y_end = img_y_start + (y_end - y_start)
+        img_x_end = img_x_start + (x_end - x_start)
+
+        world_img[y_start:y_end, x_start:x_end] += img[img_y_start:img_y_end, img_x_start:img_x_end].astype(np.float32)
+        world_count[y_start:y_end, x_start:x_end] += 1
+
+    # Average overlapping regions
+    world_count = np.maximum(world_count, 1)
+    world_img = (world_img / world_count[:, :, None]).astype(np.uint8)
+
+    # Plot with trajectory overlay
+    fig, ax = plt.subplots(figsize=(12, 12))
+    ax.imshow(world_img)
+
+    # Convert positions to pixel coordinates on canvas
+    colors = plt.cm.tab10(np.linspace(0, 1, len(episodes)))
+    for i, ep in enumerate(episodes):
+        pos = ep['player_pos']
+        px = (pos[:, 0] - x_min) * tile_size + obs_size // 2
+        py = canvas_h - ((pos[:, 1] - y_min) * tile_size + obs_size // 2)
+        ax.plot(px, py, '-', color=colors[i], linewidth=2, alpha=0.8,
+                label=f"Ep {ep['episode']} (r={ep['total_reward']:.0f})")
+        ax.plot(px[0], py[0], 'o', color='lime', markersize=8, zorder=5)
+        ax.plot(px[-1], py[-1], 'X', color='red', markersize=10, zorder=5)
+
+    ax.set_title('Agent Trajectories on World View')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.axis('off')
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved world overlay to {save_path}")
+
+    plt.show()
+
+
 def find_spatial_units(episodes, layer='deter', top_k=10):
     """Find units most correlated with position."""
     if layer not in episodes[0]:
@@ -175,7 +257,7 @@ def main():
     parser.add_argument('--data', type=str, required=True,
                         help='Path to trajectory data directory')
     parser.add_argument('--plot', type=str, default='all',
-                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'all'],
+                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'all'],
                         help='Type of plot to generate')
     parser.add_argument('--unit', type=int, default=0,
                         help='Unit index for activation plot')
@@ -208,6 +290,10 @@ def main():
     if args.plot in ('activation', 'all'):
         save_path = save_dir / f'{args.layer}_{args.unit}_activation.png' if save_dir else None
         plot_activation_by_position(episodes, args.unit, args.layer, save_path)
+
+    if args.plot in ('world', 'all'):
+        save_path = save_dir / 'world_overlay.png' if save_dir else None
+        plot_world_overlay(episodes, save_path=save_path)
 
 
 if __name__ == '__main__':
