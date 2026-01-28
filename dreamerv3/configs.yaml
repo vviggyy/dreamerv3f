@@ -1,6 +1,7 @@
 defaults:
 
   logdir: ~/logdir/{timestamp}
+  scratch_dir: ''  # If set, replay buffer goes here instead of logdir (for cluster scratch storage)
   replica: 0
   replicas: 1
   method: name

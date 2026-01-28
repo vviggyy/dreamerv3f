@@ -57,6 +57,7 @@ def main(argv=None):
       replica=config.replica,
       replicas=config.replicas,
       logdir=config.logdir,
+      scratch_dir=config.scratch_dir,
       batch_size=config.batch_size,
       batch_length=config.batch_length,
       report_length=config.report_length,
@@ -160,17 +161,23 @@ def make_agent(config):
 def make_logger(config):
   step = elements.Counter()
   logdir = config.logdir
+  # Use scratch_dir for logs if set (preserving run name)
+  if config.scratch_dir:
+    run_name = elements.Path(config.logdir).name
+    scratch_logdir = str(elements.Path(config.scratch_dir) / run_name)
+  else:
+    scratch_logdir = logdir
   multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
   outputs = []
   outputs.append(elements.logger.TerminalOutput(config.logger.filter, 'Agent'))
   for output in config.logger.outputs:
     if output == 'jsonl':
-      outputs.append(elements.logger.JSONLOutput(logdir, 'metrics.jsonl'))
+      outputs.append(elements.logger.JSONLOutput(scratch_logdir, 'metrics.jsonl'))
       outputs.append(elements.logger.JSONLOutput(
-          logdir, 'scores.jsonl', 'episode/score'))
+          scratch_logdir, 'scores.jsonl', 'episode/score'))
     elif output == 'tensorboard':
       outputs.append(elements.logger.TensorBoardOutput(
-          logdir, config.logger.fps))
+          scratch_logdir, config.logger.fps))
     elif output == 'expa':
       exp = logdir.split('/')[-4]
       run = '/'.join(logdir.split('/')[-3:])
@@ -181,7 +188,7 @@ def make_logger(config):
       name = '/'.join(logdir.split('/')[-4:])
       outputs.append(elements.logger.WandBOutput(name))
     elif output == 'scope':
-      outputs.append(elements.logger.ScopeOutput(elements.Path(logdir)))
+      outputs.append(elements.logger.ScopeOutput(elements.Path(scratch_logdir)))
     else:
       raise NotImplementedError(output)
   logger = elements.Logger(step, outputs, multiplier)
@@ -195,7 +202,14 @@ def make_replay(config, folder, mode='train'):
   length = consec * batlen + config.replay_context
   assert config.batch_size * length <= capacity
 
-  directory = elements.Path(config.logdir) / folder
+  # Use scratch_dir for replay if set, otherwise use logdir
+  if config.scratch_dir:
+    # Preserve run name from logdir so different runs don't collide
+    run_name = elements.Path(config.logdir).name
+    base_dir = elements.Path(config.scratch_dir) / run_name
+  else:
+    base_dir = elements.Path(config.logdir)
+  directory = base_dir / folder
   if config.replicas > 1:
     directory /= f'{config.replica:05}'
   kwargs = dict(
