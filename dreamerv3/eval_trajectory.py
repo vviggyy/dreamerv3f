@@ -6,7 +6,7 @@ Usage:
   python dreamerv3/main.py \
     --configs crafter \
     --logdir ./logdir/crafter_run1 \
-    --run.script eval_trajectory \
+    --script eval_trajectory \
     --run.from_checkpoint ./logdir/crafter_run1/checkpoint.ckpt \
     --env.crafter.seed 42 \
     --eval_trajectory.num_episodes 5 \
@@ -33,10 +33,10 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   print('Logdir', logdir)
 
   # Trajectory storage
-  save_path = elements.Path(getattr(args, 'eval_trajectory', {}).get(
-      'save_path', str(logdir / 'trajectories')))
+  et_config = args.eval_trajectory
+  save_path = elements.Path(et_config.save_path or str(logdir / 'trajectories'))
   save_path.mkdir()
-  num_episodes = getattr(args, 'eval_trajectory', {}).get('num_episodes', 100)
+  num_episodes = et_config.num_episodes
 
   print(f'Will record {num_episodes} episodes to {save_path}')
 

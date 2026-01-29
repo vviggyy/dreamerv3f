@@ -21,7 +21,7 @@ python dreamerv3/main.py \
 python dreamerv3/main.py \
   --configs crafter \
   --logdir ./logdir/crafter_run1 \
-  --run.script eval_trajectory \
+  --script eval_trajectory \
   --run.from_checkpoint ./logdir/crafter_run1/checkpoint.ckpt \
   --eval_trajectory.num_episodes 5 \
   --eval_trajectory.save_path ./trajectories

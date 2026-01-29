@@ -46,6 +46,10 @@ defaults:
     recexp: 1.0
     chunksize: 1024
 
+  eval_trajectory:
+    num_episodes: 100
+    save_path: ''
+
   run:
     steps: 1e10
     duration: 0
