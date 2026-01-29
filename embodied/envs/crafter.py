@@ -8,10 +8,11 @@ import numpy as np
 
 class Crafter(embodied.Env):
 
-  def __init__(self, task, size=(64, 64), logs=False, logdir=None, seed=None,
-               fixed_seed=False):
+  def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
+               logdir=None, seed=None, fixed_seed=False):
     assert task in ('reward', 'noreward')
-    self._env = crafter.Env(size=size, reward=(task == 'reward'), seed=seed)
+    self._env = crafter.Env(
+        area=area, size=size, reward=(task == 'reward'), seed=seed)
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
     self._logdir and self._logdir.mkdir()
