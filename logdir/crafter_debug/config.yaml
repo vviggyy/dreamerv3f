@@ -179,6 +179,7 @@ run:
   steps: 500000.0
   train_ratio: 512.0
   usage: {gc: false, gputil: false, malloc: false, nvsmi: true, psutil: true}
+scratch_dir: ../../scratch
 script: train
 seed: 42
 task: crafter_reward
