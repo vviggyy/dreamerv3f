@@ -36,7 +36,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   save_path = elements.Path(getattr(args, 'eval_trajectory', {}).get(
       'save_path', str(logdir / 'trajectories')))
   save_path.mkdir()
-  num_episodes = getattr(args, 'eval_trajectory', {}).get('num_episodes', 5)
+  num_episodes = getattr(args, 'eval_trajectory', {}).get('num_episodes', 100)
 
   print(f'Will record {num_episodes} episodes to {save_path}')
 
@@ -89,7 +89,10 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
 
   # Create environment
   env = make_env(0)
-  env_seed = getattr(env, '_seed', None)  # Try to get Crafter seed
+  try:
+    env_seed = env._seed
+  except (AttributeError, ValueError):
+    env_seed = None
   fns = [bind(make_env, i) for i in range(1)]  # Single env for trajectory recording
   driver = embodied.Driver(fns, parallel=False) #CONTROLLER
   driver.on_step(logfn) #logfn is a callback
