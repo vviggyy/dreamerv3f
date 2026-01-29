@@ -57,6 +57,11 @@ class Crafter(embodied.Env):
       if self._fixed_seed:
         self._env._episode = 0
       image = self._env.reset()
+      # Verify player spawned on walkable terrain
+      player_pos = tuple(self._env._player.pos)
+      mat, _ = self._env._world[player_pos]
+      assert mat in ('grass', 'path', 'sand'), (
+          f"Player spawned on non-walkable material '{mat}' at {player_pos}")
       return self._obs(image, 0.0, {}, is_first=True)
     image, reward, self._done, info = self._env.step(action['action'])
     self._reward += reward
