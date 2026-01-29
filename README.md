@@ -4,6 +4,35 @@ A reimplementation of [DreamerV3][paper], a scalable and general reinforcement
 learning algorithm that masters a wide range of applications with fixed
 hyperparameters.
 
+## Quick Start
+
+**Train a new model:**
+
+```sh
+python dreamerv3/main.py \
+  --logdir ./logdir/crafter_run1 \
+  --configs crafter \
+  --run.train_ratio 32
+```
+
+**Generate evaluation trajectories from a checkpoint:**
+
+```sh
+python dreamerv3/main.py \
+  --configs crafter \
+  --logdir ./logdir/crafter_run1 \
+  --run.script eval_trajectory \
+  --run.from_checkpoint ./logdir/crafter_run1/checkpoint.ckpt \
+  --eval_trajectory.num_episodes 5 \
+  --eval_trajectory.save_path ./trajectories
+```
+
+**Plot trajectory visualizations:**
+
+```sh
+python dreamerv3/plot_trajectories.py --data ./trajectories --plot all --save ./plots
+```
+
 ![DreamerV3 Tasks](https://user-images.githubusercontent.com/2111293/217647148-cbc522e2-61ad-4553-8e14-1ecdc8d9438b.gif)
 
 If you find this code useful, please reference in your paper:
