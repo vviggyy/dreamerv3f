@@ -8,7 +8,8 @@ import numpy as np
 
 class Crafter(embodied.Env):
 
-  def __init__(self, task, size=(64, 64), logs=False, logdir=None, seed=None):
+  def __init__(self, task, size=(64, 64), logs=False, logdir=None, seed=None,
+               fixed_seed=False):
     assert task in ('reward', 'noreward')
     self._env = crafter.Env(size=size, reward=(task == 'reward'), seed=seed)
     self._logs = logs
@@ -19,6 +20,8 @@ class Crafter(embodied.Env):
     self._reward = None
     self._achievements = crafter.constants.achievements.copy()
     self._done = True
+    self._fixed_seed = fixed_seed
+    self._seed = seed
 
   @property
   def obs_space(self):
@@ -50,6 +53,8 @@ class Crafter(embodied.Env):
       self._length = 0
       self._reward = 0
       self._done = False
+      if self._fixed_seed:
+        self._env._episode = 0
       image = self._env.reset()
       return self._obs(image, 0.0, {}, is_first=True)
     image, reward, self._done, info = self._env.step(action['action'])

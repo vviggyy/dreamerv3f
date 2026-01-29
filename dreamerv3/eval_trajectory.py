@@ -87,13 +87,21 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
           pickle.dump(ep_result, f)
         print(f"  Saved to {ep_file}")
 
-  # Create environment
-  env = make_env(0)
+  # Create environment with fixed_seed so all episodes use the same world
+  env = make_env(0, fixed_seed=True)
   try:
     env_seed = env._seed
   except (AttributeError, ValueError):
     env_seed = None
-  fns = [bind(make_env, i) for i in range(1)]  # Single env for trajectory recording
+  # Compute the actual world seed that crafter uses internally:
+  # crafter.Env.reset() derives seed as hash((self._seed, self._episode))
+  # With fixed_seed=True, _episode is always reset to 0 before reset(),
+  # so the world seed is hash((env_seed, 1)) since reset increments first.
+  if env_seed is not None:
+    world_seed = hash((env_seed, 1))
+  else:
+    world_seed = None
+  fns = [bind(make_env, i, fixed_seed=True) for i in range(1)]  # Single env for trajectory recording
   driver = embodied.Driver(fns, parallel=False) #CONTROLLER
   driver.on_step(logfn) #logfn is a callback
 
@@ -115,13 +123,16 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   save_data = {
       'episodes': completed_episodes,
       'env_seed': env_seed,
+      'world_seed': world_seed,
+      'fixed_seed': True,
       'task': 'crafter',  # For now assume crafter
   }
   with open(str(all_file), 'wb') as f:
     pickle.dump(save_data, f)
   print(f"\nSaved all {len(completed_episodes)} episodes to {all_file}")
-  if env_seed:
+  if env_seed is not None:
     print(f"Environment seed: {env_seed}")
+    print(f"World seed (all episodes): {world_seed}")
 
   # Print summary
   print("\n=== Trajectory Recording Summary ===")
