@@ -17,20 +17,34 @@ python dreamerv3/main.py \
 
 **Generate evaluation trajectories from a checkpoint:**
 
+Checkpoints are saved as timestamped directories under `<logdir>/ckpt/`. You must
+pass the **full checkpoint directory path** (not the `latest` file) to
+`--run.from_checkpoint`. On a local machine without a GPU, add `--jax.platform cpu`.
+
 ```sh
+# Example using the crafter_small_1m checkpoint:
 python dreamerv3/main.py \
-  --configs crafter \
-  --logdir ./logdir/crafter_run1 \
+  --configs crafter_small size1m \
+  --logdir ./logdir/crafter_small_1m \
   --script eval_trajectory \
-  --run.from_checkpoint ./logdir/crafter_run1/checkpoint.ckpt \
+  --run.from_checkpoint ./logdir/crafter_small_1m/ckpt/20260129T183613F519148 \
   --eval_trajectory.num_episodes 5 \
-  --eval_trajectory.save_path ./trajectories
+  --eval_trajectory.save_path ./logdir/crafter_small_1m/trajectories \
+  --seed 42 \
+  --jax.platform cpu
 ```
+
+> **Note:** The default `jax.platform` is `cuda`. When running locally on a CPU-only
+> or Apple Silicon machine, you **must** pass `--jax.platform cpu` or the JAX backend
+> will fail to initialize. This applies to all scripts (train, eval, plot).
 
 **Plot trajectory visualizations:**
 
 ```sh
-python dreamerv3/plot_trajectories.py --data ./trajectories --plot all --save ./plots
+python dreamerv3/plot_trajectories.py \
+  --data ./logdir/crafter_small_1m/trajectories \
+  --plot all \
+  --save ./logdir/crafter_small_1m/plots
 ```
 
 ![DreamerV3 Tasks](https://user-images.githubusercontent.com/2111293/217647148-cbc522e2-61ad-4553-8e14-1ecdc8d9438b.gif)
