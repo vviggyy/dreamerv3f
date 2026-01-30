@@ -96,7 +96,7 @@ env:
     sticky: false
   crafter:
     area: [32, 32]
-    fixed_seed: false
+    fixed_seed: true
     logs: false
     size: [64, 64]
     use_seed: true
@@ -124,6 +124,7 @@ env:
     resize: pillow
     size: [96, 96]
 errfile: false
+eval_trajectory: {num_episodes: 100, save_path: ''}
 ipv6: false
 jax:
   compute_dtype: bfloat16
