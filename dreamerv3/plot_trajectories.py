@@ -248,7 +248,8 @@ def _render_crafter_world(metadata=None, tile_size=8):
         print("No env_seed in metadata, using seed=42 (world may not match)")
         env_seed = 42
 
-    env = crafter.Env(area=(64, 64), view=(9, 9), size=(64, 64), seed=env_seed)
+    area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
+    env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
     env.reset()
 
     world = env._world

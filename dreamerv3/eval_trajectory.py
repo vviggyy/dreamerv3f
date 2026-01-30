@@ -93,6 +93,10 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     env_seed = env._seed
   except (AttributeError, ValueError):
     env_seed = None
+  try:
+    area = tuple(env._env._world._mat_map.shape)
+  except (AttributeError, ValueError):
+    area = None
   # Compute the actual world seed that crafter uses internally:
   # crafter.Env.reset() derives seed as hash((self._seed, self._episode))
   # With fixed_seed=True, _episode is always reset to 0 before reset(),
@@ -126,6 +130,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       'world_seed': world_seed,
       'fixed_seed': True,
       'task': 'crafter',  # For now assume crafter
+      'area': area,
   }
   with open(str(all_file), 'wb') as f:
     pickle.dump(save_data, f)
