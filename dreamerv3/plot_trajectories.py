@@ -55,8 +55,26 @@ def load_episodes(data_path):
     return episodes, None
 
 
+def _filter_valid_episodes(episodes, context=''):
+    """Filter out episodes with missing or empty player_pos. Returns valid list."""
+    valid = []
+    for i, ep in enumerate(episodes):
+        pp = ep.get('player_pos')
+        if pp is None or len(pp) == 0:
+            print(f"WARNING: Skipping episode {ep.get('episode', i)} — "
+                  f"empty player_pos{' in ' + context if context else ''}")
+            continue
+        valid.append(ep)
+    return valid
+
+
 def plot_trajectories(episodes, save_path=None):
     """Plot all episode trajectories overlaid on a single plot."""
+    episodes = _filter_valid_episodes(episodes, 'plot_trajectories')
+    if not episodes:
+        print("No valid episodes to plot.")
+        return
+
     fig, ax = plt.subplots(figsize=(10, 10))
 
     colors = plt.cm.tab10(np.linspace(0, 1, len(episodes)))
@@ -91,6 +109,11 @@ def plot_trajectories(episodes, save_path=None):
 
 def plot_trajectory_heatmap(episodes, save_path=None):
     """Plot position heatmap across all episodes."""
+    episodes = _filter_valid_episodes(episodes, 'plot_trajectory_heatmap')
+    if not episodes:
+        print("No valid episodes for heatmap.")
+        return
+
     # Collect all positions
     all_pos = np.concatenate([ep['player_pos'] for ep in episodes], axis=0)
 
@@ -118,6 +141,11 @@ def plot_trajectory_heatmap(episodes, save_path=None):
 
 def plot_activation_by_position(episodes, unit_idx=0, layer='deter', save_path=None):
     """Plot activation of a specific unit as a function of position."""
+    episodes = _filter_valid_episodes(episodes, 'plot_activation_by_position')
+    if not episodes:
+        print("No valid episodes for activation plot.")
+        return
+
     if layer not in episodes[0]:
         print(f"Layer '{layer}' not found in data. Available: {list(episodes[0].keys())}")
         return
@@ -160,6 +188,11 @@ def plot_activation_by_position(episodes, unit_idx=0, layer='deter', save_path=N
 
 def plot_world_overlay(episodes, tile_size=7, save_path=None):
     """Plot trajectories overlaid on stitched world view from observations."""
+    episodes = _filter_valid_episodes(episodes, 'plot_world_overlay')
+    if not episodes:
+        print("No valid episodes for world overlay.")
+        return
+
     # Collect all positions and images
     all_pos = []
     all_imgs = []
@@ -286,6 +319,11 @@ def _render_crafter_world(metadata=None, tile_size=8):
 
 def plot_fullworld_overlay(episodes, metadata=None, tile_size=8, save_path=None):
     """Plot trajectories on full Crafter world map."""
+    episodes = _filter_valid_episodes(episodes, 'plot_fullworld_overlay')
+    if not episodes:
+        print("No valid episodes for fullworld overlay.")
+        return
+
     world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
     if world_img is None:
         return
@@ -321,6 +359,11 @@ def animate_trajectories(episodes, save_path=None, fps=30, trail_length=40):
     a bright dot with a trailing line that fades and thins behind it. Previous
     episodes remain as faint traces so context accumulates.
     """
+    episodes = _filter_valid_episodes(episodes, 'animate_trajectories')
+    if not episodes:
+        print("No valid episodes for animation.")
+        return
+
     # Build a single timeline: list of (x, y, episode_idx) per frame
     timeline_x, timeline_y, timeline_ep = [], [], []
     ep_boundaries = [0]  # frame index where each episode starts
@@ -434,6 +477,11 @@ def animate_trajectories(episodes, save_path=None, fps=30, trail_length=40):
 def animate_fullworld_trajectories(episodes, metadata=None, tile_size=8,
                                    save_path=None, fps=30, trail_length=40):
     """Animate agent on the full Crafter world map with a fading trail."""
+    episodes = _filter_valid_episodes(episodes, 'animate_fullworld_trajectories')
+    if not episodes:
+        print("No valid episodes for fullworld animation.")
+        return
+
     world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
     if world_img is None:
         return
@@ -458,6 +506,10 @@ def animate_fullworld_trajectories(episodes, metadata=None, tile_size=8,
     timeline_y = np.array(timeline_y)
     timeline_ep = np.array(timeline_ep)
     total_frames = len(timeline_x)
+
+    if total_frames == 0:
+        print("No player_pos data found in episodes, skipping animation.")
+        return
 
     # Figure — crop to visited region with some padding
     pad_px = tile_size * 6
@@ -552,6 +604,11 @@ def animate_fullworld_trajectories(episodes, metadata=None, tile_size=8,
 
 def find_spatial_units(episodes, layer='deter', top_k=10):
     """Find units most correlated with position."""
+    episodes = _filter_valid_episodes(episodes, 'find_spatial_units')
+    if not episodes:
+        print("No valid episodes for spatial analysis.")
+        return None
+
     if layer not in episodes[0]:
         print(f"Layer '{layer}' not found in data.")
         return None
@@ -605,6 +662,14 @@ def main():
     print(f"Loading episodes from {args.data}")
     episodes, metadata = load_episodes(args.data)
     print(f"Loaded {len(episodes)} episodes")
+    if not episodes:
+        print("ERROR: No episodes found. Check that --data points to a "
+              "directory containing all_episodes.pkl or episode_*.pkl files.")
+        return
+    for i, ep in enumerate(episodes):
+        pp = ep.get('player_pos')
+        shape = pp.shape if pp is not None else 'MISSING'
+        print(f"  Episode {i}: player_pos shape={shape}, keys={list(ep.keys())}")
     if metadata:
         print(f"Metadata: {metadata}")
 

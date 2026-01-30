@@ -16,6 +16,8 @@ Usage:
 from collections import defaultdict
 from functools import partial as bind
 import pickle
+import signal
+import sys
 
 import elements
 import embodied
@@ -114,27 +116,65 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   cp.agent = agent
   cp.load(args.from_checkpoint, keys=['agent'])
 
+  def _save_results(tag=''):
+    """Save all completed episodes to disk. Called on success, crash, or signal."""
+    if not completed_episodes:
+      print(f"WARNING: No completed episodes to save{tag}.")
+      return
+
+    # Validate episodes before saving
+    valid_episodes = []
+    for i, ep in enumerate(completed_episodes):
+      pp = ep.get('player_pos')
+      if pp is None or len(pp) == 0:
+        print(f"WARNING: Episode {ep.get('episode', i)} has empty player_pos, skipping.")
+        continue
+      valid_episodes.append(ep)
+
+    if not valid_episodes:
+      print(f"WARNING: All {len(completed_episodes)} episodes had empty player_pos, nothing to save.")
+      return
+
+    all_file = save_path / 'all_episodes.pkl'
+    save_data = {
+        'episodes': valid_episodes,
+        'env_seed': env_seed,
+        'world_seed': world_seed,
+        'fixed_seed': True,
+        'task': 'crafter',
+        'area': area,
+    }
+    with open(str(all_file), 'wb') as f:
+      pickle.dump(save_data, f)
+    print(f"\nSaved {len(valid_episodes)} episodes to {all_file}{tag}")
+
+  # Signal handler for SIGTERM (SLURM sends this before killing)
+  def _sigterm_handler(signum, _frame):
+    print(f"\nReceived signal {signum}, saving partial results...")
+    _save_results(tag=' (partial, interrupted by signal)')
+    sys.exit(1)
+
+  signal.signal(signal.SIGTERM, _sigterm_handler)
+
   print('Start trajectory recording')
   policy = lambda *args: agent.policy(*args, mode='eval')
   driver.reset(agent.init_policy)
 
-  # Run until we have enough episodes
-  while episode_count[0] < num_episodes:
-    driver(policy, steps=100)
+  # Run until we have enough episodes, with crash resilience
+  try:
+    while episode_count[0] < num_episodes:
+      driver(policy, steps=100)
+      print(f"  Progress: {episode_count[0]}/{num_episodes} episodes completed",
+            end='\r', flush=True)
+    print()  # newline after progress
+  except Exception as e:
+    print(f"\nERROR during recording: {e}")
+    _save_results(tag=' (partial, crashed)')
+    raise
 
-  # Save all episodes together with metadata
-  all_file = save_path / 'all_episodes.pkl'
-  save_data = {
-      'episodes': completed_episodes,
-      'env_seed': env_seed,
-      'world_seed': world_seed,
-      'fixed_seed': True,
-      'task': 'crafter',  # For now assume crafter
-      'area': area,
-  }
-  with open(str(all_file), 'wb') as f:
-    pickle.dump(save_data, f)
-  print(f"\nSaved all {len(completed_episodes)} episodes to {all_file}")
+  # Save final results
+  _save_results()
+
   if env_seed is not None:
     print(f"Environment seed: {env_seed}")
     print(f"World seed (all episodes): {world_seed}")
