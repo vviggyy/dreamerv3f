@@ -350,6 +350,124 @@ def plot_decoder_probmap(proba_all, pos, groups, layer_name, save_dir,
     print(f"  Saved probmap_{layer_name}_ep{episode+1}.png")
 
 
+def plot_probmap_on_world(proba_all, pos, groups, metadata, layer_name,
+                          save_dir, n_steps=12, episode=0, tile_size=8):
+    """Overlay decoder P(position) heatmap on the rendered Crafter world map.
+
+    For evenly-spaced timesteps from one episode, shows:
+      - Crafter world map as background
+      - Semi-transparent probability mass field from classification decoder
+      - Agent trajectory drawn up to that timestep
+      - Cyan circle at true position, lime star at argmax decoded position
+    """
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from plot_trajectories import _render_crafter_world
+
+    world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
+    if world_img is None:
+        print("Could not render world for probmap overlay — skipping")
+        return
+    img_h, img_w = world_img.shape[:2]
+
+    ep_mask = groups == episode
+    ep_proba = proba_all[ep_mask]   # (T_ep, width, height)
+    ep_pos = pos[ep_mask]
+    T = len(ep_proba)
+    if T == 0:
+        print(f"  No data for episode {episode}, skipping probmap_on_world")
+        return
+    step_indices = np.linspace(0, T - 1, n_steps, dtype=int)
+
+    def pos_to_px(p):
+        """Convert grid (x, y) positions to pixel coords on world image."""
+        px = p[:, 0] * tile_size + tile_size // 2
+        py = img_h - (p[:, 1] * tile_size + tile_size // 2)
+        return px, py
+
+    # Zoom bounds from trajectory extent
+    all_px, all_py = pos_to_px(ep_pos)
+    pad = tile_size * 5
+    x_lo = max(0, all_px.min() - pad)
+    x_hi = min(img_w, all_px.max() + pad)
+    y_lo = max(0, all_py.min() - pad)
+    y_hi = min(img_h, all_py.max() + pad)
+
+    ncols = min(4, n_steps)
+    nrows = int(np.ceil(n_steps / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows),
+                             facecolor='#1a1a1a')
+    axes = np.atleast_2d(axes)
+
+    cmap = plt.cm.magma
+
+    for idx, ax in enumerate(axes.flat):
+        ax.set_facecolor('#1a1a1a')
+        if idx >= n_steps:
+            ax.axis('off')
+            continue
+        t = step_indices[idx]
+        p_grid = ep_proba[t]  # (width, height)
+
+        # World background (dimmed slightly so overlay pops)
+        ax.imshow((world_img * 0.6).astype(np.uint8))
+
+        # Upscale probability grid to pixel resolution, then apply same
+        # transpose + y-flip used by _render_crafter_world
+        p_up = np.repeat(np.repeat(p_grid, tile_size, axis=0),
+                         tile_size, axis=1)
+        p_up = p_up.T[::-1]
+        p_max = p_up.max()
+        if p_max > 0:
+            p_norm = p_up / p_max
+        else:
+            p_norm = p_up
+        overlay_rgba = cmap(p_norm)            # (H, W, 4)
+        overlay_rgba[..., 3] = p_norm * 0.85   # alpha ∝ probability
+        ax.imshow(overlay_rgba)
+
+        # Trajectory up to this timestep
+        traj_px, traj_py = pos_to_px(ep_pos[:t + 1])
+        if len(traj_px) > 1:
+            ax.plot(traj_px, traj_py, '-', color='white', linewidth=1.5,
+                    alpha=0.6, zorder=3, label='trajectory' if idx == 0 else '')
+
+        # True position marker
+        tx, ty = pos_to_px(ep_pos[t:t + 1])
+        ax.plot(tx, ty, 'o', color='cyan', markersize=8,
+                markeredgecolor='white', markeredgewidth=1.2, zorder=5,
+                label='true' if idx == 0 else '')
+
+        # Argmax decoded position marker
+        dec_x, dec_y = np.unravel_index(p_grid.argmax(), p_grid.shape)
+        dec_pos = np.array([[dec_x, dec_y]], dtype=float)
+        dpx, dpy = pos_to_px(dec_pos)
+        ax.plot(dpx, dpy, '*', color='lime', markersize=11,
+                markeredgecolor='white', markeredgewidth=0.7, zorder=5,
+                label='decoded' if idx == 0 else '')
+
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_hi, y_lo)  # y-down for imshow
+        ax.set_title(f't={t}', fontsize=9, fontweight='bold',
+                     color='white',
+                     bbox=dict(facecolor='black', alpha=0.6, pad=2))
+        ax.axis('off')
+        if idx == 0:
+            ax.legend(fontsize=7, loc='upper left',
+                      facecolor='black', edgecolor='grey',
+                      labelcolor='white')
+
+    fig.suptitle(
+        f'Decoder P(pos) on world — {layer_name}, '
+        f'episode {episode + 1} (seed={env_seed})',
+        fontsize=13, color='white')
+    fig.tight_layout()
+    out = save_dir / f'probmap_world_{layer_name}_ep{episode + 1}.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='#1a1a1a')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
 def plot_per_neuron(r2_deter, r2_stoch, save_dir):
     """Scatter of per-neuron R² for x and y, for deter and stoch."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -515,6 +633,10 @@ if __name__ == '__main__':
                         plot_decoder_probmap(
                             proba, pos, groups, name, save_dir,
                             n_steps=12, episode=ep_idx)
+                        # Probability field overlaid on rendered world map
+                        plot_probmap_on_world(
+                            proba, pos, groups, metadata, name,
+                            save_dir, n_steps=12, episode=ep_idx)
 
     # Save numerical results
     results_file = save_dir / 'decode_results.pkl'
