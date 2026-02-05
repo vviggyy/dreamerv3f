@@ -46,6 +46,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   episode_data = defaultdict(list)
   completed_episodes = []
   episode_count = [0]  # Use list for mutability in closure
+  prev_achievements = {}  # Track previous achievement counts to detect new unlocks
 
   def logfn(tran, worker): #OBSERVER
     if worker != 0:
@@ -54,12 +55,32 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     # Start new episode
     if tran['is_first']:
       episode_data.clear()
+      prev_achievements.clear()
+      print(f"\n--- Episode {episode_count[0] + 1} started ---")
 
     # Record trajectory data
     episode_data['player_pos'].append(tran['player_pos'].copy())
     episode_data['reward'].append(float(tran['reward']))
     episode_data['action'].append(tran.get('action', 0))
     episode_data['image'].append(tran['image'].copy())
+
+    # Track achievements and print when new ones are unlocked
+    current_achievements = {}
+    for key in tran:
+      if key.startswith('achievement_'):
+        achievement_name = key[len('achievement_'):]
+        count = int(tran[key])
+        current_achievements[achievement_name] = count
+        # Check if this is a new unlock (count increased)
+        prev_count = prev_achievements.get(achievement_name, 0)
+        if count > prev_count:
+          step = len(episode_data['player_pos'])
+          print(f"  Step {step}: {achievement_name} (+{count - prev_count}, total: {count})")
+    prev_achievements.update(current_achievements)
+
+    # Store final achievement counts for this step
+    if current_achievements:
+      episode_data['achievements'].append(current_achievements.copy())
 
     # Record world model activations if available
     if 'dyn/deter' in tran:
@@ -72,15 +93,28 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       episode_count[0] += 1
       ep_num = episode_count[0]
 
-      # Convert lists to arrays
-      ep_result = {k: np.array(v) for k, v in episode_data.items()}
+      # Convert lists to arrays (except achievements which stays as list of dicts)
+      ep_result = {}
+      for k, v in episode_data.items():
+        if k == 'achievements':
+          ep_result[k] = v  # Keep as list of dicts
+        else:
+          ep_result[k] = np.array(v)
       ep_result['episode'] = ep_num
       ep_result['length'] = len(episode_data['player_pos'])
       ep_result['total_reward'] = sum(episode_data['reward'])
+      ep_result['final_achievements'] = current_achievements.copy()
+
+      # Summarize achievements for this episode
+      unlocked = {k: v for k, v in current_achievements.items() if v > 0}
+      print(f"Episode {ep_num} finished: length={ep_result['length']}, "
+            f"reward={ep_result['total_reward']:.1f}")
+      if unlocked:
+        print(f"  Achievements: {unlocked}")
+      else:
+        print(f"  Achievements: none")
 
       completed_episodes.append(ep_result)
-      print(f"Episode {ep_num}: length={ep_result['length']}, "
-            f"reward={ep_result['total_reward']:.1f}")
 
       # Save intermediate results
       if ep_num <= num_episodes:
@@ -187,10 +221,39 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   print(f"Avg length: {np.mean(lengths):.1f} +/- {np.std(lengths):.1f}")
   print(f"Avg reward: {np.mean(rewards):.1f} +/- {np.std(rewards):.1f}")
 
+  # Aggregate achievement stats
+  if completed_episodes and 'final_achievements' in completed_episodes[0]:
+    print("\n=== Achievement Summary ===")
+    all_achievements = defaultdict(list)
+    for ep in completed_episodes:
+      for k, v in ep.get('final_achievements', {}).items():
+        all_achievements[k].append(v)
+
+    # Sort by average count (most common first)
+    sorted_achievements = sorted(
+        all_achievements.items(),
+        key=lambda x: np.mean(x[1]),
+        reverse=True
+    )
+
+    # Print achievements that were unlocked at least once
+    unlocked_any = [(k, v) for k, v in sorted_achievements if sum(v) > 0]
+    never_unlocked = [k for k, v in sorted_achievements if sum(v) == 0]
+
+    if unlocked_any:
+      print("Achieved (avg count across episodes):")
+      for name, counts in unlocked_any:
+        avg = np.mean(counts)
+        times_unlocked = sum(1 for c in counts if c > 0)
+        print(f"  {name}: {avg:.1f} avg ({times_unlocked}/{len(counts)} episodes)")
+
+    if never_unlocked:
+      print(f"\nNever achieved: {', '.join(never_unlocked)}")
+
   if completed_episodes and 'deter' in completed_episodes[0]:
-    print(f"Deter shape per step: {completed_episodes[0]['deter'].shape[1:]}")
+    print(f"\nDeter shape per step: {completed_episodes[0]['deter'].shape[1:]}")
     print(f"Stoch shape per step: {completed_episodes[0]['stoch'].shape[1:]}")
   else:
-    print("Note: World model activations not recorded (enable replay_context)")
+    print("\nNote: World model activations not recorded (enable replay_context)")
 
   logger.close()

@@ -35,6 +35,10 @@ class Crafter(embodied.Env):
         'log/reward': elements.Space(np.float32),
         'player_pos': elements.Space(np.float32, (2,)),
     }
+    # Always include achievements for trajectory analysis
+    spaces.update({
+        f'achievement_{k}': elements.Space(np.int32)
+        for k in self._achievements})
     if self._logs:
       spaces.update({
           f'log/achievement_{k}': elements.Space(np.int32)
@@ -87,6 +91,11 @@ class Crafter(embodied.Env):
         player_pos=player_pos,
         **{'log/reward': np.float32(info['reward'] if info else 0.0)},
     )
+    # Always include achievements for trajectory analysis
+    achievements = {
+        f'achievement_{k}': np.int32(info['achievements'][k] if info else 0)
+        for k in self._achievements}
+    obs.update(achievements)
     if self._logs:
       log_achievements = {
           f'log/achievement_{k}': info['achievements'][k] if info else 0
