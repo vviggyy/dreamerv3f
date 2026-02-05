@@ -544,6 +544,9 @@ if __name__ == '__main__':
     parser.add_argument('--method', default='both', choices=['classification', 'regression', 'both'])
     parser.add_argument('--n_iters', type=int, default=5000,
                         help='Training iterations for classification decoder')
+    parser.add_argument('--repr', default='all',
+                        choices=['deter', 'stoch', 'combined', 'all'],
+                        help='Which representation to decode (default: all three)')
     parser.add_argument('--per_neuron', action='store_true', default=True,
                         help='Run per-neuron R² analysis (regression only)')
     parser.add_argument('--no_per_neuron', dest='per_neuron', action='store_false')
@@ -576,7 +579,12 @@ if __name__ == '__main__':
         height = int(pos[:, 1].max()) + 1
     print(f"  Grid: {width}x{height} ({width*height} cells)")
 
-    representations = {'deter': deter, 'stoch': stoch, 'combined': combined}
+    all_representations = {'deter': deter, 'stoch': stoch, 'combined': combined}
+    if args.repr == 'all':
+        representations = all_representations
+    else:
+        representations = {args.repr: all_representations[args.repr]}
+    print(f"  Representations: {list(representations.keys())}")
 
     # ---- Ridge regression ----
     if args.method in ('regression', 'both'):
@@ -594,25 +602,31 @@ if __name__ == '__main__':
 
         # Per-neuron analysis
         if args.per_neuron:
-            print("\n--- Per-neuron R² (deter) ---")
-            r2_deter = per_neuron_r2(deter, pos, groups)
-            r2_mean_d = r2_deter.mean(axis=1)
-            top5_d = np.argsort(r2_mean_d)[::-1][:5]
-            for j in top5_d:
-                print(f"  deter[{j}]: R²_x={r2_deter[j,0]:.4f}  "
-                      f"R²_y={r2_deter[j,1]:.4f}  mean={r2_mean_d[j]:.4f}")
+            r2_deter = r2_stoch = None
+            if 'deter' in representations:
+                print("\n--- Per-neuron R² (deter) ---")
+                r2_deter = per_neuron_r2(deter, pos, groups)
+                r2_mean_d = r2_deter.mean(axis=1)
+                top5_d = np.argsort(r2_mean_d)[::-1][:5]
+                for j in top5_d:
+                    print(f"  deter[{j}]: R²_x={r2_deter[j,0]:.4f}  "
+                          f"R²_y={r2_deter[j,1]:.4f}  mean={r2_mean_d[j]:.4f}")
 
-            print("\n--- Per-neuron R² (stoch) ---")
-            r2_stoch = per_neuron_r2(stoch, pos, groups)
-            r2_mean_s = r2_stoch.mean(axis=1)
-            top5_s = np.argsort(r2_mean_s)[::-1][:5]
-            for j in top5_s:
-                print(f"  stoch[{j}]: R²_x={r2_stoch[j,0]:.4f}  "
-                      f"R²_y={r2_stoch[j,1]:.4f}  mean={r2_mean_s[j]:.4f}")
+            if 'stoch' in representations:
+                print("\n--- Per-neuron R² (stoch) ---")
+                r2_stoch = per_neuron_r2(stoch, pos, groups)
+                r2_mean_s = r2_stoch.mean(axis=1)
+                top5_s = np.argsort(r2_mean_s)[::-1][:5]
+                for j in top5_s:
+                    print(f"  stoch[{j}]: R²_x={r2_stoch[j,0]:.4f}  "
+                          f"R²_y={r2_stoch[j,1]:.4f}  mean={r2_mean_s[j]:.4f}")
 
-            plot_per_neuron(r2_deter, r2_stoch, save_dir)
-            plot_top_neurons(r2_deter, 'deter', pos, deter, groups, save_dir)
-            plot_top_neurons(r2_stoch, 'stoch', pos, stoch, groups, save_dir)
+            if r2_deter is not None and r2_stoch is not None:
+                plot_per_neuron(r2_deter, r2_stoch, save_dir)
+            if r2_deter is not None:
+                plot_top_neurons(r2_deter, 'deter', pos, deter, groups, save_dir)
+            if r2_stoch is not None:
+                plot_top_neurons(r2_stoch, 'stoch', pos, stoch, groups, save_dir)
 
     # ---- Classification (pRNN-style) ----
     if args.method in ('classification', 'both'):
@@ -652,8 +666,10 @@ if __name__ == '__main__':
             for name, res in reg_results.items()
         }
         if args.per_neuron:
-            save_data['per_neuron_r2_deter'] = r2_deter
-            save_data['per_neuron_r2_stoch'] = r2_stoch
+            if r2_deter is not None:
+                save_data['per_neuron_r2_deter'] = r2_deter
+            if r2_stoch is not None:
+                save_data['per_neuron_r2_stoch'] = r2_stoch
     with open(results_file, 'wb') as f:
         pickle.dump(save_data, f)
     print(f"\nResults saved to {results_file}")
