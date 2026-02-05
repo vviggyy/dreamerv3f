@@ -6,6 +6,7 @@
 - `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size1m`, `debug`
 - `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl
 - `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, animations
+- `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch
 - `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world
 - `embodied/jax/agent.py` — JAX Agent.__new__ calls internal.setup() then __init__. Line 72: jax.devices()
 - `embodied/jax/internal.py` — setup() sets jax platform, XLA flags. Line 34: `platform and jax.config.update('jax_platforms', platform)`
@@ -43,6 +44,15 @@ MPLBACKEND=Agg python dreamerv3/plot_trajectories.py \
   --data ./logdir/crafter_small_1m/trajectories --plot all --save ./logdir/crafter_small_1m/plots
 ```
 Drop MPLBACKEND=Agg if running with display. Plot types: trajectories, heatmap, activation, spatial, world, fullworld, animate, animate_world, all
+
+### decode position
+```
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./logdir/crafter_small_1m/trajectories \
+  --save ./logdir/crafter_small_1m/decoder_results \
+  --method both
+```
+Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis.
 
 ### tests
 ```

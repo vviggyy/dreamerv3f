@@ -145,7 +145,8 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000):
     """Leave-one-episode-out classification decoding (pRNN-style).
 
     Position (x,y) is linearized into width*height classes.  Returns
-    per-fold Manhattan distance errors and a shuffle baseline.
+    per-fold Manhattan distance errors, shuffle baseline, and softmax
+    probabilities reshaped to (N, width, height).
     """
     pos_int = pos.astype(int)
     pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
@@ -156,6 +157,7 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000):
     all_errors, all_shuffle = [], []
     pred_all = np.zeros_like(pos_int)
     true_all = pos_int.copy()
+    proba_all = np.zeros((len(pos), width, height), dtype=np.float32)
 
     for fold, (train_idx, test_idx) in enumerate(logo.split(X, y_cls, groups)):
         print(f"  Classification fold {fold+1} "
@@ -163,6 +165,7 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000):
         clf = LinearClassifier(X.shape[1], width * height)
         clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
         pred_cls = clf.predict(X[test_idx])
+        proba = clf.predict_proba(X[test_idx])  # (N_test, width*height)
         pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
         true_xy = pos_int[test_idx]
         err = np.sum(np.abs(pred_xy - true_xy), axis=1)  # Manhattan
@@ -173,8 +176,9 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000):
         all_errors.append(err)
         all_shuffle.append(shuf)
         pred_all[test_idx] = pred_xy
+        proba_all[test_idx] = proba.reshape(-1, width, height)
     return (np.concatenate(all_errors), np.concatenate(all_shuffle),
-            pred_all, true_all)
+            pred_all, true_all, proba_all)
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +290,64 @@ def plot_classification_summary(errors, shuffle, layer_name, save_dir):
     fig.savefig(save_dir / f'classification_{layer_name}.png', dpi=150)
     plt.close(fig)
     print(f"  Saved classification_{layer_name}.png")
+
+
+def plot_decoder_probmap(proba_all, pos, groups, layer_name, save_dir,
+                         n_steps=12, episode=0):
+    """Show decoder softmax probability over the grid with true agent position.
+
+    Picks evenly-spaced timesteps from one episode and plots:
+      - Heatmap of P(position) from the classification decoder
+      - Red dot at the agent's true (x, y)
+      - White star at the argmax decoded position
+    """
+    ep_mask = groups == episode
+    ep_proba = proba_all[ep_mask]   # (T_ep, width, height)
+    ep_pos = pos[ep_mask].astype(int)
+    T = len(ep_proba)
+    step_indices = np.linspace(0, T - 1, n_steps, dtype=int)
+
+    ncols = min(6, n_steps)
+    nrows = int(np.ceil(n_steps / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2 * ncols, 3.2 * nrows))
+    axes = np.atleast_2d(axes)
+
+    # Compute shared extent from occupied positions (zoom to relevant region)
+    x_min, x_max = int(pos[:, 0].min()) - 1, int(pos[:, 0].max()) + 2
+    y_min, y_max = int(pos[:, 1].min()) - 1, int(pos[:, 1].max()) + 2
+
+    for idx, ax in enumerate(axes.flat):
+        if idx >= n_steps:
+            ax.axis('off')
+            continue
+        t = step_indices[idx]
+        p_grid = ep_proba[t]  # (width, height)
+        # Crop to occupied region for visibility
+        p_crop = p_grid[x_min:x_max, y_min:y_max]
+        im = ax.imshow(p_crop.T, origin='lower', aspect='equal',
+                       cmap='hot', interpolation='nearest',
+                       extent=[x_min, x_max, y_min, y_max])
+        # True position
+        tx, ty = ep_pos[t]
+        ax.plot(tx + 0.5, ty + 0.5, 'o', color='cyan', markersize=7,
+                markeredgecolor='white', markeredgewidth=1.0, label='true')
+        # Argmax decoded position
+        dec_x, dec_y = np.unravel_index(p_grid.argmax(), p_grid.shape)
+        ax.plot(dec_x + 0.5, dec_y + 0.5, '*', color='lime', markersize=9,
+                markeredgecolor='white', markeredgewidth=0.5, label='decoded')
+        ax.set_title(f't={t}', fontsize=8)
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.tick_params(labelsize=6)
+        if idx == 0:
+            ax.legend(fontsize=6, loc='upper left')
+
+    fig.suptitle(f'Decoder P(pos) — {layer_name}, episode {episode+1}',
+                 fontsize=12)
+    fig.tight_layout()
+    fig.savefig(save_dir / f'probmap_{layer_name}_ep{episode+1}.png', dpi=150)
+    plt.close(fig)
+    print(f"  Saved probmap_{layer_name}_ep{episode+1}.png")
 
 
 def plot_per_neuron(r2_deter, r2_stoch, save_dir):
@@ -442,11 +504,17 @@ if __name__ == '__main__':
             print("\n=== Classification Decoding (pRNN-style) ===")
             for name, X in representations.items():
                 print(f"\n--- {name} ({X.shape[1]} dims) ---")
-                errors, shuffle, pred_xy, true_xy = classification_decode(
+                errors, shuffle, pred_xy, true_xy, proba = classification_decode(
                     X, pos, groups, width, height, n_iters=args.n_iters)
                 print(f"  Mean Manhattan error: {errors.mean():.3f} "
                       f"(shuffle: {shuffle.mean():.3f})")
                 plot_classification_summary(errors, shuffle, name, save_dir)
+                # Probability heatmap for each episode (deter only to avoid clutter)
+                if name == 'deter':
+                    for ep_idx in range(len(np.unique(groups))):
+                        plot_decoder_probmap(
+                            proba, pos, groups, name, save_dir,
+                            n_steps=12, episode=ep_idx)
 
     # Save numerical results
     results_file = save_dir / 'decode_results.pkl'
