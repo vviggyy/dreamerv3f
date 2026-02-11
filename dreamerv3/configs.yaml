@@ -50,6 +50,13 @@ defaults:
     num_episodes: 100
     save_path: ''
 
+  dream_decode:
+    num_batches: 5
+    decoder_model: ''
+    decoder_type: ridge
+    save_path: ''
+    num_episodes: 3
+
   run:
     steps: 1e10
     duration: 0

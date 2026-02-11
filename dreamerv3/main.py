@@ -65,6 +65,7 @@ def main(argv=None):
       consec_report=config.consec_report,
       replay_context=config.replay_context,
       eval_trajectory=config.eval_trajectory,
+      dream_decode=config.dream_decode,
   )
 
   if config.script == 'train':
@@ -99,6 +100,16 @@ def main(argv=None):
     eval_trajectory.eval_trajectory(
         bind(make_agent, config),
         bind(make_env, config),
+        bind(make_logger, config),
+        args)
+
+  elif config.script == 'dream_decode':
+    from . import dream_decode
+    dream_decode.dream_decode(
+        bind(make_agent, config),
+        bind(make_env, config),
+        bind(make_replay, config, 'replay'),
+        bind(make_stream, config),
         bind(make_logger, config),
         args)
 

@@ -182,6 +182,66 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000):
 
 
 # ---------------------------------------------------------------------------
+# Decoder model save/load (for dream_decode.py)
+# ---------------------------------------------------------------------------
+
+def train_full_ridge(X, pos):
+    """Train RidgeCV on ALL data (no CV split). Returns fitted model."""
+    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
+    model.fit(X, pos)
+    return model
+
+
+def save_decoder_model(model, metadata, path):
+    """Save a fitted decoder model + metadata to a pickle file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'wb') as f:
+        pickle.dump({'model': model, 'metadata': metadata}, f)
+    print(f"  Saved decoder model to {path}")
+
+
+def load_decoder_model(path):
+    """Load a decoder model + metadata from a pickle file.
+
+    Returns (model, metadata) dict.
+    """
+    with open(path, 'rb') as f:
+        data = pickle.load(f)
+    return data['model'], data['metadata']
+
+
+def save_classifier_model(clf, metadata, path):
+    """Save a LinearClassifier's state_dict + metadata."""
+    if not HAS_TORCH:
+        raise RuntimeError("torch required to save classifier")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        'state_dict': clf.model.state_dict(),
+        'metadata': metadata,
+    }
+    with open(path, 'wb') as f:
+        pickle.dump(state, f)
+    print(f"  Saved classifier model to {path}")
+
+
+def load_classifier_model(path):
+    """Load a LinearClassifier from saved state_dict + metadata.
+
+    Returns (clf, metadata).
+    """
+    if not HAS_TORCH:
+        raise RuntimeError("torch required to load classifier")
+    with open(path, 'rb') as f:
+        state = pickle.load(f)
+    meta = state['metadata']
+    clf = LinearClassifier(meta['n_units'], meta['n_classes'])
+    clf.model.load_state_dict(state['state_dict'])
+    return clf, meta
+
+
+# ---------------------------------------------------------------------------
 # Ridge regression decoder
 # ---------------------------------------------------------------------------
 
@@ -550,6 +610,8 @@ if __name__ == '__main__':
     parser.add_argument('--per_neuron', action='store_true', default=True,
                         help='Run per-neuron R² analysis (regression only)')
     parser.add_argument('--no_per_neuron', dest='per_neuron', action='store_false')
+    parser.add_argument('--save_model', action='store_true', default=False,
+                        help='Save trained decoder models (for dream_decode.py)')
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -651,6 +713,38 @@ if __name__ == '__main__':
                         plot_probmap_on_world(
                             proba, pos, groups, metadata, name,
                             save_dir, n_steps=12, episode=ep_idx)
+
+    # Save trained decoder models (for use by dream_decode.py)
+    if args.save_model:
+        print("\n=== Saving Decoder Models ===")
+        model_meta_base = {
+            'grid': (width, height),
+            'n_samples': len(pos),
+            'n_episodes': len(np.unique(groups)),
+        }
+
+        if args.method in ('regression', 'both'):
+            for name, X in representations.items():
+                meta = {**model_meta_base, 'repr_name': name,
+                        'n_features': X.shape[1], 'type': 'ridge'}
+                model = train_full_ridge(X, pos)
+                save_decoder_model(model, meta, save_dir / f'ridge_{name}.pkl')
+
+        if args.method in ('classification', 'both') and HAS_TORCH:
+            for name, X in representations.items():
+                meta = {**model_meta_base, 'repr_name': name,
+                        'n_features': X.shape[1], 'n_units': X.shape[1],
+                        'n_classes': width * height, 'width': width,
+                        'height': height, 'type': 'classifier'}
+                clf = LinearClassifier(X.shape[1], width * height)
+                print(f"  Training full classifier on {name}...")
+                clf.fit(X,
+                        np.ravel_multi_index(
+                            (pos.astype(int).clip(0, [width-1, height-1])[:, 0],
+                             pos.astype(int).clip(0, [width-1, height-1])[:, 1]),
+                            (width, height)),
+                        n_iters=args.n_iters, verbose=False)
+                save_classifier_model(clf, meta, save_dir / f'classifier_{name}.pkl')
 
     # Save numerical results
     results_file = save_dir / 'decode_results.pkl'
