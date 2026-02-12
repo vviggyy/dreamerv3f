@@ -25,6 +25,7 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from joblib import Parallel, delayed
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.model_selection import LeaveOneGroupOut
@@ -100,23 +101,25 @@ class LinearClassifier:
     """Single linear layer, no bias, CrossEntropyLoss -- mirrors pRNN's
     linearDecoder (LinearDecoder.py:15-102)."""
 
-    def __init__(self, n_units, n_classes, lr=1e-3, weight_decay=0.3):
+    def __init__(self, n_units, n_classes, lr=1e-3, weight_decay=0.3,
+                 device='cpu'):
         self.n_classes = n_classes
+        self.device = device
         self.model = nn.Sequential(nn.Linear(n_units, n_classes, bias=False))
+        self.model.to(device)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.loss_fn = nn.CrossEntropyLoss()
 
     def fit(self, X, y_idx, batch_frac=0.75, n_iters=5000, verbose=True):
         """Train on (X, y_idx) where y_idx are integer class labels."""
-        device = 'cpu'
-        self.model.to(device)
-        X_t = torch.tensor(X, dtype=torch.float32, device=device)
-        y_t = torch.tensor(y_idx, dtype=torch.long, device=device)
+        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        y_t = torch.tensor(y_idx, dtype=torch.long, device=self.device)
         N = X_t.shape[0]
         batch_size = max(1, int(batch_frac * N))
+        self.model.train()
         for step in range(n_iters):
-            idx = np.random.choice(N, batch_size, replace=False)
+            idx = torch.randint(N, (batch_size,), device=self.device)
             logits = self.model(X_t[idx])
             loss = self.loss_fn(logits, y_t[idx])
             self.optimizer.zero_grad()
@@ -129,24 +132,55 @@ class LinearClassifier:
         """Return predicted class indices."""
         self.model.eval()
         with torch.no_grad():
-            logits = self.model(torch.tensor(X, dtype=torch.float32))
-        return logits.argmax(dim=1).numpy()
+            logits = self.model(torch.tensor(
+                X, dtype=torch.float32, device=self.device))
+        return logits.argmax(dim=1).cpu().numpy()
 
     def predict_proba(self, X):
         """Return softmax probabilities (N, n_classes)."""
         self.model.eval()
         with torch.no_grad():
-            logits = self.model(torch.tensor(X, dtype=torch.float32))
+            logits = self.model(torch.tensor(
+                X, dtype=torch.float32, device=self.device))
             probs = torch.softmax(logits, dim=1)
-        return probs.numpy()
+        return probs.cpu().numpy()
 
 
-def classification_decode(X, pos, groups, width, height, n_iters=5000):
+def _classification_fold(fold, train_idx, test_idx, X, y_cls, pos_int,
+                         width, height, n_iters, device):
+    """Run a single classification fold. Returns (fold, test_idx, err, shuf,
+    pred_xy, proba) — designed to be called in parallel."""
+    print(f"  Classification fold {fold+1} "
+          f"(train={len(train_idx)}, test={len(test_idx)}, device={device})")
+    clf = LinearClassifier(X.shape[1], width * height, device=device)
+    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
+    pred_cls = clf.predict(X[test_idx])
+    proba = clf.predict_proba(X[test_idx])  # (N_test, width*height)
+    pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
+    true_xy = pos_int[test_idx]
+    err = np.sum(np.abs(pred_xy - true_xy), axis=1)  # Manhattan
+    shuf = np.sum(np.abs(
+        np.column_stack([np.random.randint(0, width, len(test_idx)),
+                         np.random.randint(0, height, len(test_idx))])
+        - true_xy), axis=1)
+    return fold, test_idx, err, shuf, pred_xy, proba
+
+
+def classification_decode(X, pos, groups, width, height, n_iters=5000,
+                          n_jobs=1, device='cpu'):
     """Leave-one-episode-out classification decoding (pRNN-style).
 
     Position (x,y) is linearized into width*height classes.  Returns
     per-fold Manhattan distance errors, shuffle baseline, and softmax
     probabilities reshaped to (N, width, height).
+
+    Args:
+        n_jobs: Number of parallel fold workers. Use -1 for all CPUs.
+            When using multiple GPUs, folds are round-robin assigned
+            across cuda:0, cuda:1, ... etc.
+        device: Base torch device ('cpu', 'cuda', 'cuda:0', etc.).
+            With n_jobs>1 and device='cuda', folds are distributed
+            across all available GPUs.
     """
     pos_int = pos.astype(int)
     pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
@@ -154,25 +188,31 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000):
     y_cls = np.ravel_multi_index((pos_int[:, 0], pos_int[:, 1]), (width, height))
 
     logo = LeaveOneGroupOut()
-    all_errors, all_shuffle = [], []
+    splits = list(logo.split(X, y_cls, groups))
+    n_folds = len(splits)
+
+    # Assign devices: round-robin across GPUs when using CUDA with parallelism
+    if HAS_TORCH and device.startswith('cuda') and n_jobs != 1:
+        n_gpus = torch.cuda.device_count()
+        devices = [f'cuda:{i % n_gpus}' for i in range(n_folds)]
+    else:
+        devices = [device] * n_folds
+
+    # Run folds in parallel (joblib spawns separate processes so each fold
+    # gets its own GPU memory; prefer='threads' would share GIL)
+    results = Parallel(n_jobs=n_jobs, prefer='loky')(
+        delayed(_classification_fold)(
+            fold, train_idx, test_idx, X, y_cls, pos_int,
+            width, height, n_iters, devices[fold])
+        for fold, (train_idx, test_idx) in enumerate(splits)
+    )
+
+    # Reassemble results
     pred_all = np.zeros_like(pos_int)
     true_all = pos_int.copy()
     proba_all = np.zeros((len(pos), width, height), dtype=np.float32)
-
-    for fold, (train_idx, test_idx) in enumerate(logo.split(X, y_cls, groups)):
-        print(f"  Classification fold {fold+1} "
-              f"(train={len(train_idx)}, test={len(test_idx)})")
-        clf = LinearClassifier(X.shape[1], width * height)
-        clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
-        pred_cls = clf.predict(X[test_idx])
-        proba = clf.predict_proba(X[test_idx])  # (N_test, width*height)
-        pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
-        true_xy = pos_int[test_idx]
-        err = np.sum(np.abs(pred_xy - true_xy), axis=1)  # Manhattan
-        shuf = np.sum(np.abs(
-            np.column_stack([np.random.randint(0, width, len(test_idx)),
-                             np.random.randint(0, height, len(test_idx))])
-            - true_xy), axis=1)
+    all_errors, all_shuffle = [], []
+    for fold, test_idx, err, shuf, pred_xy, proba in results:
         all_errors.append(err)
         all_shuffle.append(shuf)
         pred_all[test_idx] = pred_xy
@@ -245,23 +285,38 @@ def load_classifier_model(path):
 # Ridge regression decoder
 # ---------------------------------------------------------------------------
 
-def ridge_decode_cv(X, pos, groups):
-    """Leave-one-episode-out Ridge regression.  Returns R², MAE per fold
-    and overall, plus per-neuron R² (univariate decoding per feature)."""
-    logo = LeaveOneGroupOut()
-    fold_r2, fold_mae = [], []
-    pred_all = np.zeros_like(pos)
+def _ridge_fold(fold, train_idx, test_idx, X, pos):
+    """Run a single Ridge CV fold. Returns (fold, test_idx, pred, r2, mae)."""
+    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
+    model.fit(X[train_idx], pos[train_idx])
+    pred = model.predict(X[test_idx])
+    r2 = r2_score(pos[test_idx], pred, multioutput='uniform_average')
+    mae = mean_absolute_error(pos[test_idx], pred)
+    print(f"  Fold {fold+1}: R²={r2:.4f}  MAE={mae:.3f}")
+    return fold, test_idx, pred, r2, mae
 
-    for fold, (train_idx, test_idx) in enumerate(logo.split(X, pos, groups)):
-        model = RidgeCV(alphas=np.logspace(-2, 4, 20))
-        model.fit(X[train_idx], pos[train_idx])
-        pred = model.predict(X[test_idx])
+
+def ridge_decode_cv(X, pos, groups, n_jobs=1):
+    """Leave-one-episode-out Ridge regression.  Returns R², MAE per fold
+    and overall, plus per-neuron R² (univariate decoding per feature).
+
+    Args:
+        n_jobs: Number of parallel fold workers. Use -1 for all CPUs.
+    """
+    logo = LeaveOneGroupOut()
+    splits = list(logo.split(X, pos, groups))
+
+    results = Parallel(n_jobs=n_jobs, prefer='loky')(
+        delayed(_ridge_fold)(fold, train_idx, test_idx, X, pos)
+        for fold, (train_idx, test_idx) in enumerate(splits)
+    )
+
+    pred_all = np.zeros_like(pos)
+    fold_r2, fold_mae = [], []
+    for fold, test_idx, pred, r2, mae in sorted(results, key=lambda x: x[0]):
         pred_all[test_idx] = pred
-        r2 = r2_score(pos[test_idx], pred, multioutput='uniform_average')
-        mae = mean_absolute_error(pos[test_idx], pred)
         fold_r2.append(r2)
         fold_mae.append(mae)
-        print(f"  Fold {fold+1}: R²={r2:.4f}  MAE={mae:.3f}")
 
     overall_r2 = r2_score(pos, pred_all, multioutput='uniform_average')
     overall_mae = mean_absolute_error(pos, pred_all)
@@ -275,21 +330,35 @@ def ridge_decode_cv(X, pos, groups):
     }
 
 
-def per_neuron_r2(X, pos, groups):
-    """Decode (x,y) from each individual neuron.  Returns (n_features, 2)
-    array of R² values [r2_x, r2_y] per neuron."""
+def _per_neuron_one(j, X_col, pos, groups):
+    """Decode (x,y) from a single neuron. Returns (j, r2_x, r2_y)."""
     logo = LeaveOneGroupOut()
+    xj = X_col.reshape(-1, 1)
+    pred = np.zeros_like(pos)
+    for train_idx, test_idx in logo.split(xj, pos, groups):
+        model = RidgeCV(alphas=np.logspace(-2, 4, 10))
+        model.fit(xj[train_idx], pos[train_idx])
+        pred[test_idx] = model.predict(xj[test_idx])
+    r2_x = r2_score(pos[:, 0], pred[:, 0])
+    r2_y = r2_score(pos[:, 1], pred[:, 1])
+    return j, r2_x, r2_y
+
+
+def per_neuron_r2(X, pos, groups, n_jobs=1):
+    """Decode (x,y) from each individual neuron.  Returns (n_features, 2)
+    array of R² values [r2_x, r2_y] per neuron.
+
+    Args:
+        n_jobs: Number of parallel workers. Use -1 for all CPUs.
+            Each neuron is an independent job, so this parallelizes well.
+    """
     n_feat = X.shape[1]
+    results = Parallel(n_jobs=n_jobs, prefer='loky')(
+        delayed(_per_neuron_one)(j, X[:, j], pos, groups)
+        for j in range(n_feat)
+    )
     r2 = np.full((n_feat, 2), np.nan)
-    for j in range(n_feat):
-        xj = X[:, j:j+1]
-        pred = np.zeros_like(pos)
-        for train_idx, test_idx in logo.split(xj, pos, groups):
-            model = RidgeCV(alphas=np.logspace(-2, 4, 10))
-            model.fit(xj[train_idx], pos[train_idx])
-            pred[test_idx] = model.predict(xj[test_idx])
-        r2_x = r2_score(pos[:, 0], pred[:, 0])
-        r2_y = r2_score(pos[:, 1], pred[:, 1])
+    for j, r2_x, r2_y in results:
         r2[j] = [r2_x, r2_y]
     return r2
 
@@ -612,6 +681,14 @@ if __name__ == '__main__':
     parser.add_argument('--no_per_neuron', dest='per_neuron', action='store_false')
     parser.add_argument('--save_model', action='store_true', default=False,
                         help='Save trained decoder models (for dream_decode.py)')
+    parser.add_argument('--n_jobs', type=int, default=1,
+                        help='Parallel workers for CV folds and per-neuron '
+                             'analysis. Use -1 for all CPUs. (default: 1)')
+    parser.add_argument('--device', default='cpu',
+                        help='Torch device for classification decoder '
+                             '(cpu, cuda, cuda:0, etc.). With n_jobs>1 and '
+                             'device=cuda, folds are round-robin distributed '
+                             'across all available GPUs. (default: cpu)')
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -642,11 +719,9 @@ if __name__ == '__main__':
     print(f"  Grid: {width}x{height} ({width*height} cells)")
 
     all_representations = {'deter': deter, 'stoch': stoch, 'combined': combined}
-    if args.repr == 'all':
-        representations = all_representations
-    else:
-        representations = {args.repr: all_representations[args.repr]}
+    representations = {args.repr: all_representations[args.repr]} if args.repr != 'all' else all_representations
     print(f"  Representations: {list(representations.keys())}")
+    print(f"  Parallelism: n_jobs={args.n_jobs}  device={args.device}")
 
     # ---- Ridge regression ----
     if args.method in ('regression', 'both'):
@@ -654,7 +729,7 @@ if __name__ == '__main__':
         reg_results = {}
         for name, X in representations.items():
             print(f"\n--- {name} ({X.shape[1]} dims) ---")
-            res = ridge_decode_cv(X, pos, groups)
+            res = ridge_decode_cv(X, pos, groups, n_jobs=args.n_jobs)
             reg_results[name] = res
             print(f"  Overall R²={res['overall_r2']:.4f}  "
                   f"R²_x={res['r2_x']:.4f}  R²_y={res['r2_y']:.4f}  "
@@ -667,7 +742,7 @@ if __name__ == '__main__':
             r2_deter = r2_stoch = None
             if 'deter' in representations:
                 print("\n--- Per-neuron R² (deter) ---")
-                r2_deter = per_neuron_r2(deter, pos, groups)
+                r2_deter = per_neuron_r2(deter, pos, groups, n_jobs=args.n_jobs)
                 r2_mean_d = r2_deter.mean(axis=1)
                 top5_d = np.argsort(r2_mean_d)[::-1][:5]
                 for j in top5_d:
@@ -676,7 +751,7 @@ if __name__ == '__main__':
 
             if 'stoch' in representations:
                 print("\n--- Per-neuron R² (stoch) ---")
-                r2_stoch = per_neuron_r2(stoch, pos, groups)
+                r2_stoch = per_neuron_r2(stoch, pos, groups, n_jobs=args.n_jobs)
                 r2_mean_s = r2_stoch.mean(axis=1)
                 top5_s = np.argsort(r2_mean_s)[::-1][:5]
                 for j in top5_s:
@@ -699,7 +774,8 @@ if __name__ == '__main__':
             for name, X in representations.items():
                 print(f"\n--- {name} ({X.shape[1]} dims) ---")
                 errors, shuffle, pred_xy, true_xy, proba = classification_decode(
-                    X, pos, groups, width, height, n_iters=args.n_iters)
+                    X, pos, groups, width, height, n_iters=args.n_iters,
+                    n_jobs=args.n_jobs, device=args.device)
                 print(f"  Mean Manhattan error: {errors.mean():.3f} "
                       f"(shuffle: {shuffle.mean():.3f})")
                 plot_classification_summary(errors, shuffle, name, save_dir)
