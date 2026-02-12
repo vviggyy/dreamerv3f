@@ -214,7 +214,7 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000,
 
     # Run folds in parallel (joblib spawns separate processes so each fold
     # gets its own GPU memory; prefer='threads' would share GIL)
-    results = Parallel(n_jobs=n_jobs, prefer='loky')(
+    results = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_classification_fold)(
             fold, train_idx, test_idx, X, y_cls, pos_int,
             width, height, n_iters, devices[fold])
@@ -320,7 +320,7 @@ def ridge_decode_cv(X, pos, groups, n_jobs=1):
     logo = LeaveOneGroupOut()
     splits = list(logo.split(X, pos, groups))
 
-    results = Parallel(n_jobs=n_jobs, prefer='loky')(
+    results = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_ridge_fold)(fold, train_idx, test_idx, X, pos)
         for fold, (train_idx, test_idx) in enumerate(splits)
     )
@@ -367,7 +367,7 @@ def per_neuron_r2(X, pos, groups, n_jobs=1):
             Each neuron is an independent job, so this parallelizes well.
     """
     n_feat = X.shape[1]
-    results = Parallel(n_jobs=n_jobs, prefer='loky')(
+    results = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_per_neuron_one)(j, X[:, j], pos, groups)
         for j in range(n_feat)
     )
