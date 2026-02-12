@@ -53,7 +53,7 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --save ./logdir/crafter_small_1m/decoder_results \
   --method both
 ```
-Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode.
+Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel CV folds/per-neuron (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`).
 
 ### dream decode
 ```

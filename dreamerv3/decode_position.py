@@ -12,10 +12,24 @@ Usage:
     --save ./logdir/crafter_small_1m/decoder_results \
     --method both
 
+  # Parallel on a GPU cluster (8 CPU workers, classification on CUDA):
+  python dreamerv3/decode_position.py \
+    --data ./logdir/crafter_small_1m/trajectories \
+    --save ./logdir/crafter_small_1m/decoder_results \
+    --method both --n_jobs 8 --device cuda
+
 Methods:
   classification  - pRNN-style: linear layer, CrossEntropyLoss over grid cells
   regression      - Ridge regression (sklearn), predicts continuous (x, y)
   both            - Run both methods
+
+Parallelism:
+  --n_jobs N      - Parallel workers for CV folds and per-neuron analysis.
+                    Use -1 for all CPUs. Ridge folds, classification folds,
+                    and per-neuron R² jobs all run independently. (default: 1)
+  --device DEV    - Torch device for classification decoder (cpu, cuda, cuda:0).
+                    With n_jobs>1 and device=cuda, folds are round-robin
+                    distributed across all available GPUs. (default: cpu)
 """
 
 import argparse

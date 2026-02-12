@@ -72,12 +72,20 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./logdir/crafter_small_1m/trajectories \
   --save ./logdir/crafter_small_1m/decoder_results \
   --method both --no_per_neuron
+
+# Parallel on a GPU cluster (8 workers, classification on CUDA)
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./logdir/crafter_small_1m/trajectories \
+  --save ./logdir/crafter_small_1m/decoder_results \
+  --method both --n_jobs 8 --device cuda
 ```
 
 Options:
 - `--method {regression,classification,both}` — which decoder(s) to run
 - `--per_neuron / --no_per_neuron` — per-neuron R² analysis (regression only, default on)
 - `--n_iters N` — training iterations for classification decoder (default 5000)
+- `--n_jobs N` — parallel workers for CV folds and per-neuron analysis; use `-1` for all CPUs (default 1)
+- `--device DEV` — torch device for classification (`cpu`, `cuda`, `cuda:0`); with `n_jobs>1` and `cuda`, folds are round-robin distributed across GPUs (default `cpu`)
 
 Outputs (saved to `--save` dir):
 - `regression_summary.png` — R² bar chart + decoded vs true scatter
