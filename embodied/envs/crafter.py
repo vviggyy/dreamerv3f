@@ -9,7 +9,7 @@ import numpy as np
 class Crafter(embodied.Env):
 
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
-               logdir=None, seed=None, fixed_seed=False):
+               logdir=None, seed=None, fixed_seed=False, random_spawn=False):
     assert task in ('reward', 'noreward')
     self._env = crafter.Env(
         area=area, size=size, reward=(task == 'reward'), seed=seed)
@@ -22,7 +22,9 @@ class Crafter(embodied.Env):
     self._achievements = crafter.constants.achievements.copy()
     self._done = True
     self._fixed_seed = fixed_seed
+    self._random_spawn = random_spawn
     self._seed = seed
+    self._spawn_rng = np.random.RandomState(seed)
 
   @property
   def obs_space(self):
@@ -61,6 +63,9 @@ class Crafter(embodied.Env):
       if self._fixed_seed:
         self._env._episode = 0
       image = self._env.reset()
+      if self._random_spawn:
+        self._relocate_player()
+        image = self._env._obs()
       # Verify player spawned on walkable terrain
       player_pos = tuple(self._env._player.pos)
       mat, _ = self._env._world[player_pos]
@@ -76,6 +81,19 @@ class Crafter(embodied.Env):
         image, reward, info,
         is_last=self._done,
         is_terminal=info['discount'] == 0)
+
+  def _relocate_player(self):
+    """Move player to a random walkable, unoccupied tile."""
+    world = self._env._world
+    player = self._env._player
+    walkable_mats = ('grass', 'path', 'sand')
+    mat_ids = [world._mat_ids[m] for m in walkable_mats if m in world._mat_ids]
+    walkable = np.isin(world._mat_map, mat_ids) & (world._obj_map == 0)
+    xs, ys = np.where(walkable)
+    assert len(xs) > 0, 'No walkable tiles found for random spawn'
+    idx = self._spawn_rng.randint(0, len(xs))
+    new_pos = np.array([xs[idx], ys[idx]])
+    world.move(player, new_pos)
 
   def _obs(
       self, image, reward, info,
