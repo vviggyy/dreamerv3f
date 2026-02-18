@@ -42,6 +42,7 @@ def setup(
 
   xlaflags = []
   xlaflags.append(f'--xla_gpu_autotune_level={autotune}')
+  xlaflags.append('--xla_disable_hlo_passes=loop-fusion')
   if deterministic:
     os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
     xlaflags.append('--xla_gpu_deterministic_ops=true')
