@@ -67,8 +67,8 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     # Track achievements and print when new ones are unlocked
     current_achievements = {}
     for key in tran:
-      if key.startswith('achievement_'):
-        achievement_name = key[len('achievement_'):]
+      if key.startswith('log/achievement_'):
+        achievement_name = key[len('log/achievement_'):]
         count = int(tran[key])
         current_achievements[achievement_name] = count
         # Check if this is a new unlock (count increased)

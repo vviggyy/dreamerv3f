@@ -42,7 +42,6 @@ def setup(
 
   xlaflags = []
   xlaflags.append(f'--xla_gpu_autotune_level={autotune}')
-  # Note: fusion-disabling flags are set in main.py before JAX import
   if deterministic:
     os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
     xlaflags.append('--xla_gpu_deterministic_ops=true')

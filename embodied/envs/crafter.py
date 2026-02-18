@@ -35,9 +35,9 @@ class Crafter(embodied.Env):
         'log/reward': elements.Space(np.float32),
         'player_pos': elements.Space(np.float32, (2,)),
     }
-    # Always include achievements for trajectory analysis
+    # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     spaces.update({
-        f'achievement_{k}': elements.Space(np.int32)
+        f'log/achievement_{k}': elements.Space(np.int32)
         for k in self._achievements})
     if self._logs:
       spaces.update({
@@ -91,9 +91,9 @@ class Crafter(embodied.Env):
         player_pos=player_pos,
         **{'log/reward': np.float32(info['reward'] if info else 0.0)},
     )
-    # Always include achievements for trajectory analysis
+    # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     achievements = {
-        f'achievement_{k}': np.int32(info['achievements'][k] if info else 0)
+        f'log/achievement_{k}': np.int32(info['achievements'][k] if info else 0)
         for k in self._achievements}
     obs.update(achievements)
     if self._logs:
