@@ -4,6 +4,13 @@ import pathlib
 import sys
 from functools import partial as bind
 
+# Set XLA flags BEFORE importing JAX (which happens via embodied.jax).
+# Must be set before XLA backend initialization to take effect.
+os.environ['XLA_FLAGS'] = os.environ.get('XLA_FLAGS', '') + (
+    ' --xla_disable_hlo_passes=instruction_fusion,fusion_merger,multi_output_fusion'
+    ' --xla_gpu_enable_priority_fusion=false'
+)
+
 folder = pathlib.Path(__file__).parent
 sys.path.insert(0, str(folder.parent))
 sys.path.insert(1, str(folder.parent.parent))
