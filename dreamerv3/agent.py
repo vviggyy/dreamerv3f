@@ -307,15 +307,16 @@ class Agent(embodied.jax.Agent):
       metrics[f'openloop/{key}'] = grid
 
     # Policy-based imagination (dream rollouts)
-    dream_H = self.config.imag_length
-    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
-    _, dream_feat, dream_act = self.dyn.imagine(
-        dyn_carry, policyfn, dream_H, training=False)
-    metrics['dream/deter'] = dream_feat['deter']   # (RB, H, deter_dim)
-    metrics['dream/stoch'] = dream_feat['stoch']   # (RB, H, stoch_dim, classes)
-    if 'player_pos' in obs:
-      metrics['dream/start_pos'] = obs['player_pos'][:RB, T // 2 - 1]
-      metrics['dream/obs_pos'] = obs['player_pos'][:RB, :T // 2]
+    if self.config.report_dream_feats:
+      dream_H = self.config.imag_length
+      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+      _, dream_feat, dream_act = self.dyn.imagine(
+          dyn_carry, policyfn, dream_H, training=False)
+      metrics['dream/deter'] = dream_feat['deter']   # (RB, H, deter_dim)
+      metrics['dream/stoch'] = dream_feat['stoch']   # (RB, H, stoch_dim, classes)
+      if 'player_pos' in obs:
+        metrics['dream/start_pos'] = obs['player_pos'][:RB, T // 2 - 1]
+        metrics['dream/obs_pos'] = obs['player_pos'][:RB, :T // 2]
 
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
     return carry, metrics

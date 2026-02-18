@@ -104,6 +104,7 @@ def main(argv=None):
         args)
 
   elif config.script == 'dream_decode':
+    config = config.update({'agent.report_dream_feats': True})
     from . import dream_decode
     dream_decode.dream_decode(
         bind(make_agent, config),

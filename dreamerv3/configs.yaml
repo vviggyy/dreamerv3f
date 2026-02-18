@@ -128,6 +128,7 @@ defaults:
     repval_grad: True
     report: True
     report_gradnorms: False
+    report_dream_feats: False
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}
