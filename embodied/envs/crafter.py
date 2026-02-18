@@ -41,10 +41,6 @@ class Crafter(embodied.Env):
     spaces.update({
         f'log/achievement_{k}': elements.Space(np.int32)
         for k in self._achievements})
-    if self._logs:
-      spaces.update({
-          f'log/achievement_{k}': elements.Space(np.int32)
-          for k in self._achievements})
     return spaces
 
   @property
@@ -114,11 +110,6 @@ class Crafter(embodied.Env):
         f'log/achievement_{k}': np.int32(info['achievements'][k] if info else 0)
         for k in self._achievements}
     obs.update(achievements)
-    if self._logs:
-      log_achievements = {
-          f'log/achievement_{k}': info['achievements'][k] if info else 0
-          for k in self._achievements}
-      obs.update({k: np.int32(v) for k, v in log_achievements.items()})
     return obs
 
   def _write_stats(self, length, reward, info):
