@@ -124,7 +124,13 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
         print(f"  Saved to {ep_file}")
 
   # Create environment with fixed_seed so all episodes use the same world
-  env = make_env(0, fixed_seed=True)
+  # Pass random_spawn through from config if set
+  env_overrides = dict(fixed_seed=True)
+  if hasattr(args, 'env') and hasattr(args.env, 'crafter'):
+    rs = getattr(args.env.crafter, 'random_spawn', False)
+    if rs:
+      env_overrides['random_spawn'] = True
+  env = make_env(0, **env_overrides)
   try:
     env_seed = env._seed
   except (AttributeError, ValueError):
@@ -141,7 +147,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     world_seed = hash((env_seed, 1))
   else:
     world_seed = None
-  fns = [bind(make_env, i, fixed_seed=True) for i in range(1)]  # Single env for trajectory recording
+  fns = [bind(make_env, i, **env_overrides) for i in range(1)]  # Single env for trajectory recording
   driver = embodied.Driver(fns, parallel=False) #CONTROLLER
   driver.on_step(logfn) #logfn is a callback
 
