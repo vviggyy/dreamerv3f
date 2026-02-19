@@ -4,13 +4,15 @@ Records agent positions and world model activations during evaluation.
 
 Usage:
   python dreamerv3/main.py \
-    --configs crafter \
+    --configs crafter_small size1m \
     --logdir ./logdir/crafter_run1 \
     --script eval_trajectory \
-    --run.from_checkpoint ./logdir/crafter_run1/checkpoint.ckpt \
-    --env.crafter.seed 42 \
     --eval_trajectory.num_episodes 5 \
-    --eval_trajectory.save_path ./trajectories
+    --eval_trajectory.save_path ./trajectories \
+    --jax.platform cpu
+
+  # Checkpoint is auto-detected from logdir/ckpt/latest.
+  # Override with --run.from_checkpoint TIMESTAMP_DIR if needed.
 """
 
 from collections import defaultdict
@@ -25,14 +27,22 @@ import numpy as np
 
 
 def eval_trajectory(make_agent, make_env, make_logger, args):
-  assert args.from_checkpoint, "Must provide --run.from_checkpoint"
-
   agent = make_agent()
   logger = make_logger()
 
   logdir = elements.Path(args.logdir)
   logdir.mkdir()
   print('Logdir', logdir)
+
+  # Resolve checkpoint: explicit path or auto-detect latest from logdir
+  from_checkpoint = args.from_checkpoint
+  if not from_checkpoint:
+    latest_file = logdir / 'ckpt' / 'latest'
+    assert latest_file.exists(), (
+        f"No --run.from_checkpoint given and no ckpt/latest found in {logdir}")
+    latest_name = latest_file.read_text().strip()
+    from_checkpoint = str(logdir / 'ckpt' / latest_name)
+    print(f'Auto-detected checkpoint: {from_checkpoint}')
 
   # Trajectory storage
   et_config = args.eval_trajectory
@@ -163,7 +173,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   # Load checkpoint
   cp = elements.Checkpoint()
   cp.agent = agent
-  cp.load(args.from_checkpoint, keys=['agent'])
+  cp.load(from_checkpoint, keys=['agent'])
 
   def _save_results(tag=''):
     """Save all completed episodes to disk. Called on success, crash, or signal."""
