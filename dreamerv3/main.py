@@ -96,6 +96,7 @@ def main(argv=None):
         args)
 
   elif config.script == 'eval_trajectory':
+    config = config.update({'agent.record_activations': True})
     from . import eval_trajectory
     eval_trajectory.eval_trajectory(
         bind(make_agent, config),

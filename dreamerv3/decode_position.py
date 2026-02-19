@@ -677,6 +677,198 @@ def plot_top_neurons(r2_arr, name, pos, X, groups, save_dir, top_n=6):
 
 
 # ---------------------------------------------------------------------------
+# Layer-wise decoding helpers
+# ---------------------------------------------------------------------------
+
+# Canonical display order: early → late through the network
+LAYER_ORDER = [
+    'enc/cnn0', 'enc/cnn1', 'enc/cnn2', 'enc/cnn3',
+    'enc/mlp0', 'enc/mlp1', 'enc/mlp2',
+    'enc/tokens',
+    'dyn/stoch', 'dyn/deter',
+    'pol/mlp/linear0', 'pol/mlp/linear1', 'pol/mlp/linear2',
+    'val/mlp/linear0', 'val/mlp/linear1', 'val/mlp/linear2',
+]
+
+
+def prepare_data_layers(episodes):
+    """Extract (layer_name → X array), pos, groups from episodes that have
+    per-layer activations recorded under act/* keys.
+
+    Returns:
+        layers: dict {layer_name: np.ndarray (N, D)}
+        pos:    np.ndarray (N, 2)
+        groups: np.ndarray (N,)
+    """
+    # Discover which layer keys are present
+    all_layer_keys = set()
+    for ep in episodes:
+        all_layer_keys.update(k[len('act/'):] for k in ep if k.startswith('act/'))
+    if not all_layer_keys:
+        raise ValueError(
+            "No 'act/*' keys found in episodes. "
+            "Re-record trajectories with --script eval_trajectory "
+            "(record_activations is auto-enabled).")
+
+    layers = {k: [] for k in all_layer_keys}
+    all_pos, all_groups = [], []
+
+    for i, ep in enumerate(episodes):
+        if 'player_pos' not in ep:
+            print(f"  Skipping episode {i+1}: missing player_pos")
+            continue
+        p = np.array(ep['player_pos'], dtype=np.float32)
+        T = len(p)
+        # Check each layer has matching length
+        valid = True
+        for ln in all_layer_keys:
+            arr = ep.get(f'act/{ln}')
+            if arr is None or len(arr) == 0:
+                print(f"  Skipping episode {i+1}: missing act/{ln}")
+                valid = False
+                break
+            if len(arr) != T:
+                T = min(T, len(arr))
+        if not valid:
+            continue
+        for ln in all_layer_keys:
+            arr = np.array(ep[f'act/{ln}'], dtype=np.float32)[:T]
+            if arr.ndim > 2:
+                arr = arr.reshape(T, -1)
+            layers[ln].append(arr)
+        all_pos.append(p[:T])
+        all_groups.append(np.full(T, i))
+
+    if not all_pos:
+        raise ValueError("No valid episodes with layer activations found.")
+
+    layers = {k: np.concatenate(v) for k, v in layers.items()}
+    pos = np.concatenate(all_pos)
+    groups = np.concatenate(all_groups)
+    return layers, pos, groups
+
+
+def _layer_classification_fold(fold, train_idx, test_idx, X, y_cls,
+                                width, height, n_iters, device):
+    """Run one fold for a single layer; return mean cross-entropy loss."""
+    clf = LinearClassifier(X.shape[1], width * height, device=device)
+    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
+    import torch
+    clf.model.eval()
+    with torch.no_grad():
+        logits = clf.model(torch.tensor(
+            X[test_idx], dtype=torch.float32, device=device))
+        loss = torch.nn.functional.cross_entropy(
+            logits,
+            torch.tensor(y_cls[test_idx], dtype=torch.long, device=device))
+    return fold, float(loss.cpu())
+
+
+def decode_layers(layers, pos, groups, width, height, n_iters=2000,
+                  n_jobs=1, device='cpu'):
+    """Run leave-one-episode-out classification for every layer.
+
+    Returns dict {layer_name: [fold_loss, ...]}
+    """
+    if not HAS_TORCH:
+        raise RuntimeError("torch required for layer decoding")
+
+    pos_int = pos.astype(int)
+    pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
+    pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
+    y_cls = np.ravel_multi_index(
+        (pos_int[:, 0], pos_int[:, 1]), (width, height))
+
+    logo = LeaveOneGroupOut()
+    splits = list(logo.split(pos, y_cls, groups))
+    n_folds = len(splits)
+
+    if HAS_TORCH and device.startswith('cuda') and n_jobs != 1:
+        import torch as _torch
+        n_gpus = _torch.cuda.device_count()
+        fold_devices = [f'cuda:{i % n_gpus}' for i in range(n_folds)]
+    else:
+        fold_devices = [device] * n_folds
+
+    layer_fold_losses = {}
+    ordered = [ln for ln in LAYER_ORDER if ln in layers]
+    ordered += sorted(k for k in layers if k not in LAYER_ORDER)
+
+    for ln in ordered:
+        X = layers[ln]
+        print(f"\n  Layer {ln} ({X.shape[1]} dims)")
+        results = Parallel(n_jobs=n_jobs, prefer='processes')(
+            delayed(_layer_classification_fold)(
+                fold, train_idx, test_idx, X, y_cls,
+                width, height, n_iters, fold_devices[fold])
+            for fold, (train_idx, test_idx) in enumerate(splits)
+        )
+        fold_losses = [loss for _, loss in sorted(results)]
+        mean_loss = np.mean(fold_losses)
+        print(f"    mean CE loss: {mean_loss:.4f}  "
+              f"(folds: {[f'{l:.3f}' for l in fold_losses]})")
+        layer_fold_losses[ln] = fold_losses
+
+    return layer_fold_losses, ordered
+
+
+def plot_layer_comparison(layer_fold_losses, ordered, save_dir):
+    """Horizontal boxplot: one box per layer, ordered early → late.
+    Lower cross-entropy = better spatial decoding."""
+    # Use canonical order, only keeping layers we have results for
+    display_order = [ln for ln in ordered if ln in layer_fold_losses]
+    n = len(display_order)
+    if n == 0:
+        print("  No layer results to plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
+
+    data = [layer_fold_losses[ln] for ln in display_order]
+    labels = [ln.replace('/', '/\n') for ln in display_order]
+
+    bp = ax.boxplot(data, vert=False, patch_artist=True,
+                    labels=labels, widths=0.6)
+
+    # Colour by network section
+    section_colors = {
+        'enc/cnn': '#0055cc',
+        'enc/mlp': '#0099ff',
+        'enc/tok': '#44ccff',
+        'dyn/sto': '#ff9900',
+        'dyn/det': '#ff5500',
+        'pol/mlp': '#33aa00',
+        'val/mlp': '#996600',
+    }
+    for i, (patch, ln) in enumerate(zip(bp['boxes'], display_order)):
+        color = '#888888'
+        for prefix, c in section_colors.items():
+            if ln.startswith(prefix):
+                color = c
+                break
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+
+    ax.set_xlabel('Cross-entropy loss (lower = better spatial decoding)', fontsize=11)
+    ax.set_title('Per-Layer Position Decoding', fontsize=13)
+    ax.grid(True, axis='x', alpha=0.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='y', labelsize=8)
+
+    # Add mean annotations
+    for i, ln in enumerate(display_order, start=1):
+        mean_v = np.mean(layer_fold_losses[ln])
+        ax.text(mean_v, i, f' {mean_v:.3f}', va='center', fontsize=7, color='black')
+
+    fig.tight_layout()
+    out = save_dir / 'layer_comparison.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -684,6 +876,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Decode agent position from world model states')
     parser.add_argument('--data', required=True, help='Path to trajectory pkl directory')
     parser.add_argument('--save', default=None, help='Output directory for plots/results')
+    parser.add_argument('--mode', default='standard', choices=['standard', 'layers'],
+                        help='"standard": decode deter/stoch (existing). '
+                             '"layers": decode from every model layer and produce '
+                             'a comparison boxplot. (default: standard)')
     parser.add_argument('--method', default='both', choices=['classification', 'regression', 'both'])
     parser.add_argument('--n_iters', type=int, default=5000,
                         help='Training iterations for classification decoder')
@@ -716,6 +912,39 @@ if __name__ == '__main__':
     if metadata:
         area = metadata.get('area', None)
         print(f"  Metadata: {metadata}")
+
+    # ---- Layer-wise decoding mode ----
+    if args.mode == 'layers':
+        if not HAS_TORCH:
+            print("Error: torch required for --mode layers")
+            raise SystemExit(1)
+        print("\n=== Per-Layer Position Decoding ===")
+        layers, pos, groups = prepare_data_layers(episodes)
+        print(f"  Layers found: {sorted(layers.keys())}")
+        print(f"  pos: {pos.shape}  groups: {groups.shape}")
+        if metadata and 'area' in metadata:
+            width, height = metadata['area']
+        else:
+            width = int(pos[:, 0].max()) + 1
+            height = int(pos[:, 1].max()) + 1
+        print(f"  Grid: {width}x{height}")
+        n_iters_layers = min(args.n_iters, 2000)  # fewer iters per layer is fine
+        layer_fold_losses, ordered = decode_layers(
+            layers, pos, groups, width, height,
+            n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device)
+        plot_layer_comparison(layer_fold_losses, ordered, save_dir)
+        results_file = save_dir / 'layer_decode_results.pkl'
+        with open(results_file, 'wb') as f:
+            pickle.dump({
+                'layer_fold_losses': layer_fold_losses,
+                'ordered': ordered,
+                'grid': (width, height),
+                'n_samples': len(pos),
+                'n_episodes': len(np.unique(groups)),
+            }, f)
+        print(f"\nResults saved to {results_file}")
+        print("Done.")
+        raise SystemExit(0)
 
     deter, stoch, pos, groups = prepare_data(episodes)
     combined = np.concatenate([deter, stoch], axis=1)

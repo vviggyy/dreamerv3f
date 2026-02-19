@@ -575,15 +575,20 @@ class MLP(nj.Module):
     self.units = units
     self.kw = dict(bias=self.bias, winit=self.winit, binit=self.binit)
 
-  def __call__(self, x):
+  def __call__(self, x, return_intermediates=False):
     shape = x.shape[:-1]
     x = x.astype(COMPUTE_DTYPE)
     x = x.reshape([-1, x.shape[-1]])
+    intermediates = {}
     for i in range(self.layers):
       x = self.sub(f'linear{i}', Linear, self.units, **self.kw)(x)
       x = self.sub(f'norm{i}', Norm, self.norm)(x)
       x = act(self.act)(x)
+      if return_intermediates:
+        intermediates[f'linear{i}'] = x.reshape((*shape, x.shape[-1]))
     x = x.reshape((*shape, x.shape[-1]))
+    if return_intermediates:
+      return x, intermediates
     return x
 
 

@@ -207,10 +207,12 @@ class Encoder(nj.Module):
   def truncate(self, entries, carry=None):
     return {}
 
-  def __call__(self, carry, obs, reset, training, single=False):
+  def __call__(self, carry, obs, reset, training, single=False,
+               return_activations=False):
     bdims = 1 if single else 2
     outs = []
     bshape = reset.shape
+    acts = {}
 
     if self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
@@ -221,6 +223,8 @@ class Encoder(nj.Module):
       for i in range(self.layers):
         x = self.sub(f'mlp{i}', nn.Linear, self.units, **self.kw)(x)
         x = nn.act(self.act)(self.sub(f'mlp{i}norm', nn.Norm, self.norm)(x))
+        if return_activations:
+          acts[f'enc/mlp{i}'] = x.reshape((*bshape, *x.shape[1:]))
       outs.append(x)
 
     if self.imgkeys:
@@ -239,6 +243,9 @@ class Encoder(nj.Module):
           B, H, W, C = x.shape
           x = x.reshape((B, H // 2, 2, W // 2, 2, C)).max((2, 4))
         x = nn.act(self.act)(self.sub(f'cnn{i}norm', nn.Norm, self.norm)(x))
+        if return_activations:
+          acts[f'enc/cnn{i}'] = x.reshape(
+              (*bshape, *x.shape[1:-3], x.shape[-3] * x.shape[-2] * x.shape[-1]))
       assert 3 <= x.shape[-3] <= 16, x.shape
       assert 3 <= x.shape[-2] <= 16, x.shape
       x = x.reshape((x.shape[0], -1))
@@ -246,7 +253,11 @@ class Encoder(nj.Module):
 
     x = jnp.concatenate(outs, -1)
     tokens = x.reshape((*bshape, *x.shape[1:]))
+    if return_activations:
+      acts['enc/tokens'] = tokens
     entries = {}
+    if return_activations:
+      return carry, entries, tokens, acts
     return carry, entries, tokens
 
 

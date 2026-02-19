@@ -84,6 +84,8 @@ class Agent(embodied.jax.Agent):
 
   @property
   def policy_keys(self):
+    if self.config.record_activations:
+      return '^(enc|dyn|dec|pol|val)/'
     return '^(enc|dyn|dec|pol)/'
 
   @property
@@ -116,13 +118,23 @@ class Agent(embodied.jax.Agent):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
-    enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
+    if self.config.record_activations:
+      enc_carry, enc_entry, tokens, enc_acts = self.enc(
+          enc_carry, obs, reset, **kw, return_activations=True)
+    else:
+      enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
     dyn_carry, dyn_entry, feat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, **kw)
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
-    policy = self.pol(self.feat2tensor(feat), bdims=1)
+    if self.config.record_activations:
+      policy, pol_acts = self.pol(
+          self.feat2tensor(feat), bdims=1, return_intermediates=True)
+      _, val_acts = self.val(
+          self.feat2tensor(feat), bdims=1, return_intermediates=True)
+    else:
+      policy = self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
@@ -132,6 +144,20 @@ class Agent(embodied.jax.Agent):
     if self.config.replay_context:
       out.update(elements.tree.flatdict(dict(
           enc=enc_entry, dyn=dyn_entry, dec=dec_entry)))
+    if self.config.record_activations:
+      # deter and stoch from the RSSM (the recurrent states)
+      out['activations/dyn/deter'] = feat['deter']
+      out['activations/dyn/stoch'] = feat['stoch'].reshape(
+          (*feat['stoch'].shape[:-2], -1))
+      # encoder layers
+      for k, v in enc_acts.items():
+        out[f'activations/{k}'] = v
+      # policy MLP layers
+      for k, v in pol_acts.items():
+        out[f'activations/pol/mlp/{k}'] = v
+      # value MLP layers
+      for k, v in val_acts.items():
+        out[f'activations/val/mlp/{k}'] = v
     return carry, act, out
 
   def train(self, carry, data):

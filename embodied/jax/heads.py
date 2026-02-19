@@ -33,11 +33,17 @@ class MLPHead(nj.Module):
     else:
       self.head = Head(space, output, **hkw, name='head')
 
-  def __call__(self, x, bdims):
+  def __call__(self, x, bdims, return_intermediates=False):
     bshape = jax.tree.leaves(x)[0].shape[:bdims]
     x = x.reshape((*bshape, -1))
-    x = self.mlp(x)
+    if return_intermediates:
+      x, intermediates = self.mlp(x, return_intermediates=True)
+    else:
+      x = self.mlp(x)
+      intermediates = {}
     x = self.head(x)
+    if return_intermediates:
+      return x, intermediates
     return x
 
 

@@ -82,11 +82,18 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     if current_achievements:
       episode_data['achievements'].append(current_achievements.copy())
 
-    # Record world model activations if available
+    # Record world model activations if available (legacy replay_context path)
     if 'dyn/deter' in tran:
       episode_data['deter'].append(tran['dyn/deter'].copy())
     if 'dyn/stoch' in tran:
       episode_data['stoch'].append(tran['dyn/stoch'].copy())
+
+    # Record per-layer activations (record_activations=True path)
+    for key in tran:
+      if key.startswith('activations/'):
+        layer_name = key[len('activations/'):]  # e.g. 'enc/cnn0'
+        store_key = f'act/{layer_name}'
+        episode_data[store_key].append(tran[key].copy())
 
     # End of episode
     if tran['is_last']:
@@ -103,6 +110,8 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       ep_result['episode'] = ep_num
       ep_result['length'] = len(episode_data['player_pos'])
       ep_result['total_reward'] = sum(episode_data['reward'])
+      ep_result['layer_names'] = sorted(
+          k[len('act/'):] for k in ep_result if k.startswith('act/'))
       ep_result['final_achievements'] = current_achievements.copy()
 
       # Summarize achievements for this episode
@@ -281,10 +290,17 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     summary_file.write('\n'.join(lines))
     print(f"\nAchievement summary saved to {summary_file}")
 
-  if completed_episodes and 'deter' in completed_episodes[0]:
-    print(f"\nDeter shape per step: {completed_episodes[0]['deter'].shape[1:]}")
-    print(f"Stoch shape per step: {completed_episodes[0]['stoch'].shape[1:]}")
-  else:
-    print("\nNote: World model activations not recorded (enable replay_context)")
+  if completed_episodes:
+    ep0 = completed_episodes[0]
+    if ep0.get('layer_names'):
+      print(f"\nPer-layer activations recorded: {ep0['layer_names']}")
+      for ln in ep0['layer_names']:
+        arr = ep0[f'act/{ln}']
+        print(f"  act/{ln}: {arr.shape[1:]}")
+    elif 'deter' in ep0:
+      print(f"\nDeter shape per step: {ep0['deter'].shape[1:]}")
+      print(f"Stoch shape per step: {ep0['stoch'].shape[1:]}")
+    else:
+      print("\nNote: World model activations not recorded (enable replay_context)")
 
   logger.close()
