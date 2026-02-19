@@ -256,6 +256,31 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     if never_unlocked:
       print(f"\nNever achieved: {', '.join(never_unlocked)}")
 
+  # Write achievement summary to file in logdir root
+  if completed_episodes and 'final_achievements' in completed_episodes[0]:
+    summary_file = logdir / 'eval_achievements.out'
+    lines = []
+    lines.append(f"Eval Trajectory Achievement Summary ({len(completed_episodes)} episodes)")
+    lines.append(f"Avg length: {np.mean(lengths):.1f} +/- {np.std(lengths):.1f}")
+    lines.append(f"Avg reward: {np.mean(rewards):.1f} +/- {np.std(rewards):.1f}")
+    lines.append("")
+
+    # Per-episode breakdown
+    for ep in completed_episodes:
+      unlocked = {k: v for k, v in ep.get('final_achievements', {}).items() if v > 0}
+      lines.append(f"Episode {ep['episode']}: reward={ep['total_reward']:.1f}, "
+                    f"length={ep['length']}, achievements={unlocked or 'none'}")
+
+    lines.append("")
+    lines.append("--- Aggregate ---")
+    for name, counts in sorted_achievements:
+      avg = np.mean(counts)
+      times_unlocked = sum(1 for c in counts if c > 0)
+      lines.append(f"  {name}: {avg:.1f} avg ({times_unlocked}/{len(counts)} episodes)")
+
+    summary_file.write('\n'.join(lines))
+    print(f"\nAchievement summary saved to {summary_file}")
+
   if completed_episodes and 'deter' in completed_episodes[0]:
     print(f"\nDeter shape per step: {completed_episodes[0]['deter'].shape[1:]}")
     print(f"Stoch shape per step: {completed_episodes[0]['stoch'].shape[1:]}")
