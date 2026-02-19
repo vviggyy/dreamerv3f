@@ -75,6 +75,15 @@ python dreamerv3/main.py \
 ```
 Outputs: dream_trajectories_world.png, dream_probmap_*.png (classifier only), dream_vs_real.png, dream_results.pkl
 
+### plot training progress
+```
+MPLBACKEND=Agg python dreamerv3/plot_training.py \
+  --logdir ./logdir/crafter_small_1m \
+  --save ./logdir/crafter_small_1m/plots \
+  --smooth 50
+```
+Reads `scores.jsonl` (episode score) and `metrics.jsonl` (per-achievement stats) from logdir. Produces `training_progress.png` with 3 panels: episode score, cumulative reward, per-achievement unlock rate. Add `--no_achievements` to skip panel 3.
+
 ### tests
 ```
 PYTHONPATH=/Users/viggy/Desktop/dreamerv3f python embodied/tests/test_crafter_world.py
