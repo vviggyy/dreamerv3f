@@ -80,7 +80,7 @@ def fmt_millions(x, pos):
 
 def style_ax(ax):
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(fmt_millions))
-    ax.set_xlabel('Training steps', fontsize=11)
+    ax.set_xlabel('Environment steps', fontsize=11)
     ax.grid(True, alpha=0.3, linewidth=0.5)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -91,6 +91,7 @@ def plot_episode_score(ax, steps, scores, smooth_window):
     if smooth_window > 1 and len(steps) > smooth_window:
         sx, sy = smooth(steps, scores, smooth_window)
         ax.plot(sx, sy, color=BLUE, linewidth=1.8, label=f'Smoothed (w={smooth_window})')
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax.set_ylabel('Score (achievements unlocked)', fontsize=11)
     ax.set_title('Episode Score', fontsize=13)
     ax.legend(fontsize=9, framealpha=0.7)
@@ -101,12 +102,13 @@ def plot_cumulative_reward(ax, steps, scores):
     cumulative = np.cumsum(scores)
     ax.plot(steps, cumulative, color=GREEN, linewidth=1.8)
     ax.fill_between(steps, 0, cumulative, alpha=0.12, color=GREEN)
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax.set_ylabel('Cumulative reward', fontsize=11)
     ax.set_title('Cumulative Reward', fontsize=13)
     style_ax(ax)
 
 
-def plot_achievement_rates(ax, records, smooth_window, top_n=16):
+def plot_achievement_rates(ax, records, smooth_window):
     ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
     all_keys = set()
     for r in records:
@@ -123,12 +125,12 @@ def plot_achievement_rates(ax, records, smooth_window, top_n=16):
         style_ax(ax)
         return
 
-    # Sort by total unlocks descending, keep top_n
+    # Sort by total unlocks descending
     totals = {}
     for key in all_keys:
         _, vals = records_to_series(records, key)
         totals[key] = vals.sum() if len(vals) else 0
-    sorted_keys = sorted(all_keys, key=lambda k: -totals[k])[:top_n]
+    sorted_keys = sorted(all_keys, key=lambda k: -totals[k])
 
     for i, key in enumerate(sorted_keys):
         steps, vals = records_to_series(records, key)
