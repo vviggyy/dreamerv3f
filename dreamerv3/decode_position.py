@@ -919,7 +919,14 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
         for ln in todo
         for fold, (train_idx, test_idx) in enumerate(splits)
     ]
-    print(f"  Total jobs: {len(jobs)}  (n_jobs={n_jobs}, prefer=threads)")
+    import os
+    from joblib import cpu_count as _jcpu
+    effective_jobs = _jcpu() if n_jobs == -1 else n_jobs
+    slurm_cpus = os.environ.get('SLURM_CPUS_PER_TASK',
+                  os.environ.get('SLURM_JOB_CPUS_PER_NODE', 'not set'))
+    print(f"  Total jobs: {len(jobs)}  n_jobs={n_jobs} "
+          f"→ effective={effective_jobs} threads  "
+          f"(SLURM_CPUS_PER_TASK={slurm_cpus})")
 
     raw = Parallel(n_jobs=n_jobs, prefer='threads')(
         delayed(_layer_ridge_fold)(ln, fold, train_idx, test_idx, X, p)
