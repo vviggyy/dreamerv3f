@@ -62,7 +62,9 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --save ./logdir/crafter_small_1m/decoder_results \
   --mode layers --ridge_layers --n_jobs -1
 ```
-`--ridge_layers`: closed-form Ridge instead of gradient descent — ~100x faster, no GPU needed. Metric is R² (higher=better). All (layer × fold) pairs run as one flat parallel pool. Auto-saves checkpoint to `<save>/layer_decode_checkpoint.pkl`. Add `--resume <path>` to continue from a partial run. Without `--ridge_layers`, uses PyTorch classifier (CE loss, lower=better) with `n_iters=500`.
+`--ridge_layers`: closed-form Ridge instead of gradient descent. Metric is R² (higher=better). All (layer × fold) pairs run as one flat parallel pool with threads (no pickling). Auto-saves checkpoint to `<save>/layer_decode_checkpoint.pkl`. Add `--resume <path>` to continue from a partial run.
+`--max_samples N` (default 10000): subsample timesteps before fitting — eliminates O(N) scaling.
+`--max_dims D` (default 256): truncated PCA before Ridge — eliminates O(D²) scaling (critical for deter at 4096 dims). Set 0 to disable either. Without `--ridge_layers`, uses PyTorch classifier (CE loss, lower=better) with `n_iters=500`.
 
 ### dream decode
 ```

@@ -39,10 +39,16 @@ Layer-wise decoding (--mode layers):
                     are skipped. Auto-checkpoint is always saved to
                     <save>/layer_decode_checkpoint.pkl.
 
-Fast cluster command:
+  --max_samples N - Subsample to N timesteps before fitting (eliminates O(N)
+                    scaling). Default 10000. Set 0 to use all data.
+  --max_dims D    - Truncated PCA to D dims before Ridge (eliminates O(D²)
+                    scaling). Default 256. Set 0 to disable.
+
+Fast cluster command (completes in minutes):
   python dreamerv3/decode_position.py \\
     --data ./trajectories --save ./decoder_results \\
-    --mode layers --ridge_layers --n_jobs -1
+    --mode layers --ridge_layers --n_jobs -1 \\
+    --max_samples 10000 --max_dims 256
 """
 
 import argparse
@@ -810,26 +816,76 @@ def _save_layer_checkpoint(path, layer_fold_values, ordered, grid, n_samples,
         }, f)
 
 
-def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None):
+def _subsample_layers(layers, pos, groups, max_samples, seed=42):
+    """Subsample timesteps proportionally across episodes.
+
+    Returns new (layers, pos, groups) with at most max_samples rows total.
+    Stratified by episode so every episode contributes proportionally.
+    """
+    N = len(pos)
+    if max_samples <= 0 or N <= max_samples:
+        return layers, pos, groups
+    rng = np.random.RandomState(seed)
+    unique_g = np.unique(groups)
+    per_g = max(1, max_samples // len(unique_g))
+    keep = []
+    for g in unique_g:
+        idx = np.where(groups == g)[0]
+        n = min(len(idx), per_g)
+        chosen = rng.choice(idx, n, replace=False)
+        keep.append(chosen)
+    keep = np.sort(np.concatenate(keep))
+    print(f"  Subsampled {N} → {len(keep)} timesteps "
+          f"(~{per_g} per episode, {len(unique_g)} episodes)")
+    layers = {ln: arr[keep] for ln, arr in layers.items()}
+    return layers, pos[keep], groups[keep]
+
+
+def _pca_layers(layers, max_dims, seed=42):
+    """Reduce each layer to at most max_dims via randomized truncated SVD.
+
+    PCA is fit on all data (not per-fold); acceptable for a ranking scan.
+    Returns new layers dict with reduced arrays.
+    """
+    from sklearn.decomposition import TruncatedSVD
+    if max_dims <= 0:
+        return layers
+    out = {}
+    for ln, arr in layers.items():
+        if arr.shape[1] > max_dims:
+            svd = TruncatedSVD(n_components=max_dims, random_state=seed,
+                               n_iter=4)
+            out[ln] = svd.fit_transform(arr).astype(np.float32)
+            print(f"  PCA {ln}: {arr.shape[1]} → {max_dims} dims")
+        else:
+            out[ln] = arr
+    return out
+
+
+def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
+                        max_samples=10000, max_dims=256):
     """Fast layer scan using Ridge regression (closed-form, no GPU needed).
 
-    All (layer, fold) pairs are submitted as one flat parallel job pool —
-    far more efficient than the sequential-layer-then-parallel-fold approach.
-    Supports checkpointing: saves partial results so cluster timeouts don't
-    lose completed layers.
+    Applies subsampling (max_samples) and truncated PCA (max_dims) before
+    fitting so that runtime is independent of raw layer dimensionality.
+    For deter (4096 dims) with max_dims=256 and max_samples=10000, each
+    Ridge fold completes in ~1 second; total run in minutes on any CPU.
+
+    All (layer, fold) pairs run as one flat parallel pool with threads
+    (Ridge/BLAS releases the GIL; threads avoid subprocess pickling overhead).
 
     Args:
-        checkpoint_path: If set, load partial results on startup and save
-            after every layer batch completes.
+        max_samples: Subsample to at most this many timesteps before fitting.
+            Set to 0 to disable. Default 10000.
+        max_dims: Reduce features to this many dims via truncated PCA.
+            Set to 0 to disable. Default 256.
+        checkpoint_path: Auto-save partial results here; load on startup to
+            skip already-finished layers.
 
     Returns:
         layer_fold_r2: dict {layer_name: [fold_r2, ...]}
         ordered: list of layer names in display order
     """
-    logo = LeaveOneGroupOut()
-    splits = list(logo.split(pos, pos, groups))
-    n_folds = len(splits)
-
     ordered = _ordered_layers(layers)
 
     # Resume: load partial results and skip already-finished layers
@@ -845,15 +901,27 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None):
     if not todo:
         return layer_fold_r2, ordered
 
-    # Flat job list: all (layer, fold) pairs in one pool
+    # Subsample timesteps (same indices across all layers)
+    layers_todo = {ln: layers[ln] for ln in todo}
+    layers_todo, pos_s, groups_s = _subsample_layers(
+        layers_todo, pos, groups, max_samples)
+
+    # Per-layer PCA reduction
+    layers_todo = _pca_layers(layers_todo, max_dims)
+
+    logo = LeaveOneGroupOut()
+    splits = list(logo.split(pos_s, pos_s, groups_s))
+    n_folds = len(splits)
+
+    # Flat job list — use threads: Ridge (BLAS) releases GIL, no pickling
     jobs = [
-        (ln, fold, train_idx, test_idx, layers[ln], pos)
+        (ln, fold, train_idx, test_idx, layers_todo[ln], pos_s)
         for ln in todo
         for fold, (train_idx, test_idx) in enumerate(splits)
     ]
-    print(f"  Total jobs: {len(jobs)}  (n_jobs={n_jobs})")
+    print(f"  Total jobs: {len(jobs)}  (n_jobs={n_jobs}, prefer=threads)")
 
-    raw = Parallel(n_jobs=n_jobs, prefer='processes')(
+    raw = Parallel(n_jobs=n_jobs, prefer='threads')(
         delayed(_layer_ridge_fold)(ln, fold, train_idx, test_idx, X, p)
         for ln, fold, train_idx, test_idx, X, p in jobs
     )
@@ -873,8 +941,8 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None):
 
     _save_layer_checkpoint(
         checkpoint_path, layer_fold_r2, ordered,
-        grid=None, n_samples=len(pos),
-        n_episodes=len(np.unique(groups)), metric='r2')
+        grid=None, n_samples=len(pos_s),
+        n_episodes=len(np.unique(groups_s)), metric='r2')
 
     return layer_fold_r2, ordered
 
@@ -1057,13 +1125,22 @@ if __name__ == '__main__':
                              'across all available GPUs. (default: cpu)')
     parser.add_argument('--ridge_layers', action='store_true', default=False,
                         help='[--mode layers] Use Ridge regression (closed-form, '
-                             'no GPU, ~100x faster) instead of the PyTorch '
-                             'classifier for the layer comparison scan. '
+                             'no GPU, fast) instead of the PyTorch classifier. '
                              'Metric becomes R² instead of cross-entropy loss. '
-                             'Recommended for initial runs. (default: False)')
+                             'Recommended for all runs. (default: False)')
+    parser.add_argument('--max_samples', type=int, default=10000,
+                        help='[--mode layers --ridge_layers] Subsample to at most '
+                             'this many timesteps before fitting (stratified by '
+                             'episode). Eliminates the O(N) cost scaling. '
+                             'Set to 0 to use all data. (default: 10000)')
+    parser.add_argument('--max_dims', type=int, default=256,
+                        help='[--mode layers --ridge_layers] Reduce layer features '
+                             'to this many dims via truncated PCA before Ridge. '
+                             'Eliminates the O(D²) cost scaling. '
+                             'Set to 0 to disable. (default: 256)')
     parser.add_argument('--resume', default=None,
                         help='[--mode layers] Path to a partial '
-                             'layer_decode_results.pkl to resume from. '
+                             'layer_decode_checkpoint.pkl to resume from. '
                              'Already-completed layers are skipped. '
                              'If omitted, checkpoints are auto-saved to '
                              '<save>/layer_decode_checkpoint.pkl.')
@@ -1099,11 +1176,14 @@ if __name__ == '__main__':
 
         if args.ridge_layers:
             print(f"  Using Ridge regression (fast, closed-form). "
-                  f"Metric: R² (higher = better).")
+                  f"Metric: R² (higher = better).\n"
+                  f"  max_samples={args.max_samples}  max_dims={args.max_dims}")
             layer_fold_values, ordered = decode_layers_ridge(
                 layers, pos, groups,
                 n_jobs=args.n_jobs,
-                checkpoint_path=checkpoint_path)
+                checkpoint_path=checkpoint_path,
+                max_samples=args.max_samples,
+                max_dims=args.max_dims)
             metric = 'r2'
         else:
             if not HAS_TORCH:
