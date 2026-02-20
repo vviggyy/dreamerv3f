@@ -841,29 +841,43 @@ def _subsample_layers(layers, pos, groups, max_samples, seed=42):
     return layers, pos[keep], groups[keep]
 
 
-def _pca_layers(layers, max_dims, seed=42):
+def _pca_one_layer(ln, arr, max_dims, seed=42):
+    """Fit randomized truncated SVD on one layer. Returns (ln, reduced_arr)."""
+    from sklearn.decomposition import TruncatedSVD
+    svd = TruncatedSVD(n_components=max_dims, random_state=seed, n_iter=4)
+    reduced = svd.fit_transform(arr).astype(np.float32)
+    return ln, reduced
+
+
+def _pca_layers(layers, max_dims, n_jobs=1, seed=42):
     """Reduce each layer to at most max_dims via randomized truncated SVD.
 
-    PCA is fit on all data (not per-fold); acceptable for a ranking scan.
-    Returns new layers dict with reduced arrays.
+    Runs all layers in parallel (each SVD is independent).
+    PCA is fit on all data (not per-fold); fine for a ranking scan.
     """
     from sklearn.decomposition import TruncatedSVD
     if max_dims <= 0:
         return layers
-    out = {}
-    for ln, arr in layers.items():
-        if arr.shape[1] > max_dims:
-            svd = TruncatedSVD(n_components=max_dims, random_state=seed,
-                               n_iter=4)
-            out[ln] = svd.fit_transform(arr).astype(np.float32)
-            print(f"  PCA {ln}: {arr.shape[1]} → {max_dims} dims")
-        else:
-            out[ln] = arr
+    to_reduce = {ln: arr for ln, arr in layers.items()
+                 if arr.shape[1] > max_dims}
+    if not to_reduce:
+        return layers
+
+    print(f"  PCA: reducing {len(to_reduce)} layers to {max_dims} dims "
+          f"(parallel, n_jobs={n_jobs})")
+    results = Parallel(n_jobs=n_jobs, prefer='threads')(
+        delayed(_pca_one_layer)(ln, arr, max_dims, seed)
+        for ln, arr in to_reduce.items()
+    )
+    out = dict(layers)  # copy, keep unreduced layers
+    for ln, reduced in results:
+        out[ln] = reduced
+        print(f"    {ln}: {layers[ln].shape[1]} → {max_dims} dims")
     return out
 
 
 def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
-                        max_samples=10000, max_dims=256):
+                        max_samples=10000, max_dims=256, n_cv_folds=5):
     """Fast layer scan using Ridge regression (closed-form, no GPU needed).
 
     Applies subsampling (max_samples) and truncated PCA (max_dims) before
@@ -879,6 +893,9 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
             Set to 0 to disable. Default 10000.
         max_dims: Reduce features to this many dims via truncated PCA.
             Set to 0 to disable. Default 256.
+        n_cv_folds: Number of cross-validation folds. Default 5. LOGO
+            (leave-one-episode-out) is NOT used because with many episodes
+            it creates O(N_episodes) folds which dominates runtime.
         checkpoint_path: Auto-save partial results here; load on startup to
             skip already-finished layers.
 
@@ -906,12 +923,18 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
     layers_todo, pos_s, groups_s = _subsample_layers(
         layers_todo, pos, groups, max_samples)
 
-    # Per-layer PCA reduction
-    layers_todo = _pca_layers(layers_todo, max_dims)
+    # Per-layer PCA reduction (parallel across layers)
+    layers_todo = _pca_layers(layers_todo, max_dims, n_jobs=n_jobs)
 
-    logo = LeaveOneGroupOut()
-    splits = list(logo.split(pos_s, pos_s, groups_s))
-    n_folds = len(splits)
+    # K-fold CV — NOT leave-one-episode-out: with many episodes LOGO creates
+    # O(N_episodes) folds which dominates runtime regardless of per-fold speed.
+    from sklearn.model_selection import KFold
+    n_episodes = len(np.unique(groups_s))
+    n_folds = min(n_cv_folds, n_episodes)
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    splits = list(kf.split(pos_s))
+    print(f"  CV: {n_folds}-fold KFold  "
+          f"(n_episodes={n_episodes}, n_cv_folds arg={n_cv_folds})")
 
     # Flat job list — use threads: Ridge (BLAS) releases GIL, no pickling
     jobs = [
@@ -1145,6 +1168,11 @@ if __name__ == '__main__':
                              'to this many dims via truncated PCA before Ridge. '
                              'Eliminates the O(D²) cost scaling. '
                              'Set to 0 to disable. (default: 256)')
+    parser.add_argument('--n_cv_folds', type=int, default=5,
+                        help='[--mode layers --ridge_layers] Number of CV folds. '
+                             'Uses KFold, NOT leave-one-episode-out — LOGO with '
+                             'many episodes creates O(N_eps × N_layers) jobs '
+                             'which dominates runtime. (default: 5)')
     parser.add_argument('--resume', default=None,
                         help='[--mode layers] Path to a partial '
                              'layer_decode_checkpoint.pkl to resume from. '
@@ -1190,7 +1218,8 @@ if __name__ == '__main__':
                 n_jobs=args.n_jobs,
                 checkpoint_path=checkpoint_path,
                 max_samples=args.max_samples,
-                max_dims=args.max_dims)
+                max_dims=args.max_dims,
+                n_cv_folds=args.n_cv_folds)
             metric = 'r2'
         else:
             if not HAS_TORCH:
