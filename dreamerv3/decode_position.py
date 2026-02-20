@@ -842,26 +842,31 @@ def _subsample_layers(layers, pos, groups, max_samples, seed=42):
 
 
 def _pca_one_layer(ln, arr, max_dims, seed=42):
-    """Fit randomized truncated SVD on one layer. Returns (ln, reduced_arr)."""
+    """Fit randomized truncated SVD on one layer.
+
+    Returns (ln, reduced_arr, fitted_svd) so the SVD can be reused to
+    transform a held-out test set.
+    """
     from sklearn.decomposition import TruncatedSVD
     svd = TruncatedSVD(n_components=max_dims, random_state=seed, n_iter=4)
     reduced = svd.fit_transform(arr).astype(np.float32)
-    return ln, reduced
+    return ln, reduced, svd
 
 
 def _pca_layers(layers, max_dims, n_jobs=1, seed=42):
     """Reduce each layer to at most max_dims via randomized truncated SVD.
 
     Runs all layers in parallel (each SVD is independent).
-    PCA is fit on all data (not per-fold); fine for a ranking scan.
+    Returns (reduced_layers dict, svd_dict) where svd_dict maps layer name
+    to fitted TruncatedSVD (for transforming a held-out test set).
+    PCA is fit on training data only; call svd.transform(test_X) for test.
     """
-    from sklearn.decomposition import TruncatedSVD
     if max_dims <= 0:
-        return layers
+        return layers, {}
     to_reduce = {ln: arr for ln, arr in layers.items()
                  if arr.shape[1] > max_dims}
     if not to_reduce:
-        return layers
+        return layers, {}
 
     print(f"  PCA: reducing {len(to_reduce)} layers to {max_dims} dims "
           f"(parallel, n_jobs={n_jobs})")
@@ -869,11 +874,76 @@ def _pca_layers(layers, max_dims, n_jobs=1, seed=42):
         delayed(_pca_one_layer)(ln, arr, max_dims, seed)
         for ln, arr in to_reduce.items()
     )
-    out = dict(layers)  # copy, keep unreduced layers
-    for ln, reduced in results:
+    out = dict(layers)
+    svds = {}
+    for ln, reduced, svd in results:
         out[ln] = reduced
+        svds[ln] = svd
         print(f"    {ln}: {layers[ln].shape[1]} → {max_dims} dims")
-    return out
+    return out, svds
+
+
+def _layer_ridge_holdout_one(ln, X_train, pos_train, X_test, pos_test):
+    """Fit Ridge on train, evaluate R² on test. Returns (ln, r2, mae)."""
+    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
+    model.fit(X_train, pos_train)
+    pred = model.predict(X_test)
+    r2 = r2_score(pos_test, pred, multioutput='uniform_average')
+    mae = mean_absolute_error(pos_test, pred)
+    return ln, r2, mae
+
+
+def decode_layers_ridge_holdout(layers_train, pos_train,
+                                layers_test, pos_test,
+                                n_jobs=1, max_samples=0, max_dims=256):
+    """Fit Ridge on train trajectories, evaluate on held-out test trajectories.
+
+    No cross-validation. Faster and simpler than CV when you have two
+    separate trajectory sets. PCA is fit on train, applied to test.
+
+    Args:
+        max_samples: Subsample train set to at most this many timesteps.
+            Set to 0 to use all. (default: 0, use all for held-out mode)
+        max_dims: Truncated PCA before Ridge. (default: 256)
+
+    Returns:
+        results: dict {layer_name: {'r2': float, 'mae': float}}
+        ordered: list of layer names in display order
+    """
+    ordered = _ordered_layers(layers_train)
+    # Only keep layers present in both sets
+    ordered = [ln for ln in ordered
+               if ln in layers_train and ln in layers_test]
+
+    dummy_groups = np.zeros(len(pos_train))
+    layers_tr, pos_tr, _ = _subsample_layers(
+        layers_train, pos_train, dummy_groups, max_samples)
+
+    layers_tr, svds = _pca_layers(layers_tr, max_dims, n_jobs=n_jobs)
+
+    # Apply same PCA to test set
+    layers_te = {}
+    for ln in ordered:
+        arr = layers_test[ln]
+        if ln in svds:
+            arr = svds[ln].transform(arr).astype(np.float32)
+        layers_te[ln] = arr
+
+    print(f"  Train: {len(pos_tr)} steps  Test: {len(pos_test)} steps")
+    print(f"  Fitting {len(ordered)} layers in parallel (n_jobs={n_jobs})")
+
+    raw = Parallel(n_jobs=n_jobs, prefer='threads')(
+        delayed(_layer_ridge_holdout_one)(
+            ln, layers_tr[ln], pos_tr, layers_te[ln], pos_test)
+        for ln in ordered
+    )
+
+    results = {}
+    for ln, r2, mae in raw:
+        results[ln] = {'r2': r2, 'mae': mae}
+        print(f"  {ln}: R²={r2:.4f}  MAE={mae:.3f}")
+
+    return results, ordered
 
 
 def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
@@ -924,7 +994,7 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
         layers_todo, pos, groups, max_samples)
 
     # Per-layer PCA reduction (parallel across layers)
-    layers_todo = _pca_layers(layers_todo, max_dims, n_jobs=n_jobs)
+    layers_todo, _svds = _pca_layers(layers_todo, max_dims, n_jobs=n_jobs)
 
     # K-fold CV — NOT leave-one-episode-out: with many episodes LOGO creates
     # O(N_episodes) folds which dominates runtime regardless of per-fold speed.
@@ -1173,6 +1243,12 @@ if __name__ == '__main__':
                              'Uses KFold, NOT leave-one-episode-out — LOGO with '
                              'many episodes creates O(N_eps × N_layers) jobs '
                              'which dominates runtime. (default: 5)')
+    parser.add_argument('--test_data', default=None,
+                        help='[--mode layers --ridge_layers] Path to a held-out '
+                             'trajectory directory. If given, Ridge is trained on '
+                             '--data and evaluated on --test_data with no CV. '
+                             'Fastest option; requires generating a second '
+                             'trajectory set.')
     parser.add_argument('--resume', default=None,
                         help='[--mode layers] Path to a partial '
                              'layer_decode_checkpoint.pkl to resume from. '
@@ -1209,10 +1285,30 @@ if __name__ == '__main__':
         checkpoint_path = (Path(args.resume) if args.resume
                            else save_dir / 'layer_decode_checkpoint.pkl')
 
-        if args.ridge_layers:
-            print(f"  Using Ridge regression (fast, closed-form). "
-                  f"Metric: R² (higher = better).\n"
-                  f"  max_samples={args.max_samples}  max_dims={args.max_dims}")
+        if args.ridge_layers and args.test_data:
+            print(f"  Mode: Ridge holdout (train on --data, eval on --test_data). "
+                  f"No CV.  max_dims={args.max_dims}")
+            print("Loading held-out test trajectories...")
+            test_episodes, _ = load_episodes(Path(args.test_data))
+            print(f"  {len(test_episodes)} test episodes loaded")
+            layers_test, pos_test, _ = prepare_data_layers(test_episodes)
+            # Only keep layers present in both sets
+            common = set(layers.keys()) & set(layers_test.keys())
+            layers = {k: v for k, v in layers.items() if k in common}
+            layers_test = {k: v for k, v in layers_test.items() if k in common}
+            layer_results, ordered = decode_layers_ridge_holdout(
+                layers, pos, layers_test, pos_test,
+                n_jobs=args.n_jobs,
+                max_samples=args.max_samples,
+                max_dims=args.max_dims)
+            # Convert to {layer: [r2]} format for plot_layer_comparison
+            layer_fold_values = {ln: [v['r2']] for ln, v in layer_results.items()}
+            metric = 'r2'
+
+        elif args.ridge_layers:
+            print(f"  Mode: Ridge {args.n_cv_folds}-fold CV. "
+                  f"max_samples={args.max_samples}  max_dims={args.max_dims}\n"
+                  f"  Tip: add --test_data <path> to skip CV entirely.")
             layer_fold_values, ordered = decode_layers_ridge(
                 layers, pos, groups,
                 n_jobs=args.n_jobs,
@@ -1240,15 +1336,18 @@ if __name__ == '__main__':
         plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric)
 
         results_file = save_dir / 'layer_decode_results.pkl'
+        save_payload = {
+            'layer_fold_values': layer_fold_values,
+            'ordered': ordered,
+            'grid': (width, height),
+            'n_samples': len(pos),
+            'n_episodes': len(np.unique(groups)),
+            'metric': metric,
+        }
+        if args.ridge_layers and args.test_data:
+            save_payload['holdout_results'] = layer_results
         with open(results_file, 'wb') as f:
-            pickle.dump({
-                'layer_fold_values': layer_fold_values,
-                'ordered': ordered,
-                'grid': (width, height),
-                'n_samples': len(pos),
-                'n_episodes': len(np.unique(groups)),
-                'metric': metric,
-            }, f)
+            pickle.dump(save_payload, f)
         print(f"\nResults saved to {results_file}")
         print("Done.")
         raise SystemExit(0)

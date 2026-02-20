@@ -55,16 +55,29 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
 ```
 Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel jobs (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`).
 
-### layer-wise decoding (fast, recommended for cluster)
+### layer-wise decoding
+
+**Fastest — holdout mode (no CV), requires two trajectory sets:**
 ```
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
-  --data ./logdir/crafter_small_1m/trajectories \
-  --save ./logdir/crafter_small_1m/decoder_results \
+  --data ./trajectories_train --test_data ./trajectories_test \
+  --save ./decoder_results \
   --mode layers --ridge_layers --n_jobs -1
 ```
-`--ridge_layers`: closed-form Ridge instead of gradient descent. Metric is R² (higher=better). All (layer × fold) pairs run as one flat parallel pool with threads (no pickling). Auto-saves checkpoint to `<save>/layer_decode_checkpoint.pkl`. Add `--resume <path>` to continue from a partial run.
-`--max_samples N` (default 10000): subsample timesteps before fitting — eliminates O(N) scaling.
-`--max_dims D` (default 256): truncated PCA before Ridge — eliminates O(D²) scaling (critical for deter at 4096 dims). Set 0 to disable either. Without `--ridge_layers`, uses PyTorch classifier (CE loss, lower=better) with `n_iters=500`.
+Trains Ridge on `--data`, evaluates on `--test_data`. No folds at all. Completes in seconds.
+
+**CV mode (one trajectory set):**
+```
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./trajectories --save ./decoder_results \
+  --mode layers --ridge_layers --n_jobs -1
+```
+Uses 5-fold KFold (NOT LOGO — LOGO creates O(N_eps × N_layers) jobs, crushingly slow with randspawn).
+Key args: `--max_samples 10000`, `--max_dims 256` (truncated PCA, critical for 4096-dim deter), `--n_cv_folds 5`.
+
+### eval trajectory on GPU (fast for 400M param models)
+Drop `--jax.platform cpu` on GPU nodes — JAX uses CUDA by default, 50-100x faster.
+400M = 400 million parameters (weights) total across the full model.
 
 ### dream decode
 ```
