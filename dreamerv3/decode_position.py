@@ -24,12 +24,25 @@ Methods:
   both            - Run both methods
 
 Parallelism:
-  --n_jobs N      - Parallel workers for CV folds and per-neuron analysis.
-                    Use -1 for all CPUs. Ridge folds, classification folds,
-                    and per-neuron R² jobs all run independently. (default: 1)
+  --n_jobs N      - Parallel workers. All (layer, fold) pairs are submitted as
+                    one flat job pool for maximum parallelism. Use -1 for all
+                    CPUs. (default: 1)
   --device DEV    - Torch device for classification decoder (cpu, cuda, cuda:0).
-                    With n_jobs>1 and device=cuda, folds are round-robin
+                    With n_jobs>1 and device=cuda, jobs are round-robin
                     distributed across all available GPUs. (default: cpu)
+
+Layer-wise decoding (--mode layers):
+  --ridge_layers  - Use Ridge regression (closed-form, no GPU) instead of the
+                    PyTorch classifier. ~100x faster; metric becomes R² instead
+                    of CE loss. Recommended for initial/cluster runs.
+  --resume PATH   - Resume from a partial checkpoint. Already-finished layers
+                    are skipped. Auto-checkpoint is always saved to
+                    <save>/layer_decode_checkpoint.pkl.
+
+Fast cluster command:
+  python dreamerv3/decode_position.py \\
+    --data ./trajectories --save ./decoder_results \\
+    --mode layers --ridge_layers --n_jobs -1
 """
 
 import argparse
@@ -748,9 +761,9 @@ def prepare_data_layers(episodes):
     return layers, pos, groups
 
 
-def _layer_classification_fold(fold, train_idx, test_idx, X, y_cls,
-                                width, height, n_iters, device):
-    """Run one fold for a single layer; return mean cross-entropy loss."""
+def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
+                                y_cls, width, height, n_iters, device):
+    """Run one fold for a single layer; return (layer_name, fold, CE loss)."""
     clf = LinearClassifier(X.shape[1], width * height, device=device)
     clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
     import torch
@@ -761,12 +774,117 @@ def _layer_classification_fold(fold, train_idx, test_idx, X, y_cls,
         loss = torch.nn.functional.cross_entropy(
             logits,
             torch.tensor(y_cls[test_idx], dtype=torch.long, device=device))
-    return fold, float(loss.cpu())
+    return layer_name, fold, float(loss.cpu())
 
 
-def decode_layers(layers, pos, groups, width, height, n_iters=2000,
-                  n_jobs=1, device='cpu'):
+def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
+    """Run one Ridge fold for a single layer. Returns (layer_name, fold, r2)."""
+    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
+    model.fit(X[train_idx], pos[train_idx])
+    pred = model.predict(X[test_idx])
+    r2 = r2_score(pos[test_idx], pred, multioutput='uniform_average')
+    return layer_name, fold, r2
+
+
+def _ordered_layers(layers):
+    ordered = [ln for ln in LAYER_ORDER if ln in layers]
+    ordered += sorted(k for k in layers if k not in LAYER_ORDER)
+    return ordered
+
+
+def _save_layer_checkpoint(path, layer_fold_values, ordered, grid, n_samples,
+                            n_episodes, metric):
+    """Save partial layer decode results to disk (checkpoint)."""
+    if path is None:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'wb') as f:
+        pickle.dump({
+            'layer_fold_values': layer_fold_values,
+            'ordered': ordered,
+            'grid': grid,
+            'n_samples': n_samples,
+            'n_episodes': n_episodes,
+            'metric': metric,
+        }, f)
+
+
+def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None):
+    """Fast layer scan using Ridge regression (closed-form, no GPU needed).
+
+    All (layer, fold) pairs are submitted as one flat parallel job pool —
+    far more efficient than the sequential-layer-then-parallel-fold approach.
+    Supports checkpointing: saves partial results so cluster timeouts don't
+    lose completed layers.
+
+    Args:
+        checkpoint_path: If set, load partial results on startup and save
+            after every layer batch completes.
+
+    Returns:
+        layer_fold_r2: dict {layer_name: [fold_r2, ...]}
+        ordered: list of layer names in display order
+    """
+    logo = LeaveOneGroupOut()
+    splits = list(logo.split(pos, pos, groups))
+    n_folds = len(splits)
+
+    ordered = _ordered_layers(layers)
+
+    # Resume: load partial results and skip already-finished layers
+    layer_fold_r2 = {}
+    if checkpoint_path and Path(checkpoint_path).exists():
+        with open(checkpoint_path, 'rb') as f:
+            prev = pickle.load(f)
+        layer_fold_r2 = prev.get('layer_fold_values', {})
+        print(f"  Resumed from checkpoint: {len(layer_fold_r2)} layers done")
+
+    todo = [ln for ln in ordered if ln not in layer_fold_r2]
+    print(f"  Layers to process: {len(todo)} / {len(ordered)}")
+    if not todo:
+        return layer_fold_r2, ordered
+
+    # Flat job list: all (layer, fold) pairs in one pool
+    jobs = [
+        (ln, fold, train_idx, test_idx, layers[ln], pos)
+        for ln in todo
+        for fold, (train_idx, test_idx) in enumerate(splits)
+    ]
+    print(f"  Total jobs: {len(jobs)}  (n_jobs={n_jobs})")
+
+    raw = Parallel(n_jobs=n_jobs, prefer='processes')(
+        delayed(_layer_ridge_fold)(ln, fold, train_idx, test_idx, X, p)
+        for ln, fold, train_idx, test_idx, X, p in jobs
+    )
+
+    # Reassemble per-layer
+    from collections import defaultdict
+    fold_map = defaultdict(dict)
+    for ln, fold, r2 in raw:
+        fold_map[ln][fold] = r2
+
+    for ln in todo:
+        fold_r2 = [fold_map[ln][f] for f in range(n_folds)]
+        mean_r2 = np.mean(fold_r2)
+        print(f"  {ln}: mean R²={mean_r2:.4f}  "
+              f"(folds: {[f'{r:.3f}' for r in fold_r2]})")
+        layer_fold_r2[ln] = fold_r2
+
+    _save_layer_checkpoint(
+        checkpoint_path, layer_fold_r2, ordered,
+        grid=None, n_samples=len(pos),
+        n_episodes=len(np.unique(groups)), metric='r2')
+
+    return layer_fold_r2, ordered
+
+
+def decode_layers(layers, pos, groups, width, height, n_iters=500,
+                  n_jobs=1, device='cpu', checkpoint_path=None):
     """Run leave-one-episode-out classification for every layer.
+
+    All (layer, fold) pairs are submitted as one flat parallel job pool.
+    Supports checkpointing via checkpoint_path.
 
     Returns dict {layer_name: [fold_loss, ...]}
     """
@@ -783,40 +901,76 @@ def decode_layers(layers, pos, groups, width, height, n_iters=2000,
     splits = list(logo.split(pos, y_cls, groups))
     n_folds = len(splits)
 
+    ordered = _ordered_layers(layers)
+
+    # GPU round-robin across all (layer, fold) jobs
     if HAS_TORCH and device.startswith('cuda') and n_jobs != 1:
         import torch as _torch
         n_gpus = _torch.cuda.device_count()
-        fold_devices = [f'cuda:{i % n_gpus}' for i in range(n_folds)]
     else:
-        fold_devices = [device] * n_folds
+        n_gpus = 0
 
+    # Resume: load partial results
     layer_fold_losses = {}
-    ordered = [ln for ln in LAYER_ORDER if ln in layers]
-    ordered += sorted(k for k in layers if k not in LAYER_ORDER)
+    if checkpoint_path and Path(checkpoint_path).exists():
+        with open(checkpoint_path, 'rb') as f:
+            prev = pickle.load(f)
+        layer_fold_losses = prev.get('layer_fold_values', {})
+        print(f"  Resumed from checkpoint: {len(layer_fold_losses)} layers done")
 
-    for ln in ordered:
-        X = layers[ln]
-        print(f"\n  Layer {ln} ({X.shape[1]} dims)")
-        results = Parallel(n_jobs=n_jobs, prefer='processes')(
-            delayed(_layer_classification_fold)(
-                fold, train_idx, test_idx, X, y_cls,
-                width, height, n_iters, fold_devices[fold])
-            for fold, (train_idx, test_idx) in enumerate(splits)
-        )
-        fold_losses = [loss for _, loss in sorted(results)]
+    todo = [ln for ln in ordered if ln not in layer_fold_losses]
+    print(f"  Layers to process: {len(todo)} / {len(ordered)}")
+    if not todo:
+        return layer_fold_losses, ordered
+
+    # Flat job list: all (layer, fold) pairs in one pool
+    all_jobs = [
+        (ln, fold, train_idx, test_idx)
+        for ln in todo
+        for fold, (train_idx, test_idx) in enumerate(splits)
+    ]
+    print(f"  Total jobs: {len(all_jobs)}  (n_jobs={n_jobs})")
+
+    def _job_device(job_idx):
+        if n_gpus > 0:
+            return f'cuda:{job_idx % n_gpus}'
+        return device
+
+    raw = Parallel(n_jobs=n_jobs, prefer='processes')(
+        delayed(_layer_classification_fold)(
+            ln, fold, train_idx, test_idx, layers[ln], y_cls,
+            width, height, n_iters, _job_device(i))
+        for i, (ln, fold, train_idx, test_idx) in enumerate(all_jobs)
+    )
+
+    # Reassemble per-layer
+    from collections import defaultdict
+    fold_map = defaultdict(dict)
+    for ln, fold, loss in raw:
+        fold_map[ln][fold] = loss
+
+    for ln in todo:
+        fold_losses = [fold_map[ln][f] for f in range(n_folds)]
         mean_loss = np.mean(fold_losses)
-        print(f"    mean CE loss: {mean_loss:.4f}  "
+        print(f"  {ln}: mean CE={mean_loss:.4f}  "
               f"(folds: {[f'{l:.3f}' for l in fold_losses]})")
         layer_fold_losses[ln] = fold_losses
+
+    _save_layer_checkpoint(
+        checkpoint_path, layer_fold_losses, ordered,
+        grid=(width, height), n_samples=len(pos),
+        n_episodes=len(np.unique(groups)), metric='ce_loss')
 
     return layer_fold_losses, ordered
 
 
-def plot_layer_comparison(layer_fold_losses, ordered, save_dir):
+def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'):
     """Horizontal boxplot: one box per layer, ordered early → late.
-    Lower cross-entropy = better spatial decoding."""
-    # Use canonical order, only keeping layers we have results for
-    display_order = [ln for ln in ordered if ln in layer_fold_losses]
+
+    Args:
+        metric: 'ce_loss' (lower = better) or 'r2' (higher = better).
+    """
+    display_order = [ln for ln in ordered if ln in layer_fold_values]
     n = len(display_order)
     if n == 0:
         print("  No layer results to plot.")
@@ -824,13 +978,12 @@ def plot_layer_comparison(layer_fold_losses, ordered, save_dir):
 
     fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
 
-    data = [layer_fold_losses[ln] for ln in display_order]
+    data = [layer_fold_values[ln] for ln in display_order]
     labels = [ln.replace('/', '/\n') for ln in display_order]
 
     bp = ax.boxplot(data, vert=False, patch_artist=True,
                     labels=labels, widths=0.6)
 
-    # Colour by network section
     section_colors = {
         'enc/cnn': '#0055cc',
         'enc/mlp': '#0099ff',
@@ -840,7 +993,7 @@ def plot_layer_comparison(layer_fold_losses, ordered, save_dir):
         'pol/mlp': '#33aa00',
         'val/mlp': '#996600',
     }
-    for i, (patch, ln) in enumerate(zip(bp['boxes'], display_order)):
+    for patch, ln in zip(bp['boxes'], display_order):
         color = '#888888'
         for prefix, c in section_colors.items():
             if ln.startswith(prefix):
@@ -849,16 +1002,19 @@ def plot_layer_comparison(layer_fold_losses, ordered, save_dir):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
-    ax.set_xlabel('Cross-entropy loss (lower = better spatial decoding)', fontsize=11)
+    if metric == 'r2':
+        xlabel = 'R² (higher = better spatial decoding)'
+    else:
+        xlabel = 'Cross-entropy loss (lower = better spatial decoding)'
+    ax.set_xlabel(xlabel, fontsize=11)
     ax.set_title('Per-Layer Position Decoding', fontsize=13)
     ax.grid(True, axis='x', alpha=0.3)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.tick_params(axis='y', labelsize=8)
 
-    # Add mean annotations
     for i, ln in enumerate(display_order, start=1):
-        mean_v = np.mean(layer_fold_losses[ln])
+        mean_v = np.mean(layer_fold_values[ln])
         ax.text(mean_v, i, f' {mean_v:.3f}', va='center', fontsize=7, color='black')
 
     fig.tight_layout()
@@ -899,6 +1055,18 @@ if __name__ == '__main__':
                              '(cpu, cuda, cuda:0, etc.). With n_jobs>1 and '
                              'device=cuda, folds are round-robin distributed '
                              'across all available GPUs. (default: cpu)')
+    parser.add_argument('--ridge_layers', action='store_true', default=False,
+                        help='[--mode layers] Use Ridge regression (closed-form, '
+                             'no GPU, ~100x faster) instead of the PyTorch '
+                             'classifier for the layer comparison scan. '
+                             'Metric becomes R² instead of cross-entropy loss. '
+                             'Recommended for initial runs. (default: False)')
+    parser.add_argument('--resume', default=None,
+                        help='[--mode layers] Path to a partial '
+                             'layer_decode_results.pkl to resume from. '
+                             'Already-completed layers are skipped. '
+                             'If omitted, checkpoints are auto-saved to '
+                             '<save>/layer_decode_checkpoint.pkl.')
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -915,9 +1083,6 @@ if __name__ == '__main__':
 
     # ---- Layer-wise decoding mode ----
     if args.mode == 'layers':
-        if not HAS_TORCH:
-            print("Error: torch required for --mode layers")
-            raise SystemExit(1)
         print("\n=== Per-Layer Position Decoding ===")
         layers, pos, groups = prepare_data_layers(episodes)
         print(f"  Layers found: {sorted(layers.keys())}")
@@ -928,19 +1093,45 @@ if __name__ == '__main__':
             width = int(pos[:, 0].max()) + 1
             height = int(pos[:, 1].max()) + 1
         print(f"  Grid: {width}x{height}")
-        n_iters_layers = min(args.n_iters, 2000)  # fewer iters per layer is fine
-        layer_fold_losses, ordered = decode_layers(
-            layers, pos, groups, width, height,
-            n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device)
-        plot_layer_comparison(layer_fold_losses, ordered, save_dir)
+
+        checkpoint_path = (Path(args.resume) if args.resume
+                           else save_dir / 'layer_decode_checkpoint.pkl')
+
+        if args.ridge_layers:
+            print(f"  Using Ridge regression (fast, closed-form). "
+                  f"Metric: R² (higher = better).")
+            layer_fold_values, ordered = decode_layers_ridge(
+                layers, pos, groups,
+                n_jobs=args.n_jobs,
+                checkpoint_path=checkpoint_path)
+            metric = 'r2'
+        else:
+            if not HAS_TORCH:
+                print("Error: torch required for classifier layer decoding. "
+                      "Add --ridge_layers to use Ridge regression instead.")
+                raise SystemExit(1)
+            n_iters_layers = min(args.n_iters, 500)
+            print(f"  Using classification decoder "
+                  f"(n_iters={n_iters_layers}, device={args.device}). "
+                  f"Metric: CE loss (lower = better).\n"
+                  f"  Tip: add --ridge_layers for a ~100x faster scan.")
+            layer_fold_values, ordered = decode_layers(
+                layers, pos, groups, width, height,
+                n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,
+                checkpoint_path=checkpoint_path)
+            metric = 'ce_loss'
+
+        plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric)
+
         results_file = save_dir / 'layer_decode_results.pkl'
         with open(results_file, 'wb') as f:
             pickle.dump({
-                'layer_fold_losses': layer_fold_losses,
+                'layer_fold_values': layer_fold_values,
                 'ordered': ordered,
                 'grid': (width, height),
                 'n_samples': len(pos),
                 'n_episodes': len(np.unique(groups)),
+                'metric': metric,
             }, f)
         print(f"\nResults saved to {results_file}")
         print("Done.")

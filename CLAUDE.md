@@ -53,7 +53,16 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --save ./logdir/crafter_small_1m/decoder_results \
   --method both
 ```
-Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel CV folds/per-neuron (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`).
+Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel jobs (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`).
+
+### layer-wise decoding (fast, recommended for cluster)
+```
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./logdir/crafter_small_1m/trajectories \
+  --save ./logdir/crafter_small_1m/decoder_results \
+  --mode layers --ridge_layers --n_jobs -1
+```
+`--ridge_layers`: closed-form Ridge instead of gradient descent — ~100x faster, no GPU needed. Metric is R² (higher=better). All (layer × fold) pairs run as one flat parallel pool. Auto-saves checkpoint to `<save>/layer_decode_checkpoint.pkl`. Add `--resume <path>` to continue from a partial run. Without `--ridge_layers`, uses PyTorch classifier (CE loss, lower=better) with `n_iters=500`.
 
 ### dream decode
 ```
