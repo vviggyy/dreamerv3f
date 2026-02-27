@@ -980,8 +980,13 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
     if checkpoint_path and Path(checkpoint_path).exists():
         with open(checkpoint_path, 'rb') as f:
             prev = pickle.load(f)
-        layer_fold_r2 = prev.get('layer_fold_values', {})
-        print(f"  Resumed from checkpoint: {len(layer_fold_r2)} layers done")
+        saved_metric = prev.get('metric', 'r2')
+        if saved_metric != 'r2':
+            print(f"  WARNING: checkpoint has metric='{saved_metric}', expected 'r2'. "
+                  f"Ignoring checkpoint to avoid mixing metrics.")
+        else:
+            layer_fold_r2 = prev.get('layer_fold_values', {})
+            print(f"  Resumed from checkpoint: {len(layer_fold_r2)} layers done")
 
     todo = [ln for ln in ordered if ln not in layer_fold_r2]
     print(f"  Layers to process: {len(todo)} / {len(ordered)}")
@@ -1083,8 +1088,13 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     if checkpoint_path and Path(checkpoint_path).exists():
         with open(checkpoint_path, 'rb') as f:
             prev = pickle.load(f)
-        layer_fold_losses = prev.get('layer_fold_values', {})
-        print(f"  Resumed from checkpoint: {len(layer_fold_losses)} layers done")
+        saved_metric = prev.get('metric', 'ce_loss')
+        if saved_metric != 'ce_loss':
+            print(f"  WARNING: checkpoint has metric='{saved_metric}', expected 'ce_loss'. "
+                  f"Ignoring checkpoint to avoid mixing metrics.")
+        else:
+            layer_fold_losses = prev.get('layer_fold_values', {})
+            print(f"  Resumed from checkpoint: {len(layer_fold_losses)} layers done")
 
     todo = [ln for ln in ordered if ln not in layer_fold_losses]
     print(f"  Layers to process: {len(todo)} / {len(ordered)}")
