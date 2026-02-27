@@ -1142,11 +1142,14 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     return layer_fold_losses, ordered
 
 
-def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'):
+def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss',
+                          layer_sizes=None):
     """Horizontal boxplot: one box per layer, ordered early → late.
 
     Args:
         metric: 'ce_loss' (lower = better) or 'r2' (higher = better).
+        layer_sizes: optional dict {layer_name: int} of original neuron counts,
+                     appended to y-axis tick labels as "(D units)".
     """
     display_order = [ln for ln in ordered if ln in layer_fold_values]
     n = len(display_order)
@@ -1157,7 +1160,14 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
     fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
 
     data = [layer_fold_values[ln] for ln in display_order]
-    labels = [ln.replace('/', '/\n') for ln in display_order]
+    if layer_sizes:
+        labels = [
+            f"{ln.replace('/', '/\n')} ({layer_sizes[ln]})" if ln in layer_sizes
+            else ln.replace('/', '/\n')
+            for ln in display_order
+        ]
+    else:
+        labels = [ln.replace('/', '/\n') for ln in display_order]
 
     bp = ax.boxplot(data, vert=False, patch_artist=True,
                     labels=labels, widths=0.6)
@@ -1343,7 +1353,9 @@ if __name__ == '__main__':
                 checkpoint_path=checkpoint_path)
             metric = 'ce_loss'
 
-        plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric)
+        layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
+        plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric,
+                              layer_sizes=layer_sizes)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {
