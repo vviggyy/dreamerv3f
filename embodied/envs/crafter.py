@@ -29,8 +29,8 @@ class Crafter(embodied.Env):
     self._spawn_rng = np.random.RandomState(seed)
     # egocentric view setup
     self._pixel_size = size[0] if hasattr(size, '__len__') else size
-    self._egocentric_view = egocentric_view
-    if egocentric_view is not None:
+    self._egocentric_view = egocentric_view if egocentric_view else None
+    if self._egocentric_view is not None:
       assert egocentric_view % 2 == 1, 'egocentric_view must be odd'
       V = egocentric_view
       forward = V - 1   # tiles visible ahead of agent
@@ -38,7 +38,7 @@ class Crafter(embodied.Env):
       render_tiles = max(forward, side)
       self._ego_V = V
       self._ego_c = render_tiles            # center tile in the large render
-      self._ego_unit = self._pixel_size // V
+      self._ego_unit = np.array([self._pixel_size // V, self._pixel_size // V])
       render_grid = 2 * render_tiles + 1
       # LocalView for the oversized centered render (terrain only, no inventory)
       self._ego_local_view = crafter_engine.LocalView(
@@ -49,7 +49,7 @@ class Crafter(embodied.Env):
     if self._egocentric_view is not None:
       u = self._ego_unit
       V = self._ego_V
-      img_shape = (V * u, V * u, 3)
+      img_shape = (self._pixel_size, self._pixel_size, 3)
     else:
       img_shape = self._env.observation_space.shape
     spaces = {
@@ -162,35 +162,43 @@ class Crafter(embodied.Env):
     """
     V = self._ego_V
     c = self._ego_c    # center tile index in the large render grid
-    u = self._ego_unit
+    u = self._ego_unit  # 2-element array [upx, upx] required by crafter Textures
     forward = V - 1   # tiles ahead
     side = V // 2     # tiles to each side
 
     # Render oversized grid centered on the player (terrain only)
     canvas = self._ego_local_view(self._env._player, u)
-    # canvas shape: (render_grid*u, render_grid*u, 3)
+    # canvas shape: (render_grid*upx, render_grid*upx, 3)
 
-    cu = c * u         # center pixel offset
-    fu = forward * u   # forward span in pixels
-    su = side * u      # side span in pixels
-    Vu = V * u         # final image edge in pixels
+    upx = int(u[0])    # scalar pixels-per-tile for arithmetic
+    cu = c * upx       # center pixel offset
+    fu = forward * upx # forward span in pixels
+    su = side * upx    # side span in pixels
+    Vu = V * upx       # final image edge in pixels
 
     facing = tuple(self._env._player.facing)
 
     if facing == (-1, 0):    # left / west: forward = -row direction
-      crop = canvas[cu - fu : cu + u,    cu - su : cu - su + Vu]
+      crop = canvas[cu - fu : cu + upx,    cu - su : cu - su + Vu]
       k = 0
     elif facing == (1, 0):   # right / east: forward = +row direction
-      crop = canvas[cu       : cu + fu + u, cu - su : cu - su + Vu]
+      crop = canvas[cu       : cu + fu + upx, cu - su : cu - su + Vu]
       k = 2
     elif facing == (0, -1):  # up / north: forward = -col direction
-      crop = canvas[cu - su : cu - su + Vu, cu - fu : cu + u   ]
+      crop = canvas[cu - su : cu - su + Vu, cu - fu : cu + upx   ]
       k = 3
     else:                    # down / south (0, 1): forward = +col direction
-      crop = canvas[cu - su : cu - su + Vu, cu       : cu + fu + u]
+      crop = canvas[cu - su : cu - su + Vu, cu       : cu + fu + upx]
       k = 1
 
-    return np.rot90(crop, k)
+    result = np.rot90(crop, k)
+    # Pad to pixel_size x pixel_size (crop may be smaller due to integer division)
+    h, w = result.shape[:2]
+    if h < self._pixel_size or w < self._pixel_size:
+      padded = np.zeros((self._pixel_size, self._pixel_size, 3), dtype=np.uint8)
+      padded[:h, :w] = result
+      result = padded
+    return result
 
   def _write_stats(self, length, reward, info):
     stats = {
