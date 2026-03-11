@@ -1162,9 +1162,8 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
     data = [layer_fold_values[ln] for ln in display_order]
     if layer_sizes:
         labels = [
-            f"{ln.replace('/', '/\n')} ({layer_sizes[ln]})" if ln in layer_sizes
-            else ln.replace('/', '/\n')
-            for ln in display_order
+            (ln_nl + f" ({layer_sizes[ln]})" if ln in layer_sizes else ln_nl)
+            for ln, ln_nl in ((ln, ln.replace('/', '/\n')) for ln in display_order)
         ]
     else:
         labels = [ln.replace('/', '/\n') for ln in display_order]

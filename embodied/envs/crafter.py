@@ -43,6 +43,11 @@ class Crafter(embodied.Env):
       # LocalView for the oversized centered render (terrain only, no inventory)
       self._ego_local_view = crafter_engine.LocalView(
           self._env._world, self._env._textures, [render_grid, render_grid])
+      # Compute inventory bar height (rows after render()'s transpose)
+      import crafter as _crafter_mod
+      _item_rows = int(np.ceil(
+          len(_crafter_mod.constants.items) / self._env._view[0]))
+      self._ego_inv_rows = int(_item_rows * self._env._size[0] // self._env._view[0])
 
   @property
   def obs_space(self):
@@ -119,7 +124,7 @@ class Crafter(embodied.Env):
       self, image, reward, info,
       is_first=False, is_last=False, is_terminal=False):
     if self._egocentric_view is not None:
-      image = self._render_egocentric()
+      image = self._render_egocentric(image)
     # Get player position from internal crafter env
     player_pos = np.array(self._env._player.pos, dtype=np.float32)
     obs = dict(
@@ -138,7 +143,7 @@ class Crafter(embodied.Env):
     obs.update(achievements)
     return obs
 
-  def _render_egocentric(self):
+  def _render_egocentric(self, raw_image):
     """Render a V×V egocentric observation with the agent at bottom-center.
 
     Renders a large centered grid (terrain only, no inventory bar), crops
@@ -198,6 +203,8 @@ class Crafter(embodied.Env):
       padded = np.zeros((self._pixel_size, self._pixel_size, 3), dtype=np.uint8)
       padded[:h, :w] = result
       result = padded
+    # Copy inventory bar from standard crafter image into bottom rows
+    result[-self._ego_inv_rows:] = raw_image[-self._ego_inv_rows:]
     return result
 
   def _write_stats(self, length, reward, info):
