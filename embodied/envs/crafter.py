@@ -43,6 +43,8 @@ class Crafter(embodied.Env):
       # LocalView for the oversized centered render (terrain only, no inventory)
       self._ego_local_view = crafter_engine.LocalView(
           self._env._world, self._env._textures, [render_grid, render_grid])
+      # Inventory bar: crafter render() transposes the canvas, so the item
+      # columns become the bottom rows of the returned image.
       # Compute inventory bar height (rows after render()'s transpose)
       import crafter as _crafter_mod
       _item_rows = int(np.ceil(
@@ -146,7 +148,7 @@ class Crafter(embodied.Env):
   def _render_egocentric(self, raw_image):
     """Render a V×V egocentric observation with the agent at bottom-center.
 
-    Renders a large centered grid (terrain only, no inventory bar), crops
+    Renders a large centered grid (terrain only), crops
     asymmetrically based on the agent's facing direction so that V-1 tiles are
     visible ahead and 0 behind, then rotates so the forward direction maps to
     the top of the returned image.
