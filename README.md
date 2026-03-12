@@ -38,6 +38,25 @@ python dreamerv3/main.py \
 > or Apple Silicon machine, you **must** pass `--jax.platform cpu` or the JAX backend
 > will fail to initialize. This applies to all scripts (train, eval, plot).
 
+**Egocentric observations:**
+
+The Crafter environment supports an egocentric view centered on the agent, facing
+forward. Enable it via config or flag:
+
+```sh
+# In configs.yaml (under env.crafter):
+#   egocentric_view: 7   # 7×7 tile window, must be an odd integer; 0 = disabled (default)
+
+# Or as a command-line flag:
+python dreamerv3/main.py --configs crafter_small size1m \
+  --env.crafter.egocentric_view 7 --logdir ./logdir/crafter_ego
+```
+
+The egocentric view renders a `V×V` tile window with the agent at the bottom-center
+and the forward direction at the top. The inventory bar from the standard render is
+preserved at the bottom of the image. Random spawn (`--env.crafter.random_spawn true`)
+relocates the player to a random walkable tile each episode.
+
 **Plot trajectory visualizations:**
 
 ```sh
@@ -46,6 +65,9 @@ python dreamerv3/plot_trajectories.py \
   --plot all \
   --save ./logdir/crafter_small_1m/plots
 ```
+
+Plot types: `trajectories`, `heatmap`, `activation`, `spatial`, `world`, `fullworld`,
+`animate`, `animate_world`, `all`.
 
 **Decode agent position from world model latent states:**
 
@@ -89,11 +111,43 @@ Options:
 
 Outputs (saved to `--save` dir):
 - `regression_summary.png` — R² bar chart + decoded vs true scatter
-- `classification_<layer>.png` — Manhattan error histogram vs shuffle
+- `classification_<repr>.png` — Manhattan decode error histogram vs shuffle baseline
 - `probmap_deter_ep<N>.png` — softmax P(position) heatmap with true agent position
+- `probmap_world_deter_ep<N>.png` — P(position) overlay on rendered Crafter world map
 - `per_neuron_r2.png` — per-neuron R² scatter (deter vs stoch)
-- `top_neurons_<layer>.png` — spatial tuning maps for top decoded neurons
+- `top_neurons_<repr>.png` — spatial tuning maps for top decoded neurons
 - `decode_results.pkl` — all numerical results
+
+**Layer-wise decoding across all model layers:**
+
+Scans every recorded layer (encoder CNN/MLP, deter, stoch, policy, value) and
+produces a per-layer comparison boxplot. Two modes:
+
+```sh
+# Fastest — holdout mode (train on one set, eval on another, no CV):
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./trajectories_train --test_data ./trajectories_test \
+  --save ./decoder_results \
+  --mode layers --ridge_layers --n_jobs -1
+
+# CV mode (single trajectory set, 5-fold KFold):
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./logdir/crafter_small_25m_randspawn_ego_inventory/trajectories \
+  --save ./logdir/crafter_small_25m_randspawn_ego_inventory/layer_decoder_results \
+  --mode layers --device cuda --n_jobs 8
+```
+
+- `--ridge_layers` — use Ridge regression (metric: R², ~100× faster than classifier)
+- Without `--ridge_layers` — use pRNN-style classification (metric: mean Manhattan distance in tiles, joint x+y, lower = better)
+- `--max_samples N` — subsample timesteps before fitting (default 10000)
+- `--max_dims D` — truncated PCA before Ridge (default 256, critical for 4096-dim deter)
+- `--n_cv_folds N` — number of CV folds (default 5, Ridge only)
+- `--test_data PATH` — held-out test set for Ridge holdout mode (no CV)
+
+Outputs:
+- `layer_comparison.png` — horizontal boxplot, one box per layer, ordered early→late
+- `layer_decode_results.pkl` — numerical results including metric name
+- `layer_decode_checkpoint.pkl` — auto-saved partial results (resume with `--resume`)
 
 ![DreamerV3 Tasks](https://user-images.githubusercontent.com/2111293/217647148-cbc522e2-61ad-4553-8e14-1ecdc8d9438b.gif)
 

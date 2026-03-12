@@ -6,9 +6,9 @@
 - `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size1m`, `debug`
 - `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl
 - `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, animations
-- `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Includes `plot_probmap_on_world` which overlays decoder P(pos) heatmap on rendered Crafter world map with trajectory. `--save_model` saves fitted decoders for use by `dream_decode.py`
+- `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Includes `plot_probmap_on_world` which overlays decoder P(pos) heatmap on rendered Crafter world map with trajectory. `--save_model` saves fitted decoders for use by `dream_decode.py`. Layer-wise decoding (`--mode layers`): Ridge uses R², classification uses mean Manhattan distance (tiles).
 - `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories
-- `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world
+- `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world. `random_spawn=True` relocates player to random walkable tile each episode. `egocentric_view=N` (odd int, e.g. 7) renders N×N egocentric view centered on player facing direction; inventory bar is copied from the standard render into the bottom rows.
 - `embodied/jax/agent.py` — JAX Agent.__new__ calls internal.setup() then __init__. Line 72: jax.devices()
 - `embodied/jax/internal.py` — setup() sets jax platform, XLA flags. Line 34: `platform and jax.config.update('jax_platforms', platform)`
 - `embodied/tests/test_crafter_world.py` — world consistency tests (fixed_seed, walkable spawn, determinism)
@@ -18,6 +18,9 @@
 - **checkpoint path**: pass the timestamped DIR not the `latest` file. e.g. `./logdir/.../ckpt/20260129T183613F519148`
 - **crafter area**: `crafter_small` uses `area=[32,32]` not default 64x64. plot_trajectories.py reads area from metadata
 - **world seed**: crafter derives seed as `hash((self._seed, self._episode))`. fixed_seed resets _episode=0 so same world each ep
+- **egocentric_view**: must be an odd integer (e.g. 7). `egocentric_view=0` disables it (default). Set in configs.yaml under `env.crafter.egocentric_view` or pass `--env.crafter.egocentric_view 7`
+- **layer decode checkpoint**: checkpoint files record which metric was used (`r2`, `manhattan`, `ce_loss`). Mismatched metric triggers a warning and checkpoint is ignored — delete stale checkpoint if switching modes
+- **layer decode metric**: `--ridge_layers` → R²; classification (no flag) → mean Manhattan distance in tiles (joint x,y, lower = better)
 
 ## commands
 

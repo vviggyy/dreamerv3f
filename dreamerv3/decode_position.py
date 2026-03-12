@@ -768,19 +768,14 @@ def prepare_data_layers(episodes):
 
 
 def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
-                                y_cls, width, height, n_iters, device):
-    """Run one fold for a single layer; return (layer_name, fold, CE loss)."""
+                                y_cls, pos_int, width, height, n_iters, device):
+    """Run one fold for a single layer; return (layer_name, fold, mean Manhattan error)."""
     clf = LinearClassifier(X.shape[1], width * height, device=device)
     clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
-    import torch
-    clf.model.eval()
-    with torch.no_grad():
-        logits = clf.model(torch.tensor(
-            X[test_idx], dtype=torch.float32, device=device))
-        loss = torch.nn.functional.cross_entropy(
-            logits,
-            torch.tensor(y_cls[test_idx], dtype=torch.long, device=device))
-    return layer_name, fold, float(loss.cpu())
+    pred_cls = clf.predict(X[test_idx])
+    pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
+    manhattan = np.sum(np.abs(pred_xy - pos_int[test_idx]), axis=1).mean()
+    return layer_name, fold, float(manhattan)
 
 
 def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
@@ -1084,22 +1079,22 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
         n_gpus = 0
 
     # Resume: load partial results
-    layer_fold_losses = {}
+    layer_fold_manhattan = {}
     if checkpoint_path and Path(checkpoint_path).exists():
         with open(checkpoint_path, 'rb') as f:
             prev = pickle.load(f)
-        saved_metric = prev.get('metric', 'ce_loss')
-        if saved_metric != 'ce_loss':
-            print(f"  WARNING: checkpoint has metric='{saved_metric}', expected 'ce_loss'. "
+        saved_metric = prev.get('metric', 'manhattan')
+        if saved_metric != 'manhattan':
+            print(f"  WARNING: checkpoint has metric='{saved_metric}', expected 'manhattan'. "
                   f"Ignoring checkpoint to avoid mixing metrics.")
         else:
-            layer_fold_losses = prev.get('layer_fold_values', {})
-            print(f"  Resumed from checkpoint: {len(layer_fold_losses)} layers done")
+            layer_fold_manhattan = prev.get('layer_fold_values', {})
+            print(f"  Resumed from checkpoint: {len(layer_fold_manhattan)} layers done")
 
-    todo = [ln for ln in ordered if ln not in layer_fold_losses]
+    todo = [ln for ln in ordered if ln not in layer_fold_manhattan]
     print(f"  Layers to process: {len(todo)} / {len(ordered)}")
     if not todo:
-        return layer_fold_losses, ordered
+        return layer_fold_manhattan, ordered
 
     # Flat job list: all (layer, fold) pairs in one pool
     all_jobs = [
@@ -1116,7 +1111,7 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
 
     raw = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_layer_classification_fold)(
-            ln, fold, train_idx, test_idx, layers[ln], y_cls,
+            ln, fold, train_idx, test_idx, layers[ln], y_cls, pos_int,
             width, height, n_iters, _job_device(i))
         for i, (ln, fold, train_idx, test_idx) in enumerate(all_jobs)
     )
@@ -1124,22 +1119,22 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     # Reassemble per-layer
     from collections import defaultdict
     fold_map = defaultdict(dict)
-    for ln, fold, loss in raw:
-        fold_map[ln][fold] = loss
+    for ln, fold, manhattan in raw:
+        fold_map[ln][fold] = manhattan
 
     for ln in todo:
-        fold_losses = [fold_map[ln][f] for f in range(n_folds)]
-        mean_loss = np.mean(fold_losses)
-        print(f"  {ln}: mean CE={mean_loss:.4f}  "
-              f"(folds: {[f'{l:.3f}' for l in fold_losses]})")
-        layer_fold_losses[ln] = fold_losses
+        fold_manhattan = [fold_map[ln][f] for f in range(n_folds)]
+        mean_manhattan = np.mean(fold_manhattan)
+        print(f"  {ln}: mean decode error={mean_manhattan:.3f} tiles  "
+              f"(folds: {[f'{v:.3f}' for v in fold_manhattan]})")
+        layer_fold_manhattan[ln] = fold_manhattan
 
     _save_layer_checkpoint(
-        checkpoint_path, layer_fold_losses, ordered,
+        checkpoint_path, layer_fold_manhattan, ordered,
         grid=(width, height), n_samples=len(pos),
-        n_episodes=len(np.unique(groups)), metric='ce_loss')
+        n_episodes=len(np.unique(groups)), metric='manhattan')
 
-    return layer_fold_losses, ordered
+    return layer_fold_manhattan, ordered
 
 
 def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss',
@@ -1191,6 +1186,8 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
 
     if metric == 'r2':
         xlabel = 'R² (higher = better spatial decoding)'
+    elif metric == 'manhattan':
+        xlabel = 'Mean decode error (tiles, lower = better)'
     else:
         xlabel = 'Cross-entropy loss (lower = better spatial decoding)'
     ax.set_xlabel(xlabel, fontsize=11)
@@ -1344,13 +1341,13 @@ if __name__ == '__main__':
             n_iters_layers = min(args.n_iters, 500)
             print(f"  Using classification decoder "
                   f"(n_iters={n_iters_layers}, device={args.device}). "
-                  f"Metric: CE loss (lower = better).\n"
+                  f"Metric: mean Manhattan decode error (tiles, lower = better).\n"
                   f"  Tip: add --ridge_layers for a ~100x faster scan.")
             layer_fold_values, ordered = decode_layers(
                 layers, pos, groups, width, height,
                 n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,
                 checkpoint_path=checkpoint_path)
-            metric = 'ce_loss'
+            metric = 'manhattan'
 
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
         plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric,
