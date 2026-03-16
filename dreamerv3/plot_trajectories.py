@@ -726,6 +726,20 @@ def animate_worldview_agentview(
 
     title = fig.suptitle('', fontsize=11, y=0.98)
 
+    # Action name label below the panels
+    _CRAFTER_ACTIONS = [
+        'noop', 'move_left', 'move_right', 'move_up', 'move_down',
+        'do', 'sleep', 'place_stone', 'place_table', 'place_furnace',
+        'place_plant', 'make_wood_pickaxe', 'make_stone_pickaxe',
+        'make_iron_pickaxe', 'make_wood_sword', 'make_stone_sword',
+        'make_iron_sword',
+    ]
+    action_label = fig.text(0.5, 0.01, '', ha='center', va='bottom',
+                            fontsize=13, fontweight='bold',
+                            bbox=dict(boxstyle='round,pad=0.3',
+                                      facecolor='#1a1a2e', edgecolor='white',
+                                      alpha=0.85))
+
     def _world_to_img(wx, wy):
         """World tile coords → image pixel (col, row) in world_img."""
         col = int(wx * tile_size + tile_size // 2)
@@ -845,18 +859,32 @@ def animate_worldview_agentview(
         # Right panel: agent observation
         obs_im.set_data(ep['image'][step])
 
+        # Action label: show current action; note if movement was blocked
+        act_id = int(ep['action'][step]) if step < len(ep['action']) else 0
+        act_name = (_CRAFTER_ACTIONS[act_id]
+                    if act_id < len(_CRAFTER_ACTIONS) else str(act_id))
+        moved = (step == 0 or
+                 not np.all(ep['player_pos'][step] == ep['player_pos'][step - 1]))
+        if not moved and act_name.startswith('move_'):
+            act_display = f'action: {act_name}  (blocked)'
+        else:
+            act_display = f'action: {act_name}'
+        action_label.set_text(act_display)
+
         # Title
         title.set_text(
             f'Ep {episode_idx + 1}  step {step}/{n_steps - 1}  '
             f'reward={ep["total_reward"]:.0f}')
 
-        return world_im, fov_patch, agent_dot, facing_arrow, trail_col, obs_im, title
+        return (world_im, fov_patch, agent_dot, facing_arrow, trail_col,
+                obs_im, title, action_label)
 
     # Every step shown — no subsampling. step_ms controls playback speed only.
     anim = animation.FuncAnimation(
         fig, _update, frames=n_steps, blit=False, interval=step_ms)
 
     plt.tight_layout()
+    fig.subplots_adjust(bottom=0.07)  # room for action label
 
     if save_path:
         # PillowWriter fps = 1000 / step_ms
