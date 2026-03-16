@@ -189,12 +189,12 @@ class Encoder(nj.Module):
   outer: bool = False
   strided: bool = False
 
-  def __init__(self, obs_space, **kw):
+  def __init__(self, obs_space, **kw): #enc_space comes through here
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
     self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
-    self.depths = tuple(self.depth * mult for mult in self.mults)
+    self.depths = tuple(self.depth * mult for mult in self.muentoelts)
     self.kw = kw
 
   @property

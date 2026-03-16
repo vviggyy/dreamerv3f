@@ -67,6 +67,7 @@ class Crafter(embodied.Env):
         'is_terminal': elements.Space(bool),
         'log/reward': elements.Space(np.float32),
         'player_pos': elements.Space(np.float32, (2,)),
+        'log/player_facing': elements.Space(np.int32, (2,)),
     }
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     spaces.update({
@@ -127,8 +128,9 @@ class Crafter(embodied.Env):
       is_first=False, is_last=False, is_terminal=False):
     if self._egocentric_view is not None:
       image = self._render_egocentric(image)
-    # Get player position from internal crafter env
+    # Get player position and facing from internal crafter env
     player_pos = np.array(self._env._player.pos, dtype=np.float32)
+    player_facing = np.array(self._env._player.facing, dtype=np.int32)
     obs = dict(
         image=image,
         reward=np.float32(reward),
@@ -137,6 +139,7 @@ class Crafter(embodied.Env):
         is_terminal=is_terminal,
         player_pos=player_pos,
         **{'log/reward': np.float32(info['reward'] if info else 0.0)},
+        **{'log/player_facing': player_facing},
     )
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     achievements = {

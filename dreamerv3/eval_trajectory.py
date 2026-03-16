@@ -73,6 +73,8 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     episode_data['reward'].append(float(tran['reward']))
     episode_data['action'].append(tran.get('action', 0))
     episode_data['image'].append(tran['image'].copy())
+    if 'log/player_facing' in tran:
+      episode_data['player_facing'].append(tran['log/player_facing'].copy())
 
     # Track achievements and print when new ones are unlocked
     current_achievements = {}

@@ -602,6 +602,272 @@ def animate_fullworld_trajectories(episodes, metadata=None, tile_size=8,
         plt.show()
 
 
+def _precompute_facings(ep):
+    """Return list of (fx, fy) facing per step.
+
+    Uses stored player_facing if available; otherwise derives from consecutive
+    position differences, carrying forward when the agent acts in place.
+    """
+    n = len(ep['player_pos'])
+    if 'player_facing' in ep:
+        return [tuple(ep['player_facing'][i]) for i in range(n)]
+    pos = ep['player_pos']
+    facings = []
+    last = (0, 1)  # default: south
+    for i in range(n):
+        if i > 0:
+            dp = pos[i] - pos[i - 1]
+            if dp[0] != 0 or dp[1] != 0:
+                last = (int(np.sign(dp[0])), int(np.sign(dp[1])))
+        facings.append(last)
+    return facings
+
+
+def animate_worldview_agentview(
+        episodes, metadata=None, tile_size=8, window_tiles=17,
+        egocentric_view=0, view_half=4, step_ms=200, trail_length=30,
+        episode_idx=0, save_path=None):
+    """Animate a two-panel view: allocentric world map (left) + agent image (right).
+
+    Animates a single episode (selected by episode_idx). Every timestep is
+    shown — no subsampling. step_ms controls how long each frame is displayed.
+
+    Left panel: full world map cropped and centered on the agent with:
+      - fading trail of recent positions
+      - translucent grey FOV box (symmetric 9x9 for standard view, or
+        directional V×V when egocentric_view > 0)
+      - white agent dot with a direction arrow
+
+    Right panel: the stored observation image for that step.
+
+    Parameters
+    ----------
+    step_ms : int
+        Milliseconds per timestep (e.g. 500 = 2 timesteps/sec). Controls
+        playback speed only; every step is shown.
+    episode_idx : int
+        Which episode to animate (0-indexed).
+    egocentric_view : int
+        If > 0, draw a directional FOV box (V-1 tiles forward, V//2 each side).
+        If 0, draw a symmetric (2*view_half+1)^2 FOV box centered on agent.
+    view_half : int
+        Half-width of the symmetric FOV box in tiles (default 4 → 9×9 tiles).
+    window_tiles : int
+        Width/height of the left-panel world-map window in tiles.
+    """
+    episodes = _filter_valid_episodes(episodes, 'animate_worldview_agentview')
+    if not episodes:
+        print("No valid episodes for worldview animation.")
+        return
+
+    if episode_idx >= len(episodes):
+        print(f"episode_idx {episode_idx} out of range ({len(episodes)} episodes).")
+        return
+    ep = episodes[episode_idx]
+
+    world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
+    if world_img is None:
+        return
+
+    img_h, img_w = world_img.shape[:2]
+    win_px = window_tiles * tile_size  # left-panel pixel size (square)
+    half_win = win_px // 2
+
+    facings = _precompute_facings(ep)
+    n_steps = len(ep['player_pos'])
+
+    # Figure layout: left = world, right = agent obs
+    obs_h, obs_w = ep['image'][0].shape[:2]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7),
+                             gridspec_kw={'width_ratios': [1, 1]})
+    ax_world, ax_obs = axes
+
+    # Left panel: static background image placeholder (updated per frame)
+    init_world = np.zeros((win_px, win_px, 3), dtype=np.uint8)
+    world_im = ax_world.imshow(init_world, origin='upper',
+                               extent=[0, win_px, win_px, 0])
+    ax_world.set_xlim(0, win_px)
+    ax_world.set_ylim(win_px, 0)  # row 0 at top
+    ax_world.axis('off')
+    ax_world.set_title('World View (allocentric, centered on agent)',
+                       fontsize=10)
+
+    # FOV rectangle patch (translucent grey)
+    fov_patch = plt.Polygon(np.zeros((4, 2)), closed=True,
+                            facecolor='grey', edgecolor='white',
+                            alpha=0.35, linewidth=1.2, zorder=5)
+    ax_world.add_patch(fov_patch)
+
+    # Agent dot
+    agent_dot, = ax_world.plot([], [], 'o', color='white', markersize=7,
+                               markeredgecolor='gold', markeredgewidth=1.5,
+                               zorder=10)
+    # Facing arrow: FancyArrowPatch for easy per-frame position updates
+    from matplotlib.patches import FancyArrowPatch
+    facing_arrow = FancyArrowPatch(
+        (half_win, half_win), (half_win, half_win - tile_size),
+        arrowstyle='->', color='gold', linewidth=2,
+        mutation_scale=12, zorder=11)
+    ax_world.add_patch(facing_arrow)
+
+    # Trail collection
+    trail_col = LineCollection([], linewidths=[], colors=[], capstyle='round',
+                               zorder=6)
+    ax_world.add_collection(trail_col)
+
+    # Right panel: agent observation
+    init_obs = np.zeros((obs_h, obs_w, 3), dtype=np.uint8)
+    obs_im = ax_obs.imshow(init_obs, origin='upper',
+                           extent=[0, obs_w, obs_h, 0])
+    ax_obs.set_xlim(0, obs_w)
+    ax_obs.set_ylim(obs_h, 0)
+    ax_obs.axis('off')
+    ax_obs.set_title('Agent Observation', fontsize=10)
+
+    title = fig.suptitle('', fontsize=11, y=0.98)
+
+    def _world_to_img(wx, wy):
+        """World tile coords → image pixel (col, row) in world_img."""
+        col = int(wx * tile_size + tile_size // 2)
+        row = int(img_h - wy * tile_size - tile_size // 2)
+        return col, row
+
+    def _fov_corners(agent_col, agent_row, fx, fy, egocentric_view, view_half):
+        """Compute 4 corners of the FOV box in LOCAL window pixel coords.
+
+        The world_img has south at top (py = img_h - y*ts), so:
+          image-col direction: east = +col ✓
+          image-row direction: north = +row (north at bottom of world_img)
+
+        Forward direction in image (dcol, drow) per tile:
+          fwd = (fx, -fy)
+        Right-perpendicular (visual CW in image/y-down space):
+          rgt = CW rotation of fwd = (-fwd_row, fwd_col) ... wait:
+          For y-down space, CW rotation of (a,b) = (b, -a).
+          fwd = (fx, -fy) → CW = (-fy, -fx) = rgt
+
+        Local coords: agent is always at (half_win, half_win).
+        """
+        # forward/right unit vectors in image (col, row) per tile
+        fwd = np.array([fx, -fy], dtype=float)
+        rgt = np.array([-fy, -fx], dtype=float)  # CW perp of fwd
+
+        cx, cy = half_win, half_win  # agent in local window
+
+        if egocentric_view > 0:
+            V = egocentric_view
+            fwd_t = V - 1    # tiles ahead
+            side_t = V // 2  # tiles each side
+            bk_t = 0         # tiles behind (0 for egocentric)
+        else:
+            fwd_t = view_half
+            side_t = view_half
+            bk_t = view_half  # symmetric: same behind
+
+        ts = tile_size
+        corners = np.array([
+            [cx + side_t * rgt[0] * ts - bk_t * fwd[0] * ts,
+             cy + side_t * rgt[1] * ts - bk_t * fwd[1] * ts],
+            [cx + side_t * rgt[0] * ts + fwd_t * fwd[0] * ts,
+             cy + side_t * rgt[1] * ts + fwd_t * fwd[1] * ts],
+            [cx - side_t * rgt[0] * ts + fwd_t * fwd[0] * ts,
+             cy - side_t * rgt[1] * ts + fwd_t * fwd[1] * ts],
+            [cx - side_t * rgt[0] * ts - bk_t * fwd[0] * ts,
+             cy - side_t * rgt[1] * ts - bk_t * fwd[1] * ts],
+        ])
+        return corners
+
+    def _update(step):
+        pos = ep['player_pos'][step]
+        facing = facings[step]
+        fx, fy = facing
+
+        # Agent pixel position in world_img
+        a_col, a_row = _world_to_img(pos[0], pos[1])
+
+        # Crop window centered on agent
+        c0 = a_col - half_win  # left edge
+        r0 = a_row - half_win  # top edge
+        c1 = c0 + win_px
+        r1 = r0 + win_px
+
+        # Clip to image bounds + pad
+        pad_l = max(0, -c0)
+        pad_t = max(0, -r0)
+        pad_r = max(0, c1 - img_w)
+        pad_b = max(0, r1 - img_h)
+        cc0, cr0 = max(0, c0), max(0, r0)
+        cc1, cr1 = min(img_w, c1), min(img_h, r1)
+        window = world_img[cr0:cr1, cc0:cc1].copy()
+        if pad_l or pad_t or pad_r or pad_b:
+            window = np.pad(window,
+                            [(pad_t, pad_b), (pad_l, pad_r), (0, 0)],
+                            mode='constant', constant_values=0)
+        world_im.set_data(window)
+
+        # FOV box in local (window) pixel coords
+        corners = _fov_corners(a_col, a_row, fx, fy, egocentric_view, view_half)
+        fov_patch.set_xy(corners)
+
+        # Agent dot (always at window center)
+        agent_dot.set_data([half_win], [half_win])
+
+        # Facing arrow: 1.5-tile-length arrow from agent center
+        # In image (col, row) with row 0 at top: fwd direction = (fx, -fy)
+        arrow_len = 1.5 * tile_size
+        adx = fx * arrow_len
+        ady = -fy * arrow_len
+        posA = (half_win, half_win)
+        posB = (half_win + adx, half_win + ady)
+        facing_arrow.set_positions(posA, posB)
+
+        # Trail: past positions in local coords
+        trail_start = max(0, step - trail_length)
+        trail_pos = ep['player_pos'][trail_start:step + 1]
+        tpx = trail_pos[:, 0] * tile_size + tile_size // 2 - c0
+        tpy = img_h - trail_pos[:, 1] * tile_size - tile_size // 2 - r0
+        if len(tpx) >= 2:
+            pts = np.column_stack([tpx, tpy]).reshape(-1, 1, 2)
+            segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+            n = len(segs)
+            t = np.linspace(0, 1, n)
+            alphas = 0.15 + 0.85 * (t ** 1.5)
+            widths = 1.0 + 3.5 * t
+            colors = np.zeros((n, 4))
+            colors[:, :3] = [1.0, 0.85, 0.0]  # gold trail
+            colors[:, 3] = alphas
+            trail_col.set_segments(segs)
+            trail_col.set_linewidths(widths)
+            trail_col.set_colors(colors)
+        else:
+            trail_col.set_segments([])
+
+        # Right panel: agent observation
+        obs_im.set_data(ep['image'][step])
+
+        # Title
+        title.set_text(
+            f'Ep {episode_idx + 1}  step {step}/{n_steps - 1}  '
+            f'reward={ep["total_reward"]:.0f}')
+
+        return world_im, fov_patch, agent_dot, facing_arrow, trail_col, obs_im, title
+
+    # Every step shown — no subsampling. step_ms controls playback speed only.
+    anim = animation.FuncAnimation(
+        fig, _update, frames=n_steps, blit=False, interval=step_ms)
+
+    plt.tight_layout()
+
+    if save_path:
+        # PillowWriter fps = 1000 / step_ms
+        writer = animation.PillowWriter(fps=max(1, round(1000 / step_ms)))
+        anim.save(str(save_path), writer=writer, dpi=100)
+        print(f"Saved worldview animation to {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
 def find_spatial_units(episodes, layer='deter', top_k=10):
     """Find units most correlated with position."""
     episodes = _filter_valid_episodes(episodes, 'find_spatial_units')
@@ -648,7 +914,7 @@ def main():
     parser.add_argument('--data', type=str, required=True,
                         help='Path to trajectory data directory')
     parser.add_argument('--plot', type=str, default='all',
-                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'animate', 'animate_world', 'all'],
+                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'animate', 'animate_world', 'worldview', 'all'],
                         help='Type of plot to generate')
     parser.add_argument('--unit', type=int, default=0,
                         help='Unit index for activation plot')
@@ -657,6 +923,16 @@ def main():
                         help='Layer to analyze')
     parser.add_argument('--save', type=str, default=None,
                         help='Directory to save plots')
+    parser.add_argument('--egocentric_view', type=int, default=0,
+                        help='V for directional FOV box (0 = symmetric 9x9)')
+    parser.add_argument('--view_half', type=int, default=4,
+                        help='Half-width of symmetric FOV box in tiles (default 4 → 9x9)')
+    parser.add_argument('--window_tiles', type=int, default=17,
+                        help='Left-panel world window size in tiles (default 17)')
+    parser.add_argument('--step_ms', type=int, default=200,
+                        help='Milliseconds per timestep for worldview (default 200 = 5 steps/sec)')
+    parser.add_argument('--episode_idx', type=int, default=0,
+                        help='Which episode to animate for worldview (default 0)')
     args = parser.parse_args()
 
     print(f"Loading episodes from {args.data}")
@@ -707,6 +983,17 @@ def main():
     if args.plot in ('animate_world', 'all'):
         save_path = save_dir / 'fullworld_trajectories.gif' if save_dir else None
         animate_fullworld_trajectories(episodes, metadata, save_path=save_path)
+
+    if args.plot in ('worldview',):
+        save_path = save_dir / 'worldview_agentview.gif' if save_dir else None
+        animate_worldview_agentview(
+            episodes, metadata,
+            window_tiles=args.window_tiles,
+            egocentric_view=args.egocentric_view,
+            view_half=args.view_half,
+            step_ms=args.step_ms,
+            episode_idx=args.episode_idx,
+            save_path=save_path)
 
 
 if __name__ == '__main__':
