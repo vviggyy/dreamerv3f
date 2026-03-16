@@ -605,20 +605,36 @@ def animate_fullworld_trajectories(episodes, metadata=None, tile_size=8,
 def _precompute_facings(ep):
     """Return list of (fx, fy) facing per step.
 
-    Uses stored player_facing if available; otherwise derives from consecutive
-    position differences, carrying forward when the agent acts in place.
+    Uses stored player_facing if available.
+
+    Otherwise derives from the action recorded at each step, since in Crafter
+    action[i] is the action chosen at step i (based on obs at step i) and it
+    sets the player's facing direction at step i.  Carry forward for non-move
+    actions (do, sleep, craft, etc.) which leave facing unchanged.
+
+    Action → facing mapping (world tile coordinates, north = -y):
+      move_left  (1) → (-1,  0)   west
+      move_right (2) → ( 1,  0)   east
+      move_up    (3) → ( 0, -1)   north
+      move_down  (4) → ( 0,  1)   south
     """
     n = len(ep['player_pos'])
     if 'player_facing' in ep:
         return [tuple(ep['player_facing'][i]) for i in range(n)]
-    pos = ep['player_pos']
+
+    _MOVE_FACING = {
+        1: (-1,  0),   # move_left  → west
+        2: ( 1,  0),   # move_right → east
+        3: ( 0, -1),   # move_up    → north
+        4: ( 0,  1),   # move_down  → south
+    }
+    actions = ep.get('action', [])
     facings = []
     last = (0, 1)  # default: south
     for i in range(n):
-        if i > 0:
-            dp = pos[i] - pos[i - 1]
-            if dp[0] != 0 or dp[1] != 0:
-                last = (int(np.sign(dp[0])), int(np.sign(dp[1])))
+        act_id = int(actions[i]) if i < len(actions) else 0
+        if act_id in _MOVE_FACING:
+            last = _MOVE_FACING[act_id]
         facings.append(last)
     return facings
 
@@ -668,6 +684,11 @@ def animate_worldview_agentview(
     world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
     if world_img is None:
         return
+
+    # _render_crafter_world produces south-at-top (due to transpose+flip).
+    # Crafter observations have north-at-top (conventional game orientation).
+    # Flip the world map so both panels share the same orientation.
+    world_img = world_img[::-1].copy()
 
     img_h, img_w = world_img.shape[:2]
     win_px = window_tiles * tile_size  # left-panel pixel size (square)
@@ -741,30 +762,33 @@ def animate_worldview_agentview(
                                       alpha=0.85))
 
     def _world_to_img(wx, wy):
-        """World tile coords → image pixel (col, row) in world_img."""
+        """World tile coords → image pixel (col, row) in the flipped world_img.
+
+        After the [::-1] flip, world_img has north at top (conventional
+        game orientation), so image_row = world_y * tile_size.
+        """
         col = int(wx * tile_size + tile_size // 2)
-        row = int(img_h - wy * tile_size - tile_size // 2)
+        row = int(wy * tile_size + tile_size // 2)
         return col, row
 
     def _fov_corners(agent_col, agent_row, fx, fy, egocentric_view, view_half):
         """Compute 4 corners of the FOV box in LOCAL window pixel coords.
 
-        The world_img has south at top (py = img_h - y*ts), so:
-          image-col direction: east = +col ✓
-          image-row direction: north = +row (north at bottom of world_img)
+        After the world_img flip, north is at top (north-at-top convention):
+          image-col: east = +col  ✓
+          image-row: south = +row (row increases downward = southward)  ✓
 
         Forward direction in image (dcol, drow) per tile:
-          fwd = (fx, -fy)
-        Right-perpendicular (visual CW in image/y-down space):
-          rgt = CW rotation of fwd = (-fwd_row, fwd_col) ... wait:
-          For y-down space, CW rotation of (a,b) = (b, -a).
-          fwd = (fx, -fy) → CW = (-fy, -fx) = rgt
+          fwd = (fx, fy)   — no sign change; +y (south) = +row ✓
+        Right-perpendicular (CW rotation in y-down image space):
+          CW of (a,b) = (-b, a)
+          fwd = (fx, fy) → rgt = (-fy, fx)
 
         Local coords: agent is always at (half_win, half_win).
         """
         # forward/right unit vectors in image (col, row) per tile
-        fwd = np.array([fx, -fy], dtype=float)
-        rgt = np.array([-fy, -fx], dtype=float)  # CW perp of fwd
+        fwd = np.array([fx, fy], dtype=float)
+        rgt = np.array([-fy, fx], dtype=float)  # CW perp of fwd
 
         cx, cy = half_win, half_win  # agent in local window
 
@@ -827,19 +851,19 @@ def animate_worldview_agentview(
         agent_dot.set_data([half_win], [half_win])
 
         # Facing arrow: 1.5-tile-length arrow from agent center
-        # In image (col, row) with row 0 at top: fwd direction = (fx, -fy)
+        # North-at-top: fwd = (fx, fy), so row increases southward (+fy = south)
         arrow_len = 1.5 * tile_size
         adx = fx * arrow_len
-        ady = -fy * arrow_len
+        ady = fy * arrow_len
         posA = (half_win, half_win)
         posB = (half_win + adx, half_win + ady)
         facing_arrow.set_positions(posA, posB)
 
-        # Trail: past positions in local coords
+        # Trail: past positions in local coords (north-at-top: row = y * ts)
         trail_start = max(0, step - trail_length)
         trail_pos = ep['player_pos'][trail_start:step + 1]
         tpx = trail_pos[:, 0] * tile_size + tile_size // 2 - c0
-        tpy = img_h - trail_pos[:, 1] * tile_size - tile_size // 2 - r0
+        tpy = trail_pos[:, 1] * tile_size + tile_size // 2 - r0
         if len(tpx) >= 2:
             pts = np.column_stack([tpx, tpy]).reshape(-1, 1, 2)
             segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
@@ -863,9 +887,12 @@ def animate_worldview_agentview(
         act_id = int(ep['action'][step]) if step < len(ep['action']) else 0
         act_name = (_CRAFTER_ACTIONS[act_id]
                     if act_id < len(_CRAFTER_ACTIONS) else str(act_id))
-        moved = (step == 0 or
-                 not np.all(ep['player_pos'][step] == ep['player_pos'][step - 1]))
-        if not moved and act_name.startswith('move_'):
+        # action[step] causes pos[step+1]; blocked if that position doesn't change
+        if step + 1 < n_steps:
+            moved_next = not np.all(ep['player_pos'][step + 1] == ep['player_pos'][step])
+        else:
+            moved_next = True  # last step: unknown, don't label blocked
+        if not moved_next and act_name.startswith('move_'):
             act_display = f'action: {act_name}  (blocked)'
         else:
             act_display = f'action: {act_name}'
