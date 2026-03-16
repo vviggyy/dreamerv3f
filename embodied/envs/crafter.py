@@ -156,19 +156,19 @@ class Crafter(embodied.Env):
     visible ahead and 0 behind, then rotates so the forward direction maps to
     the top of the returned image.
 
-    Canvas coordinate convention (from crafter's LocalView):
+    Canvas coordinate convention (from crafter's LocalView — NOT transposed):
       axis-0 (rows) = world x-axis  (right/east = +row)
       axis-1 (cols) = world y-axis  (down/south = +col)
+
+    Note: crafter's render() transposes the canvas to standard image form
+    (rows=y, cols=x), but LocalView does not. We compensate with np.fliplr
+    after rotation to correct the left-right mirror.
 
     Rotation mapping (agent always ends up at tile row V-1, col V//2):
       facing left  (-1, 0) west:  crop rows backward, k=0 (forward already top)
       facing right (+1, 0) east:  crop rows forward,  k=2 (180°)
       facing up    ( 0,-1) north: crop cols backward, k=3 (90° CW)
       facing down  ( 0,+1) south: crop cols forward,  k=1 (90° CCW)
-
-    NOTE: confirm these k values empirically if the canvas axes differ from
-    the convention above (e.g. by watching which side new tiles appear on when
-    moving in each direction).
     """
     V = self._ego_V
     c = self._ego_c    # center tile index in the large render grid
@@ -202,6 +202,11 @@ class Crafter(embodied.Env):
       k = 1
 
     result = np.rot90(crop, k)
+    # The LocalView canvas has axis-0=world-x, axis-1=world-y, but standard
+    # images need axis-0=y, axis-1=x (crafter's render() transposes).
+    # Since we rotate instead of transpose, the result is left-right mirrored.
+    # A horizontal flip corrects this for all facing directions.
+    result = np.fliplr(result)
     # Pad to pixel_size x pixel_size (crop may be smaller due to integer division)
     h, w = result.shape[:2]
     if h < self._pixel_size or w < self._pixel_size:
