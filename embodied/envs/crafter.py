@@ -43,13 +43,15 @@ class Crafter(embodied.Env):
       # LocalView for the oversized centered render (terrain only, no inventory)
       self._ego_local_view = crafter_engine.LocalView(
           self._env._world, self._env._textures, [render_grid, render_grid])
-      # Inventory bar: crafter render() transposes the canvas, so the item
-      # columns become the bottom rows of the returned image.
-      # Compute inventory bar height (rows after render()'s transpose)
+      # Inventory bar: compute how many ego tiles the inventory needs,
+      # so we can reduce the forward crop and keep the agent visible above it.
       import crafter as _crafter_mod
-      _item_rows = int(np.ceil(
+      # Standard view inventory (for pixel copy from raw_image)
+      _std_item_rows = int(np.ceil(
           len(_crafter_mod.constants.items) / self._env._view[0]))
-      self._ego_inv_rows = int(_item_rows * self._env._size[0] // self._env._view[0])
+      self._ego_inv_rows = int(_std_item_rows * self._env._size[0] // self._env._view[0])
+      # How many ego tiles the inventory occupies (to reduce forward crop)
+      self._ego_inv_tiles = int(np.ceil(self._ego_inv_rows / int(self._ego_unit[0])))
 
   @property
   def obs_space(self):
@@ -149,12 +151,12 @@ class Crafter(embodied.Env):
     return obs
 
   def _render_egocentric(self, raw_image):
-    """Render a V×V egocentric observation with the agent at bottom-center.
+    """Render egocentric observation with agent above the inventory bar.
 
-    Renders a large centered grid (terrain only), crops
-    asymmetrically based on the agent's facing direction so that V-1 tiles are
-    visible ahead and 0 behind, then rotates so the forward direction maps to
-    the top of the returned image.
+    Renders a large centered grid (terrain only), crops asymmetrically based
+    on facing direction. Forward vision is reduced by inv_tiles so the agent
+    sits just above the inventory bar (matching allocentric behavior where
+    inventory replaces bottom rows without covering the agent).
 
     Canvas coordinate convention (from crafter's LocalView — NOT transposed):
       axis-0 (rows) = world x-axis  (right/east = +row)
@@ -164,7 +166,7 @@ class Crafter(embodied.Env):
     (rows=y, cols=x), but LocalView does not. We compensate with np.fliplr
     after rotation to correct the left-right mirror.
 
-    Rotation mapping (agent always ends up at tile row V-1, col V//2):
+    Rotation mapping (agent ends up just above the inventory bar):
       facing left  (-1, 0) west:  crop rows backward, k=0 (forward already top)
       facing right (+1, 0) east:  crop rows forward,  k=2 (180°)
       facing up    ( 0,-1) north: crop cols backward, k=3 (90° CW)
@@ -173,7 +175,8 @@ class Crafter(embodied.Env):
     V = self._ego_V
     c = self._ego_c    # center tile index in the large render grid
     u = self._ego_unit  # 2-element array [upx, upx] required by crafter Textures
-    forward = V - 1   # tiles ahead
+    inv_tiles = self._ego_inv_tiles
+    forward = V - 1 - inv_tiles  # reduced so agent sits above inventory
     side = V // 2     # tiles to each side
 
     # Render oversized grid centered on the player (terrain only)
