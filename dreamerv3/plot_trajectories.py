@@ -632,9 +632,10 @@ def _precompute_facings(ep):
     facings = []
     last = (0, 1)  # default: south
     for i in range(n):
-        act_id = int(actions[i]) if i < len(actions) else 0
-        if act_id in _MOVE_FACING:
-            last = _MOVE_FACING[act_id]
+        # facing[i] is set by action[i-1] (the action that produced image[i])
+        prev_act = int(actions[i - 1]) if (i > 0 and i - 1 < len(actions)) else 0
+        if prev_act in _MOVE_FACING:
+            last = _MOVE_FACING[prev_act]
         facings.append(last)
     return facings
 
@@ -792,27 +793,35 @@ def animate_worldview_agentview(
 
         cx, cy = half_win, half_win  # agent in local window
 
+        ts = tile_size
+
         if egocentric_view > 0:
+            # Directional box: V-1 forward, V//2 each side, agent's own tile behind
             V = egocentric_view
             fwd_t = V - 1    # tiles ahead
             side_t = V // 2  # tiles each side
-            bk_t = 0         # tiles behind (0 for egocentric)
+            fwd_ext = (fwd_t + 0.5) * ts   # forward from agent center
+            bk_ext = 0.5 * ts              # just the agent's own tile behind
+            side_ext = (side_t + 0.5) * ts  # each side
+            corners = np.array([
+                [cx + side_ext * rgt[0] - bk_ext * fwd[0],
+                 cy + side_ext * rgt[1] - bk_ext * fwd[1]],
+                [cx + side_ext * rgt[0] + fwd_ext * fwd[0],
+                 cy + side_ext * rgt[1] + fwd_ext * fwd[1]],
+                [cx - side_ext * rgt[0] + fwd_ext * fwd[0],
+                 cy - side_ext * rgt[1] + fwd_ext * fwd[1]],
+                [cx - side_ext * rgt[0] - bk_ext * fwd[0],
+                 cy - side_ext * rgt[1] - bk_ext * fwd[1]],
+            ])
         else:
-            fwd_t = view_half
-            side_t = view_half
-            bk_t = view_half  # symmetric: same behind
-
-        ts = tile_size
-        corners = np.array([
-            [cx + side_t * rgt[0] * ts - bk_t * fwd[0] * ts,
-             cy + side_t * rgt[1] * ts - bk_t * fwd[1] * ts],
-            [cx + side_t * rgt[0] * ts + fwd_t * fwd[0] * ts,
-             cy + side_t * rgt[1] * ts + fwd_t * fwd[1] * ts],
-            [cx - side_t * rgt[0] * ts + fwd_t * fwd[0] * ts,
-             cy - side_t * rgt[1] * ts + fwd_t * fwd[1] * ts],
-            [cx - side_t * rgt[0] * ts - bk_t * fwd[0] * ts,
-             cy - side_t * rgt[1] * ts - bk_t * fwd[1] * ts],
-        ])
+            # Standard view: centered square, no facing dependence
+            half_ext = (view_half + 0.5) * ts
+            corners = np.array([
+                [cx - half_ext, cy - half_ext],
+                [cx + half_ext, cy - half_ext],
+                [cx + half_ext, cy + half_ext],
+                [cx - half_ext, cy + half_ext],
+            ])
         return corners
 
     def _update(step):
@@ -883,19 +892,19 @@ def animate_worldview_agentview(
         # Right panel: agent observation
         obs_im.set_data(ep['image'][step])
 
-        # Action label: show current action; note if movement was blocked
-        act_id = int(ep['action'][step]) if step < len(ep['action']) else 0
-        act_name = (_CRAFTER_ACTIONS[act_id]
-                    if act_id < len(_CRAFTER_ACTIONS) else str(act_id))
-        # action[step] causes pos[step+1]; blocked if that position doesn't change
-        if step + 1 < n_steps:
-            moved_next = not np.all(ep['player_pos'][step + 1] == ep['player_pos'][step])
+        # Action label: show action[step-1] — the action that *produced* image[step]
+        if step == 0:
+            act_display = 'action: start'
         else:
-            moved_next = True  # last step: unknown, don't label blocked
-        if not moved_next and act_name.startswith('move_'):
-            act_display = f'action: {act_name}  (blocked)'
-        else:
-            act_display = f'action: {act_name}'
+            act_id = int(ep['action'][step - 1]) if step - 1 < len(ep['action']) else 0
+            act_name = (_CRAFTER_ACTIONS[act_id]
+                        if act_id < len(_CRAFTER_ACTIONS) else str(act_id))
+            # blocked if action[step-1] was a move but pos didn't change
+            moved = not np.all(ep['player_pos'][step] == ep['player_pos'][step - 1])
+            if not moved and act_name.startswith('move_'):
+                act_display = f'action: {act_name}  (blocked)'
+            else:
+                act_display = f'action: {act_name}'
         action_label.set_text(act_display)
 
         # Title
