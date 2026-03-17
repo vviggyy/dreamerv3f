@@ -21,4 +21,5 @@ Pillow
 portal>=3.5.0
 ruamel.yaml
 scope>=0.4.4
+pynapple
 tqdm

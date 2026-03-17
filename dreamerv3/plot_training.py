@@ -86,6 +86,82 @@ def style_ax(ax):
     ax.spines['right'].set_visible(False)
 
 
+LOSS_COLORS = {
+    'image': '#0022ff',
+    'rew': '#33aa00',
+    'con': '#ff0011',
+    'dyn': '#ddaa00',
+    'rep': '#cc44dd',
+    'policy': '#0088aa',
+    'value': '#001177',
+    'player_pos': '#999999',
+}
+
+REWARD_COLORS = {
+    'train/rew': ('#33aa00', 'Avg reward'),
+    'train/ret': ('#0022ff', 'Return'),
+    'train/val': ('#cc44dd', 'Value'),
+}
+
+
+def plot_losses(ax, records, smooth_window):
+    """Plot training losses over time."""
+    loss_keys = sorted(set(
+        k for r in records for k in r
+        if k.startswith('train/loss/') and k != 'train/opt/loss'))
+    if not loss_keys:
+        ax.text(0.5, 0.5, 'No training loss data',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=10, color='grey')
+        ax.set_title('Training Losses', fontsize=13)
+        style_ax(ax)
+        return
+
+    for key in loss_keys:
+        name = key.split('/')[-1]
+        steps, vals = records_to_series(records, key)
+        if len(steps) == 0:
+            continue
+        color = LOSS_COLORS.get(name, '#444444')
+        ax.plot(steps, vals, alpha=0.3, linewidth=0.7, color=color)
+        if smooth_window > 1 and len(steps) > smooth_window:
+            sx, sy = smooth(steps, vals, smooth_window)
+            ax.plot(sx, sy, linewidth=1.6, color=color, label=name)
+        else:
+            ax.lines[-1].set_label(name)
+
+    ax.set_yscale('log')
+    ax.set_ylabel('Loss (log scale)', fontsize=11)
+    ax.set_title('Training Losses', fontsize=13)
+    ax.legend(fontsize=7, framealpha=0.8, ncol=2, loc='upper right')
+    style_ax(ax)
+
+
+def plot_reward_value(ax, records, smooth_window):
+    """Plot training reward, return, and value estimates over time."""
+    has_data = False
+    for key, (color, label) in REWARD_COLORS.items():
+        steps, vals = records_to_series(records, key)
+        if len(steps) == 0:
+            continue
+        has_data = True
+        ax.plot(steps, vals, alpha=0.3, linewidth=0.7, color=color)
+        if smooth_window > 1 and len(steps) > smooth_window:
+            sx, sy = smooth(steps, vals, smooth_window)
+            ax.plot(sx, sy, linewidth=1.6, color=color, label=label)
+        else:
+            ax.lines[-1].set_label(label)
+
+    if not has_data:
+        ax.text(0.5, 0.5, 'No reward/value data',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=10, color='grey')
+    ax.set_ylabel('Value', fontsize=11)
+    ax.set_title('Reward & Value Estimates', fontsize=13)
+    ax.legend(fontsize=9, framealpha=0.7)
+    style_ax(ax)
+
+
 def plot_episode_score(ax, steps, scores, smooth_window):
     ax.scatter(steps, scores, alpha=0.25, s=6, color=BLUE, label='Per episode')
     if smooth_window > 1 and len(steps) > smooth_window:
@@ -222,6 +298,8 @@ def main():
                         help='Smoothing window size (default: 50)')
     parser.add_argument('--no_achievements', action='store_true',
                         help='Skip the per-achievement panel')
+    parser.add_argument('--no_losses', action='store_true',
+                        help='Skip the loss and reward/value panels')
     args = parser.parse_args()
 
     logdir = pathlib.Path(args.logdir)
@@ -240,23 +318,29 @@ def main():
         print(f'Warning: {scores_path} not found')
 
     metric_records = []
-    if not args.no_achievements:
-        if metrics_path.exists():
-            print(f'Loading {metrics_path}')
-            metric_records = load_jsonl(metrics_path)
-            print(f'  {len(metric_records)} metric entries')
-        else:
-            print(f'Warning: {metrics_path} not found')
+    if metrics_path.exists():
+        print(f'Loading {metrics_path}')
+        metric_records = load_jsonl(metrics_path)
+        print(f'  {len(metric_records)} metric entries')
+    else:
+        print(f'Warning: {metrics_path} not found')
 
     # Check if scores.jsonl has per-episode achievement data
     has_ach_scores = any(
         k.startswith('episode/achievement_') for r in score_records for k in r)
-    n_panels = 2
-    if not args.no_achievements:
-        n_panels += 1
-    if has_ach_scores:
-        n_panels += 1  # Crafter score panel
+    # Check if metrics.jsonl has training loss data
+    has_train = any('train/loss/image' in r for r in metric_records)
 
+    # Determine panels
+    panels = ['score', 'cumulative']
+    if not args.no_losses and has_train:
+        panels += ['losses', 'reward_value']
+    if has_ach_scores:
+        panels.append('crafter_score')
+    if not args.no_achievements:
+        panels.append('achievements')
+
+    n_panels = len(panels)
     fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4.5))
     if n_panels == 1:
         axes = [axes]
@@ -268,25 +352,29 @@ def main():
         ax.set_title(title, fontsize=13)
         style_ax(ax)
 
-    panel = 0
-    if len(ep_steps):
-        plot_episode_score(axes[panel], ep_steps, ep_scores, args.smooth)
-        panel += 1
-        plot_cumulative_reward(axes[panel], ep_steps, ep_scores)
-        panel += 1
-    else:
-        empty_panel(axes[panel], 'Episode Score')
-        panel += 1
-        empty_panel(axes[panel], 'Cumulative Reward')
-        panel += 1
+    # Use smoothing window scaled for metric records (fewer data points)
+    metric_smooth = max(1, args.smooth // 10)
 
-    if has_ach_scores:
-        plot_crafter_score(axes[panel], score_records, args.smooth)
-        panel += 1
-
-    if not args.no_achievements:
-        plot_achievement_rates(axes[panel], metric_records, args.smooth)
-        panel += 1
+    for i, panel_type in enumerate(panels):
+        ax = axes[i]
+        if panel_type == 'score':
+            if len(ep_steps):
+                plot_episode_score(ax, ep_steps, ep_scores, args.smooth)
+            else:
+                empty_panel(ax, 'Episode Score')
+        elif panel_type == 'cumulative':
+            if len(ep_steps):
+                plot_cumulative_reward(ax, ep_steps, ep_scores)
+            else:
+                empty_panel(ax, 'Cumulative Reward')
+        elif panel_type == 'losses':
+            plot_losses(ax, metric_records, metric_smooth)
+        elif panel_type == 'reward_value':
+            plot_reward_value(ax, metric_records, metric_smooth)
+        elif panel_type == 'crafter_score':
+            plot_crafter_score(ax, score_records, args.smooth)
+        elif panel_type == 'achievements':
+            plot_achievement_rates(ax, metric_records, args.smooth)
 
     plt.tight_layout()
 
