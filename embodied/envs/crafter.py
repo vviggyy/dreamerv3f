@@ -69,7 +69,8 @@ class Crafter(embodied.Env):
         'is_terminal': elements.Space(bool),
         'log/reward': elements.Space(np.float32),
         'player_pos': elements.Space(np.float32, (2,)),
-        'log/player_facing': elements.Space(np.int32, (2,)),
+        'log/player_facing_x': elements.Space(np.int32),
+        'log/player_facing_y': elements.Space(np.int32),
     }
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     spaces.update({
@@ -141,7 +142,7 @@ class Crafter(embodied.Env):
         is_terminal=is_terminal,
         player_pos=player_pos,
         **{'log/reward': np.float32(info['reward'] if info else 0.0)},
-        **{'log/player_facing': player_facing},
+        **{'log/player_facing_x': player_facing[0], 'log/player_facing_y': player_facing[1]},
     )
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     achievements = {

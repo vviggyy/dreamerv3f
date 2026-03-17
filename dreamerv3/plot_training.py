@@ -108,6 +108,66 @@ def plot_cumulative_reward(ax, steps, scores):
     style_ax(ax)
 
 
+def plot_crafter_score(ax, records, smooth_window):
+    """Compute and plot the Crafter score (geometric mean of success rates).
+
+    The Crafter score = exp(mean(log(rate_i + eps))) across all 22 achievements,
+    where rate_i is the success rate of achievement i over a rolling window.
+    """
+    ach_pattern = re.compile(r'^episode/achievement_(.+)$')
+    ach_keys = sorted(set(
+        k for r in records for k in r if ach_pattern.match(k)))
+
+    if not ach_keys:
+        ax.text(0.5, 0.5,
+                'No per-episode achievement data in scores.jsonl\n'
+                '(requires training with updated logger)',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=9, color='grey')
+        ax.set_title('Crafter Score', fontsize=13)
+        style_ax(ax)
+        return
+
+    # Build aligned arrays: steps and per-achievement success (1/0)
+    steps = np.array([r['step'] for r in records if 'step' in r and ach_keys[0] in r])
+    if len(steps) == 0:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                transform=ax.transAxes, fontsize=11, color='grey')
+        ax.set_title('Crafter Score', fontsize=13)
+        style_ax(ax)
+        return
+
+    successes = np.zeros((len(steps), len(ach_keys)))
+    for j, key in enumerate(ach_keys):
+        for i, r in enumerate(
+                [r for r in records if 'step' in r and ach_keys[0] in r]):
+            successes[i, j] = r.get(key, 0.0)
+
+    # Compute rolling Crafter score
+    eps = 1e-6
+    window = max(smooth_window, 10)
+    if len(steps) < window:
+        window = len(steps)
+    crafter_scores = np.full(len(steps), np.nan)
+    for i in range(window - 1, len(steps)):
+        rates = successes[i - window + 1:i + 1].mean(axis=0)  # per-achievement
+        crafter_scores[i] = np.exp(np.mean(np.log(rates + eps))) * 100
+
+    valid = ~np.isnan(crafter_scores)
+    ax.plot(steps[valid], crafter_scores[valid], color='#cc3300', linewidth=1.8,
+            label=f'Crafter score (w={window})')
+    ax.set_ylabel('Crafter Score (%)', fontsize=11)
+    ax.set_ylim(bottom=0)
+    ax.set_title('Crafter Score', fontsize=13)
+    ax.legend(fontsize=9, framealpha=0.7)
+    style_ax(ax)
+
+    # Print final score
+    final = crafter_scores[valid][-1] if valid.any() else 0
+    n_ach = len(ach_keys)
+    print(f'  Crafter score (last window): {final:.1f}% ({n_ach} achievements)')
+
+
 def plot_achievement_rates(ax, records, smooth_window):
     ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
     all_keys = set()
@@ -168,11 +228,14 @@ def main():
     scores_path  = logdir / 'scores.jsonl'
     metrics_path = logdir / 'metrics.jsonl'
 
+    score_records = []
     ep_steps, ep_scores = np.array([]), np.array([])
     if scores_path.exists():
         print(f'Loading {scores_path}')
-        ep_steps, ep_scores = records_to_series(load_jsonl(scores_path), 'episode/score')
-        print(f'  {len(ep_steps)} episodes, score [{ep_scores.min():.2f}, {ep_scores.max():.2f}]')
+        score_records = load_jsonl(scores_path)
+        ep_steps, ep_scores = records_to_series(score_records, 'episode/score')
+        if len(ep_steps):
+            print(f'  {len(ep_steps)} episodes, score [{ep_scores.min():.2f}, {ep_scores.max():.2f}]')
     else:
         print(f'Warning: {scores_path} not found')
 
@@ -185,8 +248,18 @@ def main():
         else:
             print(f'Warning: {metrics_path} not found')
 
-    n_panels = 2 if args.no_achievements else 3
+    # Check if scores.jsonl has per-episode achievement data
+    has_ach_scores = any(
+        k.startswith('episode/achievement_') for r in score_records for k in r)
+    n_panels = 2
+    if not args.no_achievements:
+        n_panels += 1
+    if has_ach_scores:
+        n_panels += 1  # Crafter score panel
+
     fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4.5))
+    if n_panels == 1:
+        axes = [axes]
     fig.suptitle(f'Training Progress — {logdir.name}', fontsize=14, fontweight='bold')
 
     def empty_panel(ax, title):
@@ -195,15 +268,25 @@ def main():
         ax.set_title(title, fontsize=13)
         style_ax(ax)
 
+    panel = 0
     if len(ep_steps):
-        plot_episode_score(axes[0], ep_steps, ep_scores, args.smooth)
-        plot_cumulative_reward(axes[1], ep_steps, ep_scores)
+        plot_episode_score(axes[panel], ep_steps, ep_scores, args.smooth)
+        panel += 1
+        plot_cumulative_reward(axes[panel], ep_steps, ep_scores)
+        panel += 1
     else:
-        empty_panel(axes[0], 'Episode Score')
-        empty_panel(axes[1], 'Cumulative Reward')
+        empty_panel(axes[panel], 'Episode Score')
+        panel += 1
+        empty_panel(axes[panel], 'Cumulative Reward')
+        panel += 1
+
+    if has_ach_scores:
+        plot_crafter_score(axes[panel], score_records, args.smooth)
+        panel += 1
 
     if not args.no_achievements:
-        plot_achievement_rates(axes[2], metric_records, args.smooth)
+        plot_achievement_rates(axes[panel], metric_records, args.smooth)
+        panel += 1
 
     plt.tight_layout()
 

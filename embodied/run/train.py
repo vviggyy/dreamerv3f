@@ -45,10 +45,16 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
         episode.add(key + '/sum', value, agg='sum')
     if tran['is_last']:
       result = episode.result()
-      logger.add({
+      ep_log = {
           'score': result.pop('score'),
           'length': result.pop('length'),
-      }, prefix='episode')
+      }
+      # Log per-episode achievement success (1 if unlocked, 0 otherwise)
+      for key in list(result.keys()):
+        if key.startswith('log/achievement_') and key.endswith('/sum'):
+          name = key[len('log/'):-len('/sum')]  # e.g. achievement_place_stone
+          ep_log[name] = np.float32(1.0 if result[key] >= 1 else 0.0)
+      logger.add(ep_log, prefix='episode')
       rew = result.pop('rewards')
       if len(rew) > 1:
         result['reward_rate'] = (np.abs(rew[1:] - rew[:-1]) >= 0.01).mean()

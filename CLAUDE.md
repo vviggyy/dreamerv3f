@@ -109,7 +109,7 @@ MPLBACKEND=Agg python dreamerv3/plot_training.py \
   --save ./logdir/crafter_small_1m/plots \
   --smooth 50
 ```
-Reads `scores.jsonl` (episode score) and `metrics.jsonl` (per-achievement stats) from logdir. Produces `training_progress.png` with 3 panels: episode score, cumulative reward, per-achievement unlock rate. Add `--no_achievements` to skip panel 3.
+Reads `scores.jsonl` (episode score + per-episode achievement success) and `metrics.jsonl` (per-achievement stats) from logdir. Produces `training_progress.png` with up to 4 panels: episode score, cumulative reward, Crafter score (geometric mean of achievement success rates), per-achievement unlock rate. Add `--no_achievements` to skip the per-achievement panel. The Crafter score panel appears automatically when `scores.jsonl` contains per-episode achievement data (requires training with the updated logger).
 
 ### tests
 ```

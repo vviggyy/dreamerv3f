@@ -188,7 +188,7 @@ def make_logger(config):
     if output == 'jsonl':
       outputs.append(elements.logger.JSONLOutput(scratch_logdir, 'metrics.jsonl'))
       outputs.append(elements.logger.JSONLOutput(
-          scratch_logdir, 'scores.jsonl', 'episode/score'))
+          scratch_logdir, 'scores.jsonl', 'episode/'))
     elif output == 'tensorboard':
       outputs.append(elements.logger.TensorBoardOutput(
           scratch_logdir, config.logger.fps))
