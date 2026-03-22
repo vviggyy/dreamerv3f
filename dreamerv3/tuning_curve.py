@@ -294,7 +294,7 @@ def compute_tuning_curves_and_si(rates, position, epoch, area):
     )
 
     si_df = nap.compute_2d_mutual_info(
-        place_fields, position, position.time_support,
+        place_fields, position, position.time_support, bitssec=False, minmax=minmax
     )
 
     # Convert place_fields dict to array

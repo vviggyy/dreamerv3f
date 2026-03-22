@@ -90,12 +90,15 @@ LOSS_COLORS = {
     'image': '#0022ff',
     'rew': '#33aa00',
     'con': '#ff0011',
-    'dyn': '#ddaa00',
+    'dyn': '#cc44dd',
     'rep': '#cc44dd',
     'policy': '#0088aa',
     'value': '#001177',
     'player_pos': '#999999',
 }
+
+# Losses that should be drawn with a dashed line (e.g. same color as another)
+LOSS_DASHED = {'dyn'}
 
 REWARD_COLORS = {
     'train/rew': ('#33aa00', 'Avg reward'),
@@ -331,14 +334,8 @@ def main():
     # Check if metrics.jsonl has training loss data
     has_train = any('train/loss/image' in r for r in metric_records)
 
-    # Determine panels
-    panels = ['score', 'cumulative']
-    if not args.no_losses and has_train:
-        panels += ['losses', 'reward_value']
-    if has_ach_scores:
-        panels.append('crafter_score')
-    if not args.no_achievements:
-        panels.append('achievements')
+    # Fixed panels: episode score, crafter score, per-achievement unlock rate
+    panels = ['score', 'crafter_score', 'achievements']
 
     n_panels = len(panels)
     fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4.5))

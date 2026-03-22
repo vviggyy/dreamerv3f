@@ -173,10 +173,13 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   driver = embodied.Driver(fns, parallel=False) #CONTROLLER
   driver.on_step(logfn) #logfn is a callback
 
-  # Load checkpoint
-  cp = elements.Checkpoint()
-  cp.agent = agent
-  cp.load(from_checkpoint, keys=['agent'])
+  # Load checkpoint — use regex to skip opt/ state so mismatched optimizer
+  # configs (e.g. different wd setting) don't cause a shape mismatch error.
+  import pathlib as _pl
+  _ckpt_file = _pl.Path(from_checkpoint) / 'agent.pkl'
+  with open(_ckpt_file, 'rb') as _f:
+    _ckpt_data = pickle.load(_f)
+  agent.load(_ckpt_data, regex=r'^(?!opt/)')
 
   def _save_results(tag=''):
     """Save all completed episodes to disk. Called on success, crash, or signal."""

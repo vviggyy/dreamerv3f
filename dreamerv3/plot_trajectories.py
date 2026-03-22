@@ -11,6 +11,8 @@ Plot types:
   spatial       - Find spatially-tuned units
   world         - Trajectories on stitched world view (from observations)
   fullworld     - Trajectories on full Crafter world (requires env_seed)
+  worldview     - Two-panel: allocentric world + agent obs (single episode)
+  allocentric   - Allocentric world view only, all episodes in sequence (GIF)
   all           - Generate all plots
 """
 
@@ -932,6 +934,215 @@ def animate_worldview_agentview(
         plt.show()
 
 
+def animate_allocentric(
+        episodes, metadata=None, tile_size=8, window_tiles=17,
+        egocentric_view=0, view_half=4, step_ms=200, trail_length=30,
+        save_path=None):
+    """Animate all episodes one after another — allocentric world view only.
+
+    Same as the left panel of animate_worldview_agentview but loops through
+    every episode in sequence. Each episode transitions with a brief pause and
+    ghost trace of the previous path.
+
+    Parameters
+    ----------
+    step_ms : int
+        Milliseconds per timestep.
+    trail_length : int
+        Number of recent steps to show in the fading trail.
+    window_tiles : int
+        Width/height of the cropped world window in tiles.
+    egocentric_view : int
+        If > 0, draw a directional FOV box.  0 = symmetric square.
+    view_half : int
+        Half-width of symmetric FOV box in tiles (default 4 → 9×9).
+    """
+    episodes = _filter_valid_episodes(episodes, 'animate_allocentric')
+    if not episodes:
+        print("No valid episodes for allocentric animation.")
+        return
+    episodes = episodes[:10]
+
+    world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
+    if world_img is None:
+        return
+
+    # Flip so north is at top (same as animate_worldview_agentview)
+    world_img = world_img[::-1].copy()
+    img_h, img_w = world_img.shape[:2]
+    win_px = window_tiles * tile_size
+    half_win = win_px // 2
+
+    # Build flat timeline: list of (ep_idx, step_in_ep)
+    timeline = []
+    for ep_idx, ep in enumerate(episodes):
+        for step in range(len(ep['player_pos'])):
+            timeline.append((ep_idx, step))
+    total_frames = len(timeline)
+
+    if total_frames == 0:
+        print("No frames to animate.")
+        return
+
+    # Pre-compute facings per episode
+    all_facings = [_precompute_facings(ep) for ep in episodes]
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.axis('off')
+    title = ax.set_title('', fontsize=11, fontweight='bold')
+
+    init_window = np.zeros((win_px, win_px, 3), dtype=np.uint8)
+    world_im = ax.imshow(init_window, origin='upper',
+                         extent=[0, win_px, win_px, 0])
+    ax.set_xlim(0, win_px)
+    ax.set_ylim(win_px, 0)
+
+    trail_col = LineCollection([], linewidths=[], colors=[], capstyle='round',
+                               zorder=6)
+    ax.add_collection(trail_col)
+
+    ghost_lines = []
+
+    fov_patch = plt.Polygon(np.zeros((4, 2)), closed=True,
+                            facecolor='grey', edgecolor='white',
+                            alpha=0.35, linewidth=1.2, zorder=5)
+    ax.add_patch(fov_patch)
+
+    agent_dot, = ax.plot([], [], 'o', color='white', markersize=7,
+                         markeredgecolor='gold', markeredgewidth=1.5, zorder=10)
+
+    from matplotlib.patches import FancyArrowPatch
+    facing_arrow = FancyArrowPatch(
+        (half_win, half_win), (half_win, half_win - tile_size),
+        arrowstyle='->', color='gold', linewidth=2,
+        mutation_scale=12, zorder=11)
+    ax.add_patch(facing_arrow)
+
+    def _world_to_img(wx, wy):
+        col = int(wx * tile_size + tile_size // 2)
+        row = int(wy * tile_size + tile_size // 2)
+        return col, row
+
+    def _fov_corners_local(fx, fy):
+        cx, cy = half_win, half_win
+        ts = tile_size
+        fwd = np.array([fx, fy], dtype=float)
+        rgt = np.array([-fy, fx], dtype=float)
+        if egocentric_view > 0:
+            V = egocentric_view
+            fwd_ext = (V - 1 + 0.5) * ts
+            bk_ext = 0.5 * ts
+            side_ext = (V // 2 + 0.5) * ts
+            corners = np.array([
+                [cx + side_ext * rgt[0] - bk_ext * fwd[0],
+                 cy + side_ext * rgt[1] - bk_ext * fwd[1]],
+                [cx + side_ext * rgt[0] + fwd_ext * fwd[0],
+                 cy + side_ext * rgt[1] + fwd_ext * fwd[1]],
+                [cx - side_ext * rgt[0] + fwd_ext * fwd[0],
+                 cy - side_ext * rgt[1] + fwd_ext * fwd[1]],
+                [cx - side_ext * rgt[0] - bk_ext * fwd[0],
+                 cy - side_ext * rgt[1] - bk_ext * fwd[1]],
+            ])
+        else:
+            half_ext = (view_half + 0.5) * ts
+            corners = np.array([
+                [cx - half_ext, cy - half_ext],
+                [cx + half_ext, cy - half_ext],
+                [cx + half_ext, cy + half_ext],
+                [cx - half_ext, cy + half_ext],
+            ])
+        return corners
+
+    prev_ep_idx = -1
+
+    def _update(frame):
+        nonlocal prev_ep_idx, ghost_lines
+
+        ep_idx, step = timeline[frame]
+        ep = episodes[ep_idx]
+        facings = all_facings[ep_idx]
+        n_steps = len(ep['player_pos'])
+
+        # On episode transition: draw ghost of completed episode
+        if ep_idx != prev_ep_idx and prev_ep_idx >= 0:
+            prev_ep = episodes[prev_ep_idx]
+            px_prev = prev_ep['player_pos'][:, 0] * tile_size + tile_size // 2
+            py_prev = prev_ep['player_pos'][:, 1] * tile_size + tile_size // 2
+            # draw ghost on the world_img coords — approximate placement
+            # (ghost is in world space; we draw it at a fixed world offset)
+            # Instead, record ghost as world coords for the trail
+            ghost_lines.append((prev_ep['player_pos'].copy()))
+            trail_col.set_segments([])
+        prev_ep_idx = ep_idx
+
+        pos = ep['player_pos'][step]
+        fx, fy = facings[step]
+        a_col, a_row = _world_to_img(pos[0], pos[1])
+
+        # Crop window
+        c0, r0 = a_col - half_win, a_row - half_win
+        c1, r1 = c0 + win_px, r0 + win_px
+        pad_l = max(0, -c0);  pad_t = max(0, -r0)
+        pad_r = max(0, c1 - img_w); pad_b = max(0, r1 - img_h)
+        cc0, cr0 = max(0, c0), max(0, r0)
+        cc1, cr1 = min(img_w, c1), min(img_h, r1)
+        window = world_img[cr0:cr1, cc0:cc1].copy()
+        if pad_l or pad_t or pad_r or pad_b:
+            window = np.pad(window, [(pad_t, pad_b), (pad_l, pad_r), (0, 0)],
+                            mode='constant', constant_values=0)
+        world_im.set_data(window)
+
+        # FOV box
+        fov_patch.set_xy(_fov_corners_local(fx, fy))
+
+        # Agent dot + arrow (always at window centre)
+        agent_dot.set_data([half_win], [half_win])
+        arrow_len = 1.5 * tile_size
+        facing_arrow.set_positions(
+            (half_win, half_win),
+            (half_win + fx * arrow_len, half_win + fy * arrow_len))
+
+        # Fading trail (current episode only)
+        t_start = max(0, step - trail_length)
+        trail_pos = ep['player_pos'][t_start:step + 1]
+        tpx = trail_pos[:, 0] * tile_size + tile_size // 2 - c0
+        tpy = trail_pos[:, 1] * tile_size + tile_size // 2 - r0
+        if len(tpx) >= 2:
+            pts = np.column_stack([tpx, tpy]).reshape(-1, 1, 2)
+            segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+            n = len(segs)
+            t = np.linspace(0, 1, n)
+            alphas = 0.15 + 0.85 * (t ** 1.5)
+            widths = 1.0 + 3.5 * t
+            cols = np.zeros((n, 4))
+            cols[:, :3] = [1.0, 0.85, 0.0]
+            cols[:, 3] = alphas
+            trail_col.set_segments(segs)
+            trail_col.set_linewidths(widths)
+            trail_col.set_colors(cols)
+        else:
+            trail_col.set_segments([])
+
+        title.set_text(
+            f'Ep {ep_idx + 1}/{len(episodes)}  '
+            f'step {step}/{n_steps - 1}  '
+            f'reward={ep["total_reward"]:.0f}')
+
+        return world_im, fov_patch, agent_dot, facing_arrow, trail_col, title
+
+    plt.tight_layout()
+    anim = animation.FuncAnimation(
+        fig, _update, frames=total_frames, blit=False, interval=step_ms)
+
+    if save_path:
+        writer = animation.PillowWriter(fps=max(1, round(1000 / step_ms)))
+        anim.save(str(save_path), writer=writer, dpi=100)
+        print(f"Saved allocentric animation to {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
 def find_spatial_units(episodes, layer='deter', top_k=10):
     """Find units most correlated with position."""
     episodes = _filter_valid_episodes(episodes, 'find_spatial_units')
@@ -1057,6 +1268,17 @@ def main():
             view_half=args.view_half,
             step_ms=args.step_ms,
             episode_idx=args.episode_idx,
+            save_path=save_path)
+
+    if args.plot in ('allocentric',):
+        save_path = save_dir / 'allocentric.gif' if save_dir else None
+        animate_allocentric(
+            episodes, metadata,
+            window_tiles=args.window_tiles,
+            egocentric_view=args.egocentric_view,
+            view_half=args.view_half,
+            step_ms=args.step_ms,
+            trail_length=40,
             save_path=save_path)
 
 

@@ -153,7 +153,7 @@ class RSSM(nj.Module):
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
-    cand = jnp.tanh(reset * cand)
+    cand = jax.nn.relu(reset * cand)
     update = jax.nn.sigmoid(update - 1)
     deter = update * cand + (1 - update) * deter
     return deter
