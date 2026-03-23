@@ -27,6 +27,18 @@ def main(argv=None):
   for name in parsed.configs:
     config = config.update(configs[name])
   config = elements.Flags(config).parse(other)
+
+  # For eval_trajectory: inherit env settings from saved training config so
+  # egocentric_view, random_spawn, etc. match what the model was trained with.
+  # CLI args still take priority (they are re-applied below).
+  if config.script == 'eval_trajectory' and '{timestamp}' not in config.logdir:
+    saved_path = elements.Path(config.logdir) / 'config.yaml'
+    if saved_path.exists():
+      saved = yaml.YAML(typ='safe').load(saved_path.read())
+      if 'env' in saved:
+        config = config.update({'env': saved['env']})
+        config = elements.Flags(config).parse(other)  # re-apply CLI overrides
+
   config = config.update(logdir=(
       config.logdir.format(timestamp=elements.timestamp())))
 

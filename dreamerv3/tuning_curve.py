@@ -422,12 +422,7 @@ def analyze_layer(layer_name, activations, positions, groups, area,
 def plot_si_ev_scatter(metrics, group_ids, layer_name, save_path):
     """SI vs EV scatter colored by cell type."""
     fig, ax = plt.subplots(figsize=(6, 5))
-    cmap = plt.get_cmap('viridis', len(GROUP_NAMES))
-    sc = ax.scatter(metrics['SI'], metrics['EVs'], c=group_ids,
-                    cmap=cmap, s=8, alpha=0.7, vmin=-0.5,
-                    vmax=len(GROUP_NAMES) - 0.5)
-    cbar = plt.colorbar(sc, ticks=range(len(GROUP_NAMES)))
-    cbar.ax.set_yticklabels(GROUP_NAMES, fontsize=7)
+    ax.scatter(metrics['SI'], metrics['EVs'], s=8, alpha=0.5, color='steelblue')
     ax.set_xlabel('Spatial Information (bits/spike)')
     ax.set_ylabel('Explained Variance')
     ax.set_title(f'{layer_name}: SI vs EV')
