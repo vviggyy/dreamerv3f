@@ -26,6 +26,19 @@ import matplotlib.animation as animation
 import numpy as np
 
 
+def _save_animation(anim, save_path, fps, dpi=100):
+    """Save animation as GIF or MP4 depending on file extension."""
+    save_path = Path(save_path)
+    if save_path.suffix == '.mp4':
+        writer = animation.FFMpegWriter(
+            fps=fps, codec='libx264',
+            extra_args=['-pix_fmt', 'yuv420p'])
+    else:
+        writer = animation.PillowWriter(fps=fps)
+    anim.save(str(save_path), writer=writer, dpi=dpi)
+    print(f"Saved animation to {save_path}")
+
+
 def load_episodes(data_path):
     """Load all episodes from trajectory data.
 
@@ -467,9 +480,7 @@ def animate_trajectories(episodes, save_path=None, fps=30, trail_length=40):
         fig, _update, frames=frames, blit=False, interval=1000 // fps)
 
     if save_path:
-        writer = animation.PillowWriter(fps=fps)
-        anim.save(str(save_path), writer=writer, dpi=100)
-        print(f"Saved trajectory animation to {save_path}")
+        _save_animation(anim, save_path, fps=fps, dpi=100)
         plt.close(fig)
     else:
         plt.show()
@@ -595,9 +606,7 @@ def animate_fullworld_trajectories(episodes, metadata=None, tile_size=8,
         fig, _update, frames=frames, blit=False, interval=1000 // fps)
 
     if save_path:
-        writer = animation.PillowWriter(fps=fps)
-        anim.save(str(save_path), writer=writer, dpi=60)
-        print(f"Saved fullworld trajectory animation to {save_path}")
+        _save_animation(anim, save_path, fps=fps, dpi=60)
         plt.close(fig)
     else:
         plt.show()
@@ -919,10 +928,7 @@ def animate_worldview_agentview(
     fig.subplots_adjust(bottom=0.07)  # room for action label
 
     if save_path:
-        # PillowWriter fps = 1000 / step_ms
-        writer = animation.PillowWriter(fps=max(1, round(1000 / step_ms)))
-        anim.save(str(save_path), writer=writer, dpi=100)
-        print(f"Saved worldview animation to {save_path}")
+        _save_animation(anim, save_path, fps=max(1, round(1000 / step_ms)), dpi=100)
         plt.close(fig)
     else:
         plt.show()
@@ -992,6 +998,8 @@ def main():
                         help='Left-panel world window size in tiles (default 17)')
     parser.add_argument('--step_ms', type=int, default=200,
                         help='Milliseconds per timestep for worldview (default 200 = 5 steps/sec)')
+    parser.add_argument('--mp4', action='store_true',
+                        help='Save animations as MP4 instead of GIF (requires ffmpeg)')
     args = parser.parse_args()
 
     print(f"Loading episodes from {args.data}")
@@ -1035,16 +1043,18 @@ def main():
         save_path = save_dir / 'fullworld_overlay.png' if save_dir else None
         plot_fullworld_overlay(episodes, metadata, save_path=save_path)
 
+    ext = '.mp4' if args.mp4 else '.gif'
+
     if args.plot in ('animate', 'all'):
-        save_path = save_dir / 'trajectories.gif' if save_dir else None
+        save_path = save_dir / f'trajectories{ext}' if save_dir else None
         animate_trajectories(episodes, save_path=save_path)
 
     if args.plot in ('animate_world', 'all'):
-        save_path = save_dir / 'fullworld_trajectories.gif' if save_dir else None
+        save_path = save_dir / f'fullworld_trajectories{ext}' if save_dir else None
         animate_fullworld_trajectories(episodes, metadata, save_path=save_path)
 
     if args.plot in ('worldview',):
-        save_path = save_dir / 'worldview_agentview.gif' if save_dir else None
+        save_path = save_dir / f'worldview_agentview{ext}' if save_dir else None
         animate_worldview_agentview(
             episodes, metadata,
             window_tiles=args.window_tiles,
