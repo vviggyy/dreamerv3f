@@ -419,8 +419,12 @@ def analyze_layer(layer_name, activations, positions, groups, area,
 # Plotting
 # ---------------------------------------------------------------------------
 
-def plot_si_ev_scatter(metrics, group_ids, layer_name, save_path):
-    """SI vs EV scatter colored by cell type."""
+def plot_si_ev_scatter(metrics, group_ids, layer_name, save_path,
+                       tc_array=None, interactive=False):
+    """SI vs EV scatter. If interactive=True and tc_array provided, click a
+    point to display its tuning curve in a side panel."""
+    if interactive and tc_array is not None:
+        return _interactive_si_ev(metrics, layer_name, tc_array)
     fig, ax = plt.subplots(figsize=(6, 5))
     ax.scatter(metrics['SI'], metrics['EVs'], s=8, alpha=0.5, color='steelblue')
     ax.set_xlabel('Spatial Information (bits/spike)')
@@ -429,6 +433,46 @@ def plot_si_ev_scatter(metrics, group_ids, layer_name, save_path):
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
+
+
+def _interactive_si_ev(metrics, layer_name, tc_array):
+    """Interactive SI vs EV scatter — click a point to show its tuning curve."""
+    si = metrics['SI']
+    ev = metrics['EVs']
+
+    fig, (ax_scatter, ax_tc) = plt.subplots(1, 2, figsize=(11, 5),
+                                             gridspec_kw={'width_ratios': [1, 1]})
+    ax_scatter.scatter(si, ev, s=10, alpha=0.5, color='steelblue', picker=True)
+    ax_scatter.set_xlabel('Spatial Information (bits/spike)')
+    ax_scatter.set_ylabel('Explained Variance')
+    ax_scatter.set_title(f'{layer_name}: SI vs EV  (click a point)')
+
+    ax_tc.set_title('Tuning curve')
+    ax_tc.axis('off')
+    ax_tc.text(0.5, 0.5, 'Click a point\nin the scatter',
+               ha='center', va='center', transform=ax_tc.transAxes,
+               fontsize=12, color='grey')
+
+    highlight = ax_scatter.scatter([], [], s=60, facecolors='none',
+                                   edgecolors='red', linewidths=1.5, zorder=5)
+
+    def on_pick(event):
+        ind = event.ind[0]
+        # Update highlight
+        highlight.set_offsets([[si[ind], ev[ind]]])
+        # Draw tuning curve
+        ax_tc.clear()
+        tc = tc_array[ind]
+        im = ax_tc.imshow(tc.T, origin='lower', interpolation='nearest')
+        ax_tc.set_title(f'Neuron {ind}  SI={si[ind]:.3f}  EV={ev[ind]:.3f}')
+        ax_tc.set_xlabel('x')
+        ax_tc.set_ylabel('y')
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect('pick_event', on_pick)
+    fig.tight_layout()
+    plt.show()
+    return fig
 
 
 def plot_cell_types(group_ids, layer_name, save_path):
@@ -578,11 +622,11 @@ def extract_facing_aligned(episodes, groups):
 def main():
     parser = argparse.ArgumentParser(
         description='Spatial tuning curve analysis for DreamerV3 representations')
-    parser.add_argument('--data', required=True,
+    parser.add_argument('--data', default=None,
                         help='Path to trajectory data directory')
     parser.add_argument('--test_data', default=None,
                         help='Path to held-out trajectory data for EV reliability')
-    parser.add_argument('--save', required=True,
+    parser.add_argument('--save', default=None,
                         help='Output directory for results')
     parser.add_argument('--layers', nargs='*', default=None,
                         help='Specific layers to analyze (default: all)')
@@ -599,7 +643,39 @@ def main():
     parser.add_argument('--EV_thresh', type=float, default=0.5)
     parser.add_argument('--EV_unthresh', type=float, default=0.15)
     parser.add_argument('--HD_thresh', type=float, default=0.5)
+    parser.add_argument('--interactive', action='store_true',
+                        help='Show interactive SI vs EV scatter (click to see tuning curves)')
+    parser.add_argument('--from_pkl', default=None,
+                        help='Load precomputed tuning_results.pkl and show interactive viewer (no recomputation)')
     args = parser.parse_args()
+
+    # Interactive viewer from precomputed pkl — no data/save needed
+    if args.from_pkl:
+        with open(args.from_pkl, 'rb') as f:
+            results_dict = pickle.load(f)
+        layers = results_dict['layers']
+        layer_names = list(layers.keys())
+        if len(layer_names) == 1:
+            ln = layer_names[0]
+        else:
+            print("Available layers:")
+            for i, ln in enumerate(layer_names):
+                n = len(layers[ln]['metrics']['SI'])
+                print(f"  [{i}] {ln} ({n} neurons)")
+            choice = input("Select layer number (or 'all' for sequential): ").strip()
+            if choice == 'all':
+                for ln in layer_names:
+                    ld = layers[ln]
+                    _interactive_si_ev(ld['metrics'], ln, ld['tuning_curves'])
+                print("Done.")
+                return
+            ln = layer_names[int(choice)]
+        ld = layers[ln]
+        _interactive_si_ev(ld['metrics'], ln, ld['tuning_curves'])
+        return
+
+    if not args.data or not args.save:
+        parser.error("--data and --save are required unless using --from_pkl")
 
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -746,6 +822,8 @@ def main():
             plot_si_ev_scatter(
                 res['metrics'], res['group_ids'], ln,
                 save_dir / f'{safe_name}_si_ev_scatter.png',
+                tc_array=res['tuning_curves'],
+                interactive=args.interactive,
             )
             plot_cell_types(
                 res['group_ids'], ln,
