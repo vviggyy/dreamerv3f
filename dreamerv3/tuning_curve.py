@@ -7,6 +7,7 @@ repo (TuningCurveAnalysis.py). Uses pynapple for tuning curve and mutual
 information computations.
 
 Usage:
+  # Full analysis (all layers, parallel):
   python dreamerv3/tuning_curve.py \
     --data ./logdir/crafter_small_1m/trajectories \
     --save ./logdir/crafter_small_1m/tuning_results \
@@ -22,6 +23,10 @@ Usage:
   python dreamerv3/tuning_curve.py \
     --data ./logdir/.../trajectories \
     --save ./results --layers dyn/deter dyn/stoch
+
+  # Interactive viewer from precomputed results (no recomputation):
+  python dreamerv3/tuning_curve.py --from_pkl tuning_results.pkl
+  python dreamerv3/tuning_curve.py --from_pkl tuning_results.pkl --layers dyn/deter
 """
 
 import argparse

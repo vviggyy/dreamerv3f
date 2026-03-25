@@ -1,15 +1,15 @@
 # dreamerv3f repo guide
 
 ## arch
-- `dreamerv3/main.py` — entry point, dispatches on `--script {train,eval_only,eval_trajectory,dream_decode,parallel}`
+- `dreamerv3/main.py` — entry point, dispatches on `--script {train,train_eval,eval_only,eval_trajectory,dream_decode,parallel,parallel_env,parallel_envs,parallel_replay}`
 - `dreamerv3/agent.py` — JAX agent (DreamerV3 world model)
-- `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size1m`, `debug`
+- `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size{1m,12m,25m,50m,100m,200m,400m}`, `debug`, `atari`, `atari100k`, `procgen`, `minecraft`, `dmlab`, `dmc_proprio`, `dmc_vision`, `bsuite`, `loconav`, `multicpu`
 - `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl
 - `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, animations
 - `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Includes `plot_probmap_on_world` which overlays decoder P(pos) heatmap on rendered Crafter world map with trajectory. `--save_model` saves fitted decoders for use by `dream_decode.py`. Layer-wise decoding (`--mode layers`): Ridge uses R², classification uses mean Manhattan distance (tiles).
 - `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers
-- `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world. `random_spawn=True` relocates player to random walkable tile each episode. `egocentric_view=N` (odd int, e.g. 7) renders N×N egocentric view centered on player facing direction; inventory bar is copied from the standard render into the bottom rows.
+- `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world. `random_spawn=True` relocates player to random walkable tile each episode. `egocentric_view=N` (odd int, e.g. 7) renders N×N egocentric view centered on player facing direction; inventory bar is copied from the standard render into the bottom rows. Also exposes: `log/player_facing_x`, `log/player_facing_y` (facing direction as ±1/0 ints), `log/achievement_*` (per-achievement binary), `log/reward` (raw crafter reward). Writes `stats.jsonl` to logdir if configured.
 - `embodied/jax/agent.py` — JAX Agent.__new__ calls internal.setup() then __init__. Line 72: jax.devices()
 - `embodied/jax/internal.py` — setup() sets jax platform, XLA flags. Line 34: `platform and jax.config.update('jax_platforms', platform)`
 - `embodied/tests/test_crafter_world.py` — world consistency tests (fixed_seed, walkable spawn, determinism)
@@ -48,7 +48,7 @@ Saves: per-episode pkl + all_episodes.pkl with metadata {env_seed, world_seed, f
 MPLBACKEND=Agg python dreamerv3/plot_trajectories.py \
   --data ./logdir/crafter_small_1m/trajectories --plot all --save ./logdir/crafter_small_1m/plots
 ```
-Drop MPLBACKEND=Agg if running with display. Plot types: trajectories, heatmap, activation, spatial, world, fullworld, animate, animate_world, all
+Drop MPLBACKEND=Agg if running with display. Plot types: trajectories, heatmap, activation, spatial, world, fullworld, animate, animate_world, worldview, all. Extra args for worldview/animate: `--egocentric_view N`, `--view_half N`, `--window_tiles N`, `--step_ms N`, `--mp4` (save as MP4 instead of GIF).
 
 ### decode position
 ```
@@ -57,7 +57,7 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --save ./logdir/crafter_small_1m/decoder_results \
   --method both
 ```
-Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel jobs (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`).
+Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--repr {deter,stoch,combined,all}` to select representation. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel jobs (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`). Add `--n_iters N` for classification training iterations (default 5000). Add `--resume PATH` for layer mode to resume from partial checkpoint.
 
 ### layer-wise decoding
 
@@ -102,6 +102,7 @@ python dreamerv3/main.py \
   --jax.platform cpu
 ```
 Outputs: dream_trajectories_world.png, dream_probmap_*.png (classifier only), dream_vs_real.png, dream_results.pkl
+Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.decoder_type {ridge,...}`, `--dream_decode.num_episodes N`.
 
 ### plot training progress
 ```
@@ -110,7 +111,7 @@ MPLBACKEND=Agg python dreamerv3/plot_training.py \
   --save ./logdir/crafter_small_1m/plots \
   --smooth 50
 ```
-Reads `scores.jsonl` (episode score + per-episode achievement success) and `metrics.jsonl` (per-achievement stats) from logdir. Produces `training_progress.png` with up to 4 panels: episode score, cumulative reward, Crafter score (geometric mean of achievement success rates), per-achievement unlock rate. Add `--no_achievements` to skip the per-achievement panel. The Crafter score panel appears automatically when `scores.jsonl` contains per-episode achievement data (requires training with the updated logger).
+Reads `scores.jsonl` (episode score + per-episode achievement success) and `metrics.jsonl` (per-achievement stats) from logdir. Produces `training_progress.png` with up to 4 panels: episode score, cumulative reward, Crafter score (geometric mean of achievement success rates), per-achievement unlock rate. Add `--no_achievements` to skip the per-achievement panel. Add `--no_losses` to skip loss/reward/value panels. The Crafter score panel appears automatically when `scores.jsonl` contains per-episode achievement data (requires training with the updated logger).
 
 ### tuning curve analysis
 ```
@@ -119,9 +120,16 @@ MPLBACKEND=Agg python dreamerv3/tuning_curve.py \
   --save ./logdir/crafter_small_1m/tuning_results \
   --n_jobs -1
 ```
-Analyzes all recorded layers (enc/*, dyn/*, pol/*, val/*). Computes per-neuron: 2D spatial tuning curves + spatial information (pynapple), HD tuning + mutual info, EV reliability, autocorrelation peaks/field size/asymmetry. Classifies neurons into 7 types: untuned, HD_cells, single_field, border_cells, spatial_HD, complex_cells, dead. Add `--test_data` for held-out EV reliability. Add `--layers dyn/deter dyn/stoch` to filter layers. Add `--no_hd` to skip HD analysis. Add `--no_plots` to skip plots. Threshold overrides: `--SI_thresh`, `--EV_thresh`, `--EV_unthresh`, `--HD_thresh`.
+Analyzes all recorded layers (enc/*, dyn/*, pol/*, val/*). Computes per-neuron: 2D spatial tuning curves + spatial information (pynapple), HD tuning + mutual info, EV reliability, autocorrelation peaks/field size/asymmetry. Classifies neurons into 7 types: untuned, HD_cells, single_field, border_cells, spatial_HD, complex_cells, dead. Add `--test_data` for held-out EV reliability. Add `--layers dyn/deter dyn/stoch` to filter layers. Add `--no_hd` to skip HD analysis. Add `--no_plots` to skip plots. Add `--max_neurons N` to subsample large layers (0=all). Add `--interactive` to show interactive SI vs EV scatter during analysis. Threshold overrides: `--SI_thresh`, `--EV_thresh`, `--EV_unthresh`, `--HD_thresh`.
 
 Outputs: `tuning_results.pkl` (per-layer tuning curves, metrics, cell groups), `{layer}_si_ev_scatter.png`, `{layer}_cell_types.png`, `{layer}_example_tuning_curves.png`, `layer_summary.png`.
+
+### interactive tuning viewer (from precomputed pkl)
+```
+python dreamerv3/tuning_curve.py --from_pkl ./logdir/.../tuning_results/tuning_results.pkl
+python dreamerv3/tuning_curve.py --from_pkl tuning_results.pkl --layers dyn/deter
+```
+Loads precomputed `tuning_results.pkl` and launches an interactive matplotlib SI vs EV scatter. Click any neuron to display its tuning curve in a side panel. No `--data` or `--save` required. If multiple layers exist, prompts for layer selection (or pass `--layers` to filter).
 
 ### tests
 ```

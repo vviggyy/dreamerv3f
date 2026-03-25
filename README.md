@@ -67,7 +67,11 @@ python dreamerv3/plot_trajectories.py \
 ```
 
 Plot types: `trajectories`, `heatmap`, `activation`, `spatial`, `world`, `fullworld`,
-`animate`, `animate_world`, `all`.
+`animate`, `animate_world`, `worldview`, `all`.
+
+Additional animation/worldview options: `--egocentric_view N`, `--view_half N` (half-width
+of FOV box), `--window_tiles N` (world window size), `--step_ms N` (ms per timestep),
+`--mp4` (save as MP4 instead of GIF, requires ffmpeg).
 
 **Decode agent position from world model latent states:**
 
@@ -143,11 +147,71 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
 - `--max_dims D` — truncated PCA before Ridge (default 256, critical for 4096-dim deter)
 - `--n_cv_folds N` — number of CV folds (default 5, Ridge only)
 - `--test_data PATH` — held-out test set for Ridge holdout mode (no CV)
+- `--repr {deter,stoch,combined,all}` — which representation to decode (default: all)
+- `--n_iters N` — training iterations for classification decoder (default 5000)
+- `--resume PATH` — resume layer mode from partial checkpoint
 
 Outputs:
 - `layer_comparison.png` — horizontal boxplot, one box per layer, ordered early→late
 - `layer_decode_results.pkl` — numerical results including metric name
 - `layer_decode_checkpoint.pkl` — auto-saved partial results (resume with `--resume`)
+
+**Plot training progress:**
+
+```sh
+MPLBACKEND=Agg python dreamerv3/plot_training.py \
+  --logdir ./logdir/crafter_small_1m \
+  --save ./logdir/crafter_small_1m/plots \
+  --smooth 50
+```
+
+Options: `--no_achievements` (skip per-achievement panel), `--no_losses` (skip loss/reward/value panels).
+
+**Spatial tuning curve analysis:**
+
+Classifies neurons into spatial cell types (place cells, border cells, HD cells, etc.)
+using pynapple. Analyzes all recorded layers (encoder, dynamics, policy, value).
+
+```sh
+# Full analysis (all layers, parallel):
+MPLBACKEND=Agg python dreamerv3/tuning_curve.py \
+  --data ./logdir/crafter_small_1m/trajectories \
+  --save ./logdir/crafter_small_1m/tuning_results \
+  --n_jobs -1
+
+# With held-out data for EV reliability:
+python dreamerv3/tuning_curve.py \
+  --data ./trajectories_train --test_data ./trajectories_test \
+  --save ./tuning_results --n_jobs -1
+
+# Filter specific layers:
+python dreamerv3/tuning_curve.py \
+  --data ./trajectories --save ./results --layers dyn/deter dyn/stoch
+```
+
+Options:
+- `--layers LAYER [LAYER ...]` — filter to specific layers (default: all)
+- `--test_data PATH` — held-out trajectories for EV reliability
+- `--max_neurons N` — subsample large layers (0 = all, default)
+- `--no_hd` — skip head direction analysis
+- `--no_plots` — skip plot generation
+- `--interactive` — show interactive SI vs EV scatter during analysis
+- `--SI_thresh`, `--EV_thresh`, `--EV_unthresh`, `--HD_thresh` — classification thresholds
+
+Outputs: `tuning_results.pkl`, `{layer}_si_ev_scatter.png`, `{layer}_cell_types.png`,
+`{layer}_example_tuning_curves.png`, `layer_summary.png`.
+
+**Interactive tuning viewer (from precomputed results):**
+
+Load a saved `tuning_results.pkl` and interactively explore neuron tuning curves.
+Click any point on the SI vs EV scatter to display its spatial tuning curve.
+
+```sh
+python dreamerv3/tuning_curve.py --from_pkl tuning_results.pkl
+python dreamerv3/tuning_curve.py --from_pkl tuning_results.pkl --layers dyn/deter
+```
+
+No `--data` or `--save` required. If multiple layers exist, prompts for layer selection.
 
 ![DreamerV3 Tasks](https://user-images.githubusercontent.com/2111293/217647148-cbc522e2-61ad-4553-8e14-1ecdc8d9438b.gif)
 
