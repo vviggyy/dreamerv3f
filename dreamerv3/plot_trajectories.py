@@ -12,6 +12,7 @@ Plot types:
   world         - Trajectories on stitched world view (from observations)
   fullworld     - Trajectories on full Crafter world (requires env_seed)
   worldview     - Two-panel: allocentric world + agent obs, all episodes in sequence (GIF)
+  world_only    - Just the Crafter world map (no trajectories), saved as PNG
   all           - Generate all plots
 """
 
@@ -329,6 +330,24 @@ def _render_crafter_world(metadata=None, tile_size=8):
 
     world_img = world_img.transpose(1, 0, 2)[::-1]
     return world_img, env_seed, tile_size
+
+
+def plot_world_only(metadata=None, tile_size=8, save_path=None):
+    """Render and save just the Crafter world map image (no trajectories)."""
+    world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
+    if world_img is None:
+        return
+
+    fig, ax = plt.subplots(figsize=(14, 14))
+    ax.imshow(world_img)
+    ax.set_title(f'Crafter World (seed={env_seed})')
+    ax.axis('off')
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved world image to {save_path}")
+
+    plt.show()
 
 
 def plot_fullworld_overlay(episodes, metadata=None, tile_size=8, save_path=None):
@@ -981,7 +1000,7 @@ def main():
     parser.add_argument('--data', type=str, required=True,
                         help='Path to trajectory data directory')
     parser.add_argument('--plot', type=str, default='all',
-                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'animate', 'animate_world', 'worldview', 'all'],
+                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'animate', 'animate_world', 'worldview', 'world_only', 'all'],
                         help='Type of plot to generate')
     parser.add_argument('--unit', type=int, default=0,
                         help='Unit index for activation plot')
@@ -1042,6 +1061,10 @@ def main():
     if args.plot in ('fullworld', 'all'):
         save_path = save_dir / 'fullworld_overlay.png' if save_dir else None
         plot_fullworld_overlay(episodes, metadata, save_path=save_path)
+
+    if args.plot == 'world_only':
+        save_path = save_dir / 'world_only.png' if save_dir else None
+        plot_world_only(metadata, save_path=save_path)
 
     ext = '.mp4' if args.mp4 else '.gif'
 

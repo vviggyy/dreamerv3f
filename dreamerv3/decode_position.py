@@ -145,11 +145,13 @@ class LinearClassifier:
         self.loss_fn = nn.CrossEntropyLoss()
 
     def fit(self, X, y_idx, batch_frac=0.75, n_iters=5000, verbose=True):
-        """Train on (X, y_idx) where y_idx are integer class labels."""
+        """Train on (X, y_idx) where y_idx are integer class labels.
+        Records self.loss_history (list of floats, one per iteration)."""
         X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
         y_t = torch.tensor(y_idx, dtype=torch.long, device=self.device)
         N = X_t.shape[0]
         batch_size = max(1, int(batch_frac * N))
+        self.loss_history = []
         self.model.train()
         for step in range(n_iters):
             idx = torch.randint(N, (batch_size,), device=self.device)
@@ -158,6 +160,7 @@ class LinearClassifier:
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+            self.loss_history.append(loss.item())
             if verbose and (step % 1000 == 0 or step == n_iters - 1):
                 print(f"  [{step:>5d}/{n_iters}] loss={loss.item():.4f}")
 
@@ -769,13 +772,13 @@ def prepare_data_layers(episodes):
 
 def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
                                 y_cls, pos_int, width, height, n_iters, device):
-    """Run one fold for a single layer; return (layer_name, fold, mean Manhattan error)."""
+    """Run one fold for a single layer; return (layer_name, fold, mean Manhattan error, loss_history)."""
     clf = LinearClassifier(X.shape[1], width * height, device=device)
     clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
     pred_cls = clf.predict(X[test_idx])
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
     manhattan = np.sum(np.abs(pred_xy - pos_int[test_idx]), axis=1).mean()
-    return layer_name, fold, float(manhattan)
+    return layer_name, fold, float(manhattan), clf.loss_history
 
 
 def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
@@ -1094,7 +1097,7 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     todo = [ln for ln in ordered if ln not in layer_fold_manhattan]
     print(f"  Layers to process: {len(todo)} / {len(ordered)}")
     if not todo:
-        return layer_fold_manhattan, ordered
+        return layer_fold_manhattan, ordered, {}
 
     # Flat job list: all (layer, fold) pairs in one pool
     all_jobs = [
@@ -1119,8 +1122,10 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     # Reassemble per-layer
     from collections import defaultdict
     fold_map = defaultdict(dict)
-    for ln, fold, manhattan in raw:
+    loss_map = defaultdict(dict)
+    for ln, fold, manhattan, loss_hist in raw:
         fold_map[ln][fold] = manhattan
+        loss_map[ln][fold] = loss_hist
 
     for ln in todo:
         fold_manhattan = [fold_map[ln][f] for f in range(n_folds)]
@@ -1129,12 +1134,17 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
               f"(folds: {[f'{v:.3f}' for v in fold_manhattan]})")
         layer_fold_manhattan[ln] = fold_manhattan
 
+    # Collect loss histories: {layer: [[fold0_losses], [fold1_losses], ...]}
+    layer_loss_histories = {}
+    for ln in todo:
+        layer_loss_histories[ln] = [loss_map[ln][f] for f in range(n_folds)]
+
     _save_layer_checkpoint(
         checkpoint_path, layer_fold_manhattan, ordered,
         grid=(width, height), n_samples=len(pos),
         n_episodes=len(np.unique(groups)), metric='manhattan')
 
-    return layer_fold_manhattan, ordered
+    return layer_fold_manhattan, ordered, layer_loss_histories
 
 
 def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss',
@@ -1203,6 +1213,51 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
 
     fig.tight_layout()
     out = save_dir / 'layer_comparison.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out}")
+
+
+def plot_layer_loss_curves(loss_histories, ordered, save_dir):
+    """Plot training loss curves for each layer's classification decoder.
+
+    Args:
+        loss_histories: {layer_name: [[fold0_losses], [fold1_losses], ...]}
+        ordered: list of layer names in display order.
+        save_dir: Path to save directory.
+    """
+    display_order = [ln for ln in ordered if ln in loss_histories]
+    n = len(display_order)
+    if n == 0:
+        return
+
+    ncols = min(4, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows),
+                             squeeze=False)
+
+    for idx, ln in enumerate(display_order):
+        r, c = idx // ncols, idx % ncols
+        ax = axes[r, c]
+        fold_curves = loss_histories[ln]
+        for fi, curve in enumerate(fold_curves):
+            ax.plot(curve, alpha=0.5, linewidth=0.8, label=f'fold {fi}')
+        # Plot mean across folds
+        min_len = min(len(c) for c in fold_curves)
+        arr = np.array([c[:min_len] for c in fold_curves])
+        ax.plot(arr.mean(axis=0), color='black', linewidth=1.5, label='mean')
+        ax.set_title(ln, fontsize=9)
+        ax.set_xlabel('iter')
+        ax.set_ylabel('CE loss')
+        ax.set_yscale('log')
+
+    # Turn off unused axes
+    for idx in range(n, nrows * ncols):
+        axes[idx // ncols, idx % ncols].axis('off')
+
+    fig.suptitle('Decoder Training Loss Curves', fontsize=13)
+    fig.tight_layout()
+    out = save_dir / 'layer_loss_curves.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out}")
@@ -1300,6 +1355,7 @@ if __name__ == '__main__':
 
         checkpoint_path = (Path(args.resume) if args.resume
                            else save_dir / 'layer_decode_checkpoint.pkl')
+        loss_histories = {}
 
         if args.ridge_layers and args.test_data:
             print(f"  Mode: Ridge holdout (train on --data, eval on --test_data). "
@@ -1343,7 +1399,7 @@ if __name__ == '__main__':
                   f"(n_iters={n_iters_layers}, device={args.device}). "
                   f"Metric: mean Manhattan decode error (tiles, lower = better).\n"
                   f"  Tip: add --ridge_layers for a ~100x faster scan.")
-            layer_fold_values, ordered = decode_layers(
+            layer_fold_values, ordered, loss_histories = decode_layers(
                 layers, pos, groups, width, height,
                 n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,
                 checkpoint_path=checkpoint_path)
@@ -1352,6 +1408,8 @@ if __name__ == '__main__':
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
         plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric,
                               layer_sizes=layer_sizes)
+        if not args.ridge_layers and loss_histories:
+            plot_layer_loss_curves(loss_histories, ordered, save_dir)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {

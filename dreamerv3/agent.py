@@ -35,8 +35,9 @@ class Agent(embodied.jax.Agent):
     self.act_space = act_space
     self.config = config
 
-    exclude = ('is_first', 'is_last', 'is_terminal', 'reward', 'player_pos')
-    #exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
+    exclude = ['is_first', 'is_last', 'is_terminal', 'reward']
+    if not config.include_position:
+      exclude.append('player_pos')
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
     dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
     self.enc = {

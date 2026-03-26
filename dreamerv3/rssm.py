@@ -30,6 +30,7 @@ class RSSM(nj.Module):
   absolute: bool = False
   blocks: int = 8
   free_nats: float = 1.0
+  gru_act: str = 'tanh'
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -153,7 +154,7 @@ class RSSM(nj.Module):
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
-    cand = jax.nn.relu(reset * cand)
+    cand = nn.act(self.gru_act)(reset * cand)
     update = jax.nn.sigmoid(update - 1)
     deter = update * cand + (1 - update) * deter
     return deter
