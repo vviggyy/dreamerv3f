@@ -144,15 +144,23 @@ class LinearClassifier:
             self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.loss_fn = nn.CrossEntropyLoss()
 
-    def fit(self, X, y_idx, batch_frac=0.75, n_iters=5000, verbose=True):
+    def fit(self, X, y_idx, batch_frac=0.75, n_iters=5000, verbose=True,
+            patience=500, smooth_window=200, min_delta=1e-4):
         """Train on (X, y_idx) where y_idx are integer class labels.
-        Records self.loss_history (list of floats, one per iteration)."""
+        Records self.loss_history (list of floats, one per iteration).
+
+        Early stopping: after at least 2*smooth_window iters, compares the
+        mean loss over the latest window to the best seen so far. Stops when
+        no improvement > min_delta for `patience` consecutive checks.
+        Set patience=0 to disable early stopping and run exactly n_iters."""
         X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
         y_t = torch.tensor(y_idx, dtype=torch.long, device=self.device)
         N = X_t.shape[0]
         batch_size = max(1, int(batch_frac * N))
         self.loss_history = []
         self.model.train()
+        best_smooth = float('inf')
+        wait = 0
         for step in range(n_iters):
             idx = torch.randint(N, (batch_size,), device=self.device)
             logits = self.model(X_t[idx])
@@ -163,6 +171,19 @@ class LinearClassifier:
             self.loss_history.append(loss.item())
             if verbose and (step % 1000 == 0 or step == n_iters - 1):
                 print(f"  [{step:>5d}/{n_iters}] loss={loss.item():.4f}")
+            # Early stopping check
+            if patience > 0 and step >= 2 * smooth_window:
+                smooth = sum(self.loss_history[-smooth_window:]) / smooth_window
+                if smooth < best_smooth - min_delta:
+                    best_smooth = smooth
+                    wait = 0
+                else:
+                    wait += 1
+                    if wait >= patience:
+                        if verbose:
+                            print(f"  Early stop at step {step}, "
+                                  f"smooth_loss={smooth:.4f}")
+                        break
 
     def predict(self, X):
         """Return predicted class indices."""
@@ -183,13 +204,14 @@ class LinearClassifier:
 
 
 def _classification_fold(fold, train_idx, test_idx, X, y_cls, pos_int,
-                         width, height, n_iters, device):
+                         width, height, n_iters, device, patience=500):
     """Run a single classification fold. Returns (fold, test_idx, err, shuf,
     pred_xy, proba) — designed to be called in parallel."""
     print(f"  Classification fold {fold+1} "
           f"(train={len(train_idx)}, test={len(test_idx)}, device={device})")
     clf = LinearClassifier(X.shape[1], width * height, device=device)
-    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
+    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False,
+            patience=patience)
     pred_cls = clf.predict(X[test_idx])
     proba = clf.predict_proba(X[test_idx])  # (N_test, width*height)
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
@@ -203,7 +225,7 @@ def _classification_fold(fold, train_idx, test_idx, X, y_cls, pos_int,
 
 
 def classification_decode(X, pos, groups, width, height, n_iters=5000,
-                          n_jobs=1, device='cpu'):
+                          n_jobs=1, device='cpu', patience=500):
     """Leave-one-episode-out classification decoding (pRNN-style).
 
     Position (x,y) is linearized into width*height classes.  Returns
@@ -239,7 +261,7 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000,
     results = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_classification_fold)(
             fold, train_idx, test_idx, X, y_cls, pos_int,
-            width, height, n_iters, devices[fold])
+            width, height, n_iters, devices[fold], patience=patience)
         for fold, (train_idx, test_idx) in enumerate(splits)
     )
 
@@ -771,10 +793,12 @@ def prepare_data_layers(episodes):
 
 
 def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
-                                y_cls, pos_int, width, height, n_iters, device):
+                                y_cls, pos_int, width, height, n_iters, device,
+                                patience=500):
     """Run one fold for a single layer; return (layer_name, fold, mean Manhattan error, loss_history)."""
     clf = LinearClassifier(X.shape[1], width * height, device=device)
-    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False)
+    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False,
+            patience=patience)
     pred_cls = clf.predict(X[test_idx])
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
     manhattan = np.sum(np.abs(pred_xy - pos_int[test_idx]), axis=1).mean()
@@ -1051,7 +1075,7 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
 
 
 def decode_layers(layers, pos, groups, width, height, n_iters=500,
-                  n_jobs=1, device='cpu', checkpoint_path=None):
+                  n_jobs=1, device='cpu', checkpoint_path=None, patience=500):
     """Run leave-one-episode-out classification for every layer.
 
     All (layer, fold) pairs are submitted as one flat parallel job pool.
@@ -1115,7 +1139,7 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     raw = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_layer_classification_fold)(
             ln, fold, train_idx, test_idx, layers[ln], y_cls, pos_int,
-            width, height, n_iters, _job_device(i))
+            width, height, n_iters, _job_device(i), patience=patience)
         for i, (ln, fold, train_idx, test_idx) in enumerate(all_jobs)
     )
 
@@ -1320,6 +1344,16 @@ if __name__ == '__main__':
                              '--data and evaluated on --test_data with no CV. '
                              'Fastest option; requires generating a second '
                              'trajectory set.')
+    parser.add_argument('--patience', type=int, default=500,
+                        help='Early stopping patience (in iters) for '
+                             'classification decoder. Training stops when '
+                             'smoothed loss has not improved for this many '
+                             'iters. Set to 0 to disable. (default: 500)')
+    parser.add_argument('--max_iters', type=int, default=None,
+                        help='Max training iterations (overrides --n_iters). '
+                             'When --patience>0, this is the upper bound; '
+                             'training may stop earlier. If not set, defaults '
+                             'to --n_iters value.')
     parser.add_argument('--resume', default=None,
                         help='[--mode layers] Path to a partial '
                              'layer_decode_checkpoint.pkl to resume from. '
@@ -1327,6 +1361,9 @@ if __name__ == '__main__':
                              'If omitted, checkpoints are auto-saved to '
                              '<save>/layer_decode_checkpoint.pkl.')
     args = parser.parse_args()
+    # Resolve max_iters: if set, override n_iters
+    if args.max_iters is not None:
+        args.n_iters = args.max_iters
 
     data_path = Path(args.data)
     save_dir = Path(args.save) if args.save else data_path.parent / 'decoder_results'
@@ -1394,15 +1431,16 @@ if __name__ == '__main__':
                 print("Error: torch required for classifier layer decoding. "
                       "Add --ridge_layers to use Ridge regression instead.")
                 raise SystemExit(1)
-            n_iters_layers = min(args.n_iters, 500)
+            n_iters_layers = args.n_iters if args.max_iters is not None else max(args.n_iters, 50000)
+            pat = args.patience
             print(f"  Using classification decoder "
-                  f"(n_iters={n_iters_layers}, device={args.device}). "
+                  f"(max_iters={n_iters_layers}, patience={pat}, device={args.device}). "
                   f"Metric: mean Manhattan decode error (tiles, lower = better).\n"
                   f"  Tip: add --ridge_layers for a ~100x faster scan.")
             layer_fold_values, ordered, loss_histories = decode_layers(
                 layers, pos, groups, width, height,
                 n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,
-                checkpoint_path=checkpoint_path)
+                checkpoint_path=checkpoint_path, patience=pat)
             metric = 'manhattan'
 
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
@@ -1500,7 +1538,8 @@ if __name__ == '__main__':
                 print(f"\n--- {name} ({X.shape[1]} dims) ---")
                 errors, shuffle, pred_xy, true_xy, proba = classification_decode(
                     X, pos, groups, width, height, n_iters=args.n_iters,
-                    n_jobs=args.n_jobs, device=args.device)
+                    n_jobs=args.n_jobs, device=args.device,
+                    patience=args.patience)
                 print(f"  Mean Manhattan error: {errors.mean():.3f} "
                       f"(shuffle: {shuffle.mean():.3f})")
                 plot_classification_summary(errors, shuffle, name, save_dir)
@@ -1544,7 +1583,8 @@ if __name__ == '__main__':
                             (pos.astype(int).clip(0, [width-1, height-1])[:, 0],
                              pos.astype(int).clip(0, [width-1, height-1])[:, 1]),
                             (width, height)),
-                        n_iters=args.n_iters, verbose=False)
+                        n_iters=args.n_iters, verbose=False,
+                        patience=args.patience)
                 save_classifier_model(clf, meta, save_dir / f'classifier_{name}.pkl')
 
     # Save numerical results
