@@ -805,6 +805,74 @@ def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
     return layer_name, fold, float(manhattan), clf.loss_history
 
 
+def _layer_classification_holdout(layer_name, X_train, y_cls_train,
+                                   X_test, pos_int_test, width, height,
+                                   n_iters, device, patience=500):
+    """Train on all train data, eval on held-out test. No CV."""
+    clf = LinearClassifier(X_train.shape[1], width * height, device=device)
+    clf.fit(X_train, y_cls_train, n_iters=n_iters, verbose=False,
+            patience=patience)
+    pred_cls = clf.predict(X_test)
+    pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
+    manhattan = np.sum(np.abs(pred_xy - pos_int_test), axis=1).mean()
+    return layer_name, float(manhattan), clf.loss_history
+
+
+def decode_layers_classification_holdout(
+        layers_train, pos_train, layers_test, pos_test,
+        width, height, n_iters=50000, n_jobs=1, device='cpu', patience=500):
+    """Train classifier on train set, evaluate on held-out test set. No CV.
+
+    Returns (layer_values, ordered, loss_histories) where
+    layer_values = {layer: [manhattan]} (single-element list for compat).
+    """
+    if not HAS_TORCH:
+        raise RuntimeError("torch required for classification holdout")
+
+    pos_int_train = pos_train.astype(int)
+    pos_int_train[:, 0] = np.clip(pos_int_train[:, 0], 0, width - 1)
+    pos_int_train[:, 1] = np.clip(pos_int_train[:, 1], 0, height - 1)
+    y_cls_train = np.ravel_multi_index(
+        (pos_int_train[:, 0], pos_int_train[:, 1]), (width, height))
+
+    pos_int_test = pos_test.astype(int)
+    pos_int_test[:, 0] = np.clip(pos_int_test[:, 0], 0, width - 1)
+    pos_int_test[:, 1] = np.clip(pos_int_test[:, 1], 0, height - 1)
+
+    ordered = _ordered_layers(layers_train)
+
+    if HAS_TORCH and device.startswith('cuda') and n_jobs != 1:
+        import torch as _torch
+        n_gpus = _torch.cuda.device_count()
+    else:
+        n_gpus = 0
+
+    def _job_device(job_idx):
+        if n_gpus > 0:
+            return f'cuda:{job_idx % n_gpus}'
+        return device
+
+    print(f"  Layers: {len(ordered)}, train={len(pos_train)}, "
+          f"test={len(pos_test)} samples")
+
+    raw = Parallel(n_jobs=n_jobs, prefer='processes')(
+        delayed(_layer_classification_holdout)(
+            ln, layers_train[ln], y_cls_train,
+            layers_test[ln], pos_int_test, width, height,
+            n_iters, _job_device(i), patience=patience)
+        for i, ln in enumerate(ordered)
+    )
+
+    layer_values = {}
+    loss_histories = {}
+    for ln, manhattan, loss_hist in raw:
+        layer_values[ln] = [manhattan]
+        loss_histories[ln] = [loss_hist]
+        print(f"  {ln}: decode error={manhattan:.3f} tiles")
+
+    return layer_values, ordered, loss_histories
+
+
 def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
     """Run one Ridge fold for a single layer. Returns (layer_name, fold, r2)."""
     model = RidgeCV(alphas=np.logspace(-2, 4, 20))
@@ -1339,11 +1407,11 @@ if __name__ == '__main__':
                              'many episodes creates O(N_eps × N_layers) jobs '
                              'which dominates runtime. (default: 5)')
     parser.add_argument('--test_data', default=None,
-                        help='[--mode layers --ridge_layers] Path to a held-out '
-                             'trajectory directory. If given, Ridge is trained on '
-                             '--data and evaluated on --test_data with no CV. '
-                             'Fastest option; requires generating a second '
-                             'trajectory set.')
+                        help='[--mode layers] Path to a held-out trajectory '
+                             'directory. Decoder is trained on --data and '
+                             'evaluated on --test_data with no CV. Works with '
+                             'both --ridge_layers and classification. '
+                             'Fastest option; requires a second trajectory set.')
     parser.add_argument('--patience', type=int, default=500,
                         help='Early stopping patience (in iters) for '
                              'classification decoder. Training stops when '
@@ -1394,9 +1462,7 @@ if __name__ == '__main__':
                            else save_dir / 'layer_decode_checkpoint.pkl')
         loss_histories = {}
 
-        if args.ridge_layers and args.test_data:
-            print(f"  Mode: Ridge holdout (train on --data, eval on --test_data). "
-                  f"No CV.  max_dims={args.max_dims}")
+        if args.test_data:
             print("Loading held-out test trajectories...")
             test_episodes, _ = load_episodes(Path(args.test_data))
             print(f"  {len(test_episodes)} test episodes loaded")
@@ -1405,14 +1471,33 @@ if __name__ == '__main__':
             common = set(layers.keys()) & set(layers_test.keys())
             layers = {k: v for k, v in layers.items() if k in common}
             layers_test = {k: v for k, v in layers_test.items() if k in common}
+
+        if args.test_data and args.ridge_layers:
+            print(f"  Mode: Ridge holdout (train on --data, eval on --test_data). "
+                  f"No CV.  max_dims={args.max_dims}")
             layer_results, ordered = decode_layers_ridge_holdout(
                 layers, pos, layers_test, pos_test,
                 n_jobs=args.n_jobs,
                 max_samples=args.max_samples,
                 max_dims=args.max_dims)
-            # Convert to {layer: [r2]} format for plot_layer_comparison
             layer_fold_values = {ln: [v['r2']] for ln, v in layer_results.items()}
             metric = 'r2'
+
+        elif args.test_data and not args.ridge_layers:
+            if not HAS_TORCH:
+                print("Error: torch required for classifier layer decoding. "
+                      "Add --ridge_layers to use Ridge regression instead.")
+                raise SystemExit(1)
+            n_iters_layers = args.n_iters if args.max_iters is not None else max(args.n_iters, 50000)
+            pat = args.patience
+            print(f"  Mode: Classification holdout (train on --data, eval on --test_data). "
+                  f"No CV.  max_iters={n_iters_layers}, patience={pat}, device={args.device}")
+            layer_fold_values, ordered, loss_histories = \
+                decode_layers_classification_holdout(
+                    layers, pos, layers_test, pos_test, width, height,
+                    n_iters=n_iters_layers, n_jobs=args.n_jobs,
+                    device=args.device, patience=pat)
+            metric = 'manhattan'
 
         elif args.ridge_layers:
             print(f"  Mode: Ridge {args.n_cv_folds}-fold CV. "
