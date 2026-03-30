@@ -1159,8 +1159,12 @@ def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
 
 
 def decode_layers(layers, pos, groups, width, height, n_iters=500,
-                  n_jobs=1, device='cpu', checkpoint_path=None, patience=500):
-    """Run leave-one-episode-out classification for every layer.
+                  n_jobs=1, device='cpu', checkpoint_path=None, patience=500,
+                  use_kfold=False, n_cv_folds=5, max_samples=0):
+    """Run classification CV for every layer.
+
+    By default uses LOGO (leave-one-episode-out). Pass use_kfold=True to
+    use KFold instead (much faster with many episodes).
 
     All (layer, fold) pairs are submitted as one flat parallel job pool.
     Supports checkpointing via checkpoint_path.
@@ -1170,15 +1174,29 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     if not HAS_TORCH:
         raise RuntimeError("torch required for layer decoding")
 
+    # Subsample training data if requested
+    if max_samples > 0 and len(pos) > max_samples:
+        layers, pos, groups = _subsample_layers(
+            layers, pos, groups, max_samples)
+
     pos_int = pos.astype(int)
     pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
     pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
     y_cls = np.ravel_multi_index(
         (pos_int[:, 0], pos_int[:, 1]), (width, height))
 
-    logo = LeaveOneGroupOut()
-    splits = list(logo.split(pos, y_cls, groups))
-    n_folds = len(splits)
+    if use_kfold:
+        from sklearn.model_selection import KFold
+        n_episodes = len(np.unique(groups))
+        n_folds = min(n_cv_folds, n_episodes)
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+        splits = list(kf.split(pos))
+        print(f"  CV: {n_folds}-fold KFold  (n_episodes={n_episodes})")
+    else:
+        logo = LeaveOneGroupOut()
+        splits = list(logo.split(pos, y_cls, groups))
+        n_folds = len(splits)
+        print(f"  CV: LOGO  ({n_folds} folds = {n_folds} episodes)")
 
     ordered = _ordered_layers(layers)
 
@@ -1402,6 +1420,11 @@ if __name__ == '__main__':
                              '(cpu, cuda, cuda:0, etc.). With n_jobs>1 and '
                              'device=cuda, folds are round-robin distributed '
                              'across all available GPUs. (default: cpu)')
+    parser.add_argument('--kfold_layers', action='store_true', default=False,
+                        help='[--mode layers] Use KFold CV instead of LOGO '
+                             '(leave-one-episode-out) for classification. '
+                             'With 100 episodes LOGO creates 100 folds; KFold '
+                             'uses --n_cv_folds (default 5). (default: False)')
     parser.add_argument('--ridge_layers', action='store_true', default=False,
                         help='[--mode layers] Use Ridge regression (closed-form, '
                              'no GPU, fast) instead of the PyTorch classifier. '
@@ -1563,14 +1586,22 @@ if __name__ == '__main__':
                 raise SystemExit(1)
             n_iters_layers = args.n_iters if args.max_iters is not None else max(args.n_iters, 50000)
             pat = args.patience
+            ms = args.max_samples
+            use_kf = args.kfold_layers
+            cv_desc = (f"{args.n_cv_folds}-fold KFold" if use_kf
+                       else f"LOGO ({len(np.unique(groups))} folds)")
             print(f"  Using classification decoder "
-                  f"(max_iters={n_iters_layers}, patience={pat}, device={args.device}). "
+                  f"(max_iters={n_iters_layers}, patience={pat}, "
+                  f"max_samples={ms}, device={args.device}). "
+                  f"CV: {cv_desc}. "
                   f"Metric: mean Manhattan decode error (tiles, lower = better).\n"
-                  f"  Tip: add --ridge_layers for a ~100x faster scan.")
+                  f"  Tip: add --holdout_frac 0.2 or --ridge_layers for faster runs.")
             layer_fold_values, ordered, loss_histories = decode_layers(
                 layers, pos, groups, width, height,
                 n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,
-                checkpoint_path=checkpoint_path, patience=pat)
+                checkpoint_path=checkpoint_path, patience=pat,
+                use_kfold=use_kf, n_cv_folds=args.n_cv_folds,
+                max_samples=ms)
             metric = 'manhattan'
 
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
