@@ -820,14 +820,32 @@ def _layer_classification_holdout(layer_name, X_train, y_cls_train,
 
 def decode_layers_classification_holdout(
         layers_train, pos_train, layers_test, pos_test,
-        width, height, n_iters=50000, n_jobs=1, device='cpu', patience=500):
+        width, height, n_iters=50000, n_jobs=1, device='cpu', patience=500,
+        max_samples=0):
     """Train classifier on train set, evaluate on held-out test set. No CV.
+
+    Args:
+        max_samples: Subsample training timesteps to at most this many
+            (stratified by episode via _subsample_layers). 0 = use all.
 
     Returns (layer_values, ordered, loss_histories) where
     layer_values = {layer: [manhattan]} (single-element list for compat).
     """
     if not HAS_TORCH:
         raise RuntimeError("torch required for classification holdout")
+
+    ordered = _ordered_layers(layers_train)
+
+    # Subsample training data if requested
+    if max_samples > 0 and len(pos_train) > max_samples:
+        # Build dummy groups from contiguous blocks (episodes)
+        # _subsample_layers needs groups; infer from pos_train ordering
+        rng = np.random.RandomState(42)
+        idx = rng.choice(len(pos_train), max_samples, replace=False)
+        idx.sort()
+        print(f"  Subsampled train: {len(pos_train)} → {len(idx)} timesteps")
+        layers_train = {ln: arr[idx] for ln, arr in layers_train.items()}
+        pos_train = pos_train[idx]
 
     pos_int_train = pos_train.astype(int)
     pos_int_train[:, 0] = np.clip(pos_int_train[:, 0], 0, width - 1)
@@ -838,8 +856,6 @@ def decode_layers_classification_holdout(
     pos_int_test = pos_test.astype(int)
     pos_int_test[:, 0] = np.clip(pos_int_test[:, 0], 0, width - 1)
     pos_int_test[:, 1] = np.clip(pos_int_test[:, 1], 0, height - 1)
-
-    ordered = _ordered_layers(layers_train)
 
     if HAS_TORCH and device.startswith('cuda') and n_jobs != 1:
         import torch as _torch
@@ -1392,10 +1408,10 @@ if __name__ == '__main__':
                              'Metric becomes R² instead of cross-entropy loss. '
                              'Recommended for all runs. (default: False)')
     parser.add_argument('--max_samples', type=int, default=10000,
-                        help='[--mode layers --ridge_layers] Subsample to at most '
-                             'this many timesteps before fitting (stratified by '
-                             'episode). Eliminates the O(N) cost scaling. '
-                             'Set to 0 to use all data. (default: 10000)')
+                        help='[--mode layers] Subsample training timesteps to '
+                             'at most this many before fitting. Used by Ridge '
+                             '(stratified by episode) and classification holdout '
+                             '(random). Set to 0 to use all data. (default: 10000)')
     parser.add_argument('--max_dims', type=int, default=256,
                         help='[--mode layers --ridge_layers] Reduce layer features '
                              'to this many dims via truncated PCA before Ridge. '
@@ -1412,6 +1428,12 @@ if __name__ == '__main__':
                              'evaluated on --test_data with no CV. Works with '
                              'both --ridge_layers and classification. '
                              'Fastest option; requires a second trajectory set.')
+    parser.add_argument('--holdout_frac', type=float, default=0.0,
+                        help='[--mode layers] Fraction of episodes to hold out '
+                             'as test set (e.g. 0.2 = 80/20 split). When >0 '
+                             'and --test_data is not set, episodes are auto-split '
+                             'into train/test, giving 1 classifier per layer '
+                             'instead of N_episodes LOGO folds. (default: 0.0)')
     parser.add_argument('--patience', type=int, default=500,
                         help='Early stopping patience (in iters) for '
                              'classification decoder. Training stops when '
@@ -1462,6 +1484,8 @@ if __name__ == '__main__':
                            else save_dir / 'layer_decode_checkpoint.pkl')
         loss_histories = {}
 
+        # --- Determine train/test split ---
+        has_test = False
         if args.test_data:
             print("Loading held-out test trajectories...")
             test_episodes, _ = load_episodes(Path(args.test_data))
@@ -1471,10 +1495,28 @@ if __name__ == '__main__':
             common = set(layers.keys()) & set(layers_test.keys())
             layers = {k: v for k, v in layers.items() if k in common}
             layers_test = {k: v for k, v in layers_test.items() if k in common}
+            has_test = True
+        elif args.holdout_frac > 0:
+            # Auto-split episodes into train/test
+            ep_ids = np.unique(groups)
+            n_eps = len(ep_ids)
+            n_test = max(1, int(round(n_eps * args.holdout_frac)))
+            n_train = n_eps - n_test
+            rng = np.random.RandomState(42)
+            rng.shuffle(ep_ids)
+            test_eps = set(ep_ids[:n_test])
+            train_mask = np.array([g not in test_eps for g in groups])
+            test_mask = ~train_mask
+            print(f"  Auto holdout split: {n_train} train / {n_test} test episodes "
+                  f"({train_mask.sum()} / {test_mask.sum()} timesteps)")
+            layers_test = {ln: arr[test_mask] for ln, arr in layers.items()}
+            pos_test = pos[test_mask]
+            layers = {ln: arr[train_mask] for ln, arr in layers.items()}
+            pos = pos[train_mask]
+            has_test = True
 
-        if args.test_data and args.ridge_layers:
-            print(f"  Mode: Ridge holdout (train on --data, eval on --test_data). "
-                  f"No CV.  max_dims={args.max_dims}")
+        if has_test and args.ridge_layers:
+            print(f"  Mode: Ridge holdout. No CV.  max_dims={args.max_dims}")
             layer_results, ordered = decode_layers_ridge_holdout(
                 layers, pos, layers_test, pos_test,
                 n_jobs=args.n_jobs,
@@ -1483,20 +1525,23 @@ if __name__ == '__main__':
             layer_fold_values = {ln: [v['r2']] for ln, v in layer_results.items()}
             metric = 'r2'
 
-        elif args.test_data and not args.ridge_layers:
+        elif has_test and not args.ridge_layers:
             if not HAS_TORCH:
                 print("Error: torch required for classifier layer decoding. "
                       "Add --ridge_layers to use Ridge regression instead.")
                 raise SystemExit(1)
             n_iters_layers = args.n_iters if args.max_iters is not None else max(args.n_iters, 50000)
             pat = args.patience
-            print(f"  Mode: Classification holdout (train on --data, eval on --test_data). "
-                  f"No CV.  max_iters={n_iters_layers}, patience={pat}, device={args.device}")
+            ms = args.max_samples
+            print(f"  Mode: Classification holdout. No CV.  "
+                  f"max_iters={n_iters_layers}, patience={pat}, "
+                  f"max_samples={ms}, device={args.device}")
             layer_fold_values, ordered, loss_histories = \
                 decode_layers_classification_holdout(
                     layers, pos, layers_test, pos_test, width, height,
                     n_iters=n_iters_layers, n_jobs=args.n_jobs,
-                    device=args.device, patience=pat)
+                    device=args.device, patience=pat,
+                    max_samples=ms)
             metric = 'manhattan'
 
         elif args.ridge_layers:
