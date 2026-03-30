@@ -70,6 +70,22 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
 ```
 Trains Ridge on `--data`, evaluates on `--test_data`. No folds at all. Completes in seconds.
 
+**Save trained decoders for reuse:**
+```
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./trajectories --save ./decoder_results \
+  --mode layers --ridge_layers --n_jobs -1 --save_model
+```
+After decoding, retrains each layer on full data and saves to `<save>/layer_decoders/` (per-layer `.pkl` files + `manifest.pkl`).
+
+**Eval saved decoders on new trajectories (no training):**
+```
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./new_trajectories --save ./new_results \
+  --mode layers --from_model ./decoder_results/layer_decoders
+```
+Loads pretrained decoders, evaluates on `--data`, produces `layer_comparison.png` and `layer_decode_results.pkl`.
+
 **CV mode (one trajectory set):**
 ```
 MPLBACKEND=Agg python dreamerv3/decode_position.py \

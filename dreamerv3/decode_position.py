@@ -340,6 +340,169 @@ def load_classifier_model(path):
 
 
 # ---------------------------------------------------------------------------
+# Layer decoder save / load / eval
+# ---------------------------------------------------------------------------
+
+def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
+                        n_iters=50000, device='cpu', n_jobs=1, patience=500,
+                        ridge=False, max_dims=256):
+    """Retrain one decoder per layer on ALL data and save to disk.
+
+    Saves:
+      <save_dir>/layer_decoders/<layer_safe_name>.pkl  (one per layer)
+      <save_dir>/layer_decoders/manifest.pkl           (metadata)
+
+    Args:
+        ridge: If True, save Ridge models. If False, save classifiers.
+    """
+    out_dir = Path(save_dir) / 'layer_decoders'
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pos_int = pos.astype(int)
+    pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
+    pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
+    y_cls = np.ravel_multi_index(
+        (pos_int[:, 0], pos_int[:, 1]), (width, height))
+
+    layer_files = {}
+    svds = {}
+
+    if ridge:
+        # PCA reduction
+        layers_pca, svds = _pca_layers(layers, max_dims, n_jobs=n_jobs)
+        for ln in ordered:
+            safe = ln.replace('/', '_')
+            X = layers_pca[ln]
+            model = RidgeCV(alphas=np.logspace(-2, 4, 20))
+            model.fit(X, pos)
+            fname = f'{safe}.pkl'
+            path = out_dir / fname
+            meta = {
+                'layer_name': ln, 'n_units': X.shape[1],
+                'type': 'ridge', 'grid': (width, height),
+            }
+            save_decoder_model(model, meta, path)
+            layer_files[ln] = fname
+            print(f"  Saved Ridge decoder: {ln} → {path}")
+    else:
+        if not HAS_TORCH:
+            raise RuntimeError("torch required to save classifier layer decoders")
+        for i, ln in enumerate(ordered):
+            safe = ln.replace('/', '_')
+            X = layers[ln]
+            clf = LinearClassifier(X.shape[1], width * height, device=device)
+            print(f"  Training full classifier on {ln} ({X.shape[1]} dims)...")
+            clf.fit(X, y_cls, n_iters=n_iters, verbose=False, patience=patience)
+            fname = f'{safe}.pkl'
+            path = out_dir / fname
+            meta = {
+                'layer_name': ln, 'n_units': X.shape[1],
+                'n_classes': width * height, 'width': width, 'height': height,
+                'type': 'classifier', 'grid': (width, height),
+            }
+            save_classifier_model(clf, meta, path)
+            layer_files[ln] = fname
+
+    # Save PCA transforms if any
+    svd_files = {}
+    for ln, svd in svds.items():
+        safe = ln.replace('/', '_')
+        svd_fname = f'{safe}_pca.pkl'
+        with open(out_dir / svd_fname, 'wb') as f:
+            pickle.dump(svd, f)
+        svd_files[ln] = svd_fname
+
+    manifest = {
+        'ordered': ordered,
+        'grid': (width, height),
+        'metric': 'r2' if ridge else 'manhattan',
+        'decoder_type': 'ridge' if ridge else 'classifier',
+        'layer_files': layer_files,
+        'svd_files': svd_files,
+        'layer_sizes': {ln: layers[ln].shape[1] for ln in ordered},
+        'n_train_samples': len(pos),
+    }
+    manifest_path = out_dir / 'manifest.pkl'
+    with open(manifest_path, 'wb') as f:
+        pickle.dump(manifest, f)
+    print(f"  Saved manifest to {manifest_path}")
+
+
+def eval_layer_decoders(from_model_dir, layers, pos, width, height):
+    """Load saved layer decoders and evaluate on new data.
+
+    Args:
+        from_model_dir: Path to layer_decoders/ directory containing manifest.pkl
+        layers: dict {layer_name: np.ndarray (N, D)} from new trajectories
+        pos: np.ndarray (N, 2) ground-truth positions
+        width, height: grid dimensions
+
+    Returns:
+        layer_values: dict {layer_name: [metric_value]}
+        ordered: list of layer names
+        metric: 'r2' or 'manhattan'
+    """
+    from_dir = Path(from_model_dir)
+    manifest_path = from_dir / 'manifest.pkl'
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"No manifest.pkl in {from_dir}")
+    with open(manifest_path, 'rb') as f:
+        manifest = pickle.load(f)
+
+    ordered = manifest['ordered']
+    decoder_type = manifest['decoder_type']
+    metric = manifest['metric']
+    layer_files = manifest['layer_files']
+    svd_files = manifest.get('svd_files', {})
+    train_grid = manifest['grid']
+
+    if train_grid != (width, height):
+        print(f"  WARNING: grid mismatch — trained on {train_grid}, "
+              f"evaluating on ({width}, {height})")
+
+    # Only eval layers present in both saved models and new data
+    available = [ln for ln in ordered if ln in layers and ln in layer_files]
+    skipped = [ln for ln in ordered if ln not in layers]
+    if skipped:
+        print(f"  Skipping {len(skipped)} layers not in new data: {skipped}")
+
+    pos_int = pos.astype(int)
+    pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
+    pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
+
+    layer_values = {}
+    print(f"  Evaluating {len(available)} layers ({decoder_type})...")
+
+    for ln in available:
+        fpath = from_dir / layer_files[ln]
+        X = layers[ln]
+
+        if decoder_type == 'ridge':
+            # Apply saved PCA if exists
+            if ln in svd_files:
+                svd_path = from_dir / svd_files[ln]
+                with open(svd_path, 'rb') as f:
+                    svd = pickle.load(f)
+                X = svd.transform(X).astype(np.float32)
+            model, meta = load_decoder_model(fpath)
+            pred = model.predict(X)
+            r2 = r2_score(pos, pred, multioutput='uniform_average')
+            layer_values[ln] = [r2]
+            print(f"  {ln}: R²={r2:.4f}")
+        else:
+            clf, meta = load_classifier_model(fpath)
+            clf.model.eval()
+            pred_cls = clf.predict(X)
+            w, h = meta['width'], meta['height']
+            pred_xy = np.stack(np.unravel_index(pred_cls, (w, h)), axis=1)
+            manhattan = np.sum(np.abs(pred_xy - pos_int), axis=1).mean()
+            layer_values[ln] = [float(manhattan)]
+            print(f"  {ln}: decode error={manhattan:.3f} tiles")
+
+    return layer_values, available, metric
+
+
+# ---------------------------------------------------------------------------
 # Ridge regression decoder
 # ---------------------------------------------------------------------------
 
@@ -1473,6 +1636,10 @@ if __name__ == '__main__':
                              'Already-completed layers are skipped. '
                              'If omitted, checkpoints are auto-saved to '
                              '<save>/layer_decode_checkpoint.pkl.')
+    parser.add_argument('--from_model', default=None,
+                        help='[--mode layers] Path to a saved layer_decoders/ '
+                             'directory (from --save_model). Loads pretrained '
+                             'decoders and evaluates on --data without training.')
     args = parser.parse_args()
     # Resolve max_iters: if set, override n_iters
     if args.max_iters is not None:
@@ -1502,6 +1669,30 @@ if __name__ == '__main__':
             width = int(pos[:, 0].max()) + 1
             height = int(pos[:, 1].max()) + 1
         print(f"  Grid: {width}x{height}")
+
+        # --- Eval-only from saved decoders ---
+        if args.from_model:
+            print(f"\n  Loading pretrained decoders from {args.from_model}")
+            layer_fold_values, ordered, metric = eval_layer_decoders(
+                args.from_model, layers, pos, width, height)
+            layer_sizes = {ln: layers[ln].shape[1] for ln in ordered
+                           if ln in layers}
+            plot_layer_comparison(layer_fold_values, ordered, save_dir,
+                                  metric=metric, layer_sizes=layer_sizes)
+            results_file = save_dir / 'layer_decode_results.pkl'
+            with open(results_file, 'wb') as f:
+                pickle.dump({
+                    'layer_fold_values': layer_fold_values,
+                    'ordered': ordered,
+                    'grid': (width, height),
+                    'n_samples': len(pos),
+                    'n_episodes': len(np.unique(groups)),
+                    'metric': metric,
+                    'from_model': str(args.from_model),
+                }, f)
+            print(f"\nResults saved to {results_file}")
+            print("Done.")
+            raise SystemExit(0)
 
         checkpoint_path = (Path(args.resume) if args.resume
                            else save_dir / 'layer_decode_checkpoint.pkl')
@@ -1607,8 +1798,23 @@ if __name__ == '__main__':
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
         plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric,
                               layer_sizes=layer_sizes)
+        print("\n>>> Plot saved. Decoding evaluation complete. <<<")
         if not args.ridge_layers and loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
+
+        # Save reusable per-layer decoders if requested
+        if args.save_model:
+            print("\n=== Saving Layer Decoders (retrain on full data) ===")
+            print("  This retrains each layer on ALL data — may take a while...")
+            # Use all training data (layers/pos at this point)
+            save_layer_decoders(
+                layers, pos, width, height, ordered, save_dir,
+                n_iters=(args.n_iters if args.max_iters is not None
+                         else max(args.n_iters, 50000)),
+                device=args.device, n_jobs=args.n_jobs,
+                patience=args.patience,
+                ridge=args.ridge_layers,
+                max_dims=args.max_dims)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {
