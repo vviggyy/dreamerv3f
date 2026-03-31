@@ -749,7 +749,10 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     ax_err_map.set_xlim(-0.5, width - 0.5)
     ax_err_map.set_ylim(-0.5, height - 0.5)
 
-    # -- Panel C: mean error at each occupancy level --
+    # -- Panel C: raw scatter + mean error at each occupancy level --
+    ax_scatter.scatter(per_sample_occ, sample_err, s=4, alpha=0.15,
+                       edgecolors='none', rasterized=True, color='grey')
+
     occ_vals = np.sort(np.unique(per_sample_occ))
     mean_err_per_occ = np.array([sample_err[per_sample_occ == v].mean()
                                  for v in occ_vals])
@@ -758,7 +761,8 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
                                 for v in occ_vals])
     ax_scatter.errorbar(occ_vals, mean_err_per_occ, yerr=sem_err_per_occ,
                         fmt='o-', markersize=4, linewidth=1.5, capsize=2,
-                        color='#2196F3')
+                        color='#2196F3', label='mean ± SEM', zorder=5)
+    ax_scatter.legend(fontsize=8)
 
     ax_scatter.set_xlabel('Tile occupancy (visit count)')
     ax_scatter.set_ylabel('Mean Manhattan error (tiles)')
