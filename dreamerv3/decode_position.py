@@ -702,8 +702,11 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
             pass
 
     if world_img is not None:
-        ax_heat.imshow(world_img, alpha=0.25, extent=[-0.5, width - 0.5,
-                       -0.5, height - 0.5], origin='lower', aspect='equal')
+        # _render_crafter_world returns image pre-flipped for origin='upper';
+        # undo the flip so it aligns with origin='lower' used by the heatmap.
+        ax_heat.imshow(world_img[::-1], alpha=0.25,
+                       extent=[-0.5, width - 0.5, -0.5, height - 0.5],
+                       origin='lower', aspect='equal')
 
     # Occupancy overlay (hot colormap, semi-transparent)
     occ_plot = tile_visits.copy()
@@ -2072,19 +2075,69 @@ if __name__ == '__main__':
             print("\n=== Classification Decoding (pRNN-style) ===")
             for name, X in representations.items():
                 print(f"\n--- {name} ({X.shape[1]} dims) ---")
-                errors, shuffle, pred_xy, true_xy, proba = classification_decode(
-                    X, pos, groups, width, height, n_iters=args.n_iters,
-                    n_jobs=args.n_jobs, device=args.device,
-                    patience=args.patience)
+                if args.holdout_frac > 0:
+                    # Single train/test split (fast, no CV folds)
+                    unique_eps = np.unique(groups)
+                    rng = np.random.RandomState(42)
+                    rng.shuffle(unique_eps)
+                    n_test = max(1, int(args.holdout_frac * len(unique_eps)))
+                    test_eps = set(unique_eps[:n_test])
+                    train_mask = np.array([g not in test_eps for g in groups])
+                    test_mask = ~train_mask
+                    print(f"  Holdout split: {train_mask.sum()} train, "
+                          f"{test_mask.sum()} test "
+                          f"({n_test}/{len(unique_eps)} episodes)")
+
+                    pos_int = pos.astype(int)
+                    pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
+                    pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
+                    y_cls = np.ravel_multi_index(
+                        (pos_int[:, 0], pos_int[:, 1]), (width, height))
+
+                    # Train with internal 90/10 val for Manhattan early stopping
+                    X_tr, y_tr, pi_tr = (X[train_mask], y_cls[train_mask],
+                                         pos_int[train_mask])
+                    rng2 = np.random.RandomState(42)
+                    n_val = max(1, int(0.1 * train_mask.sum()))
+                    perm = rng2.permutation(train_mask.sum())
+                    val_idx, tr_idx = perm[:n_val], perm[n_val:]
+
+                    clf = LinearClassifier(X.shape[1], width * height,
+                                           device=args.device)
+                    clf.fit(X_tr[tr_idx], y_tr[tr_idx], n_iters=args.n_iters,
+                            verbose=False,
+                            X_val=X_tr[val_idx], y_cls_val=y_tr[val_idx],
+                            pos_int_val=pi_tr[val_idx],
+                            width=width, height=height,
+                            manhattan_patience=args.patience)
+
+                    pred_cls = clf.predict(X[test_mask])
+                    pred_xy = np.stack(
+                        np.unravel_index(pred_cls, (width, height)), axis=1)
+                    true_xy = pos_int[test_mask]
+                    errors = np.sum(np.abs(pred_xy - true_xy), axis=1)
+                    shuffle = np.sum(np.abs(
+                        np.column_stack([
+                            np.random.randint(0, width, len(true_xy)),
+                            np.random.randint(0, height, len(true_xy))
+                        ]) - true_xy), axis=1)
+                    test_pos = pos[test_mask]
+                else:
+                    errors, shuffle, pred_xy, true_xy, proba = classification_decode(
+                        X, pos, groups, width, height, n_iters=args.n_iters,
+                        n_jobs=args.n_jobs, device=args.device,
+                        patience=args.patience)
+                    test_pos = pos
+
                 print(f"  Mean Manhattan error: {errors.mean():.3f} "
                       f"(shuffle: {shuffle.mean():.3f})")
                 plot_classification_summary(errors, shuffle, name, save_dir)
-                plot_occupancy_vs_error(pos, pred_xy, width, height,
+                plot_occupancy_vs_error(test_pos, pred_xy, width, height,
                                        save_dir, repr_name=name,
                                        method='classification',
                                        metadata=metadata)
-                # Probability heatmap for each episode (deter only to avoid clutter)
-                if name == 'deter':
+                # Probability heatmap for each episode (deter only, LOGO only)
+                if name == 'deter' and args.holdout_frac <= 0:
                     for ep_idx in range(len(np.unique(groups))):
                         plot_decoder_probmap(
                             proba, pos, groups, name, save_dir,
