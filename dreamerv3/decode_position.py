@@ -749,31 +749,19 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     ax_err_map.set_xlim(-0.5, width - 0.5)
     ax_err_map.set_ylim(-0.5, height - 0.5)
 
-    # -- Panel C: per-timestep scatter --
-    ax_scatter.scatter(per_sample_occ, sample_err, s=4, alpha=0.15,
-                       edgecolors='none', rasterized=True)
-
-    # Binned mean trend line
+    # -- Panel C: mean error at each occupancy level --
     occ_vals = np.sort(np.unique(per_sample_occ))
-    if len(occ_vals) > 20:
-        bin_edges = np.percentile(per_sample_occ,
-                                  np.linspace(0, 100, 16))
-        bin_edges = np.unique(bin_edges)
-    else:
-        bin_edges = np.append(occ_vals - 0.5, occ_vals[-1] + 0.5)
-    bin_cx, bin_cy = [], []
-    for b in range(len(bin_edges) - 1):
-        mask = (per_sample_occ >= bin_edges[b]) & (per_sample_occ < bin_edges[b + 1])
-        if mask.sum() >= 5:
-            bin_cx.append(np.mean(per_sample_occ[mask]))
-            bin_cy.append(np.mean(sample_err[mask]))
-    if len(bin_cx) >= 2:
-        ax_scatter.plot(bin_cx, bin_cy, 'r-o', markersize=4, linewidth=1.5,
-                        label='binned mean', zorder=5)
-        ax_scatter.legend(fontsize=8)
+    mean_err_per_occ = np.array([sample_err[per_sample_occ == v].mean()
+                                 for v in occ_vals])
+    sem_err_per_occ = np.array([sample_err[per_sample_occ == v].std()
+                                / np.sqrt((per_sample_occ == v).sum())
+                                for v in occ_vals])
+    ax_scatter.errorbar(occ_vals, mean_err_per_occ, yerr=sem_err_per_occ,
+                        fmt='o-', markersize=4, linewidth=1.5, capsize=2,
+                        color='#2196F3')
 
     ax_scatter.set_xlabel('Tile occupancy (visit count)')
-    ax_scatter.set_ylabel('Manhattan decode error (tiles)')
+    ax_scatter.set_ylabel('Mean Manhattan error (tiles)')
     ax_scatter.set_title(f'Decode error vs occupancy ({repr_name}, {method})')
 
     fig.tight_layout()
