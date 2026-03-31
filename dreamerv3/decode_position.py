@@ -681,12 +681,23 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     # Look up occupancy for each timestep
     per_sample_occ = tile_visits[pos_int[:, 0], pos_int[:, 1]]
 
-    # --- Figure ---
-    fig, (ax_heat, ax_scatter) = plt.subplots(
-        1, 2, figsize=(13, 5.5),
-        gridspec_kw={'width_ratios': [1, 1.15]})
+    # Per-tile mean error
+    tile_error_sum = np.zeros((width, height), dtype=float)
+    tile_error_count = np.zeros((width, height), dtype=float)
+    for i in range(len(pos_int)):
+        x, y = pos_int[i]
+        tile_error_sum[x, y] += sample_err[i]
+        tile_error_count[x, y] += 1
+    tile_mean_err = np.full((width, height), np.nan)
+    visited = tile_error_count > 0
+    tile_mean_err[visited] = tile_error_sum[visited] / tile_error_count[visited]
 
-    # -- Panel A: world map + occupancy hotspot --
+    # --- Figure ---
+    fig, (ax_heat, ax_err_map, ax_scatter) = plt.subplots(
+        1, 3, figsize=(18, 5.5),
+        gridspec_kw={'width_ratios': [1, 1, 1.15]})
+
+    # -- Render world map (shared by panels A and B) --
     world_img = None
     tile_size = 8
     try:
@@ -701,20 +712,19 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
         except Exception:
             pass
 
-    if world_img is not None:
-        # _render_crafter_world returns image pre-flipped for origin='upper';
-        # undo the flip so it aligns with origin='lower' used by the heatmap.
-        ax_heat.imshow(world_img[::-1], alpha=0.25,
-                       extent=[-0.5, width - 0.5, -0.5, height - 0.5],
+    world_extent = [-0.5, width - 0.5, -0.5, height - 0.5]
+    world_img_lower = world_img[::-1] if world_img is not None else None
+
+    # -- Panel A: world map + occupancy hotspot --
+    if world_img_lower is not None:
+        ax_heat.imshow(world_img_lower, alpha=0.25, extent=world_extent,
                        origin='lower', aspect='equal')
 
-    # Occupancy overlay (hot colormap, semi-transparent)
     occ_plot = tile_visits.copy()
     occ_plot[occ_plot == 0] = np.nan
     im = ax_heat.imshow(occ_plot.T, origin='lower', cmap='hot',
                         aspect='equal', interpolation='nearest',
-                        extent=[-0.5, width - 0.5, -0.5, height - 0.5],
-                        alpha=0.8)
+                        extent=world_extent, alpha=0.8)
     cbar = plt.colorbar(im, ax=ax_heat, shrink=0.8)
     cbar.set_label('Visit count')
     ax_heat.set_xlabel('X')
@@ -723,7 +733,23 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     ax_heat.set_xlim(-0.5, width - 0.5)
     ax_heat.set_ylim(-0.5, height - 0.5)
 
-    # -- Panel B: per-timestep scatter --
+    # -- Panel B: world map + mean decoder error per tile --
+    if world_img_lower is not None:
+        ax_err_map.imshow(world_img_lower, alpha=0.25, extent=world_extent,
+                          origin='lower', aspect='equal')
+
+    im2 = ax_err_map.imshow(tile_mean_err.T, origin='lower', cmap='RdYlGn_r',
+                            aspect='equal', interpolation='nearest',
+                            extent=world_extent, alpha=0.8)
+    cbar2 = plt.colorbar(im2, ax=ax_err_map, shrink=0.8)
+    cbar2.set_label('Mean Manhattan error (tiles)')
+    ax_err_map.set_xlabel('X')
+    ax_err_map.set_ylabel('Y')
+    ax_err_map.set_title('Mean decode error per tile')
+    ax_err_map.set_xlim(-0.5, width - 0.5)
+    ax_err_map.set_ylim(-0.5, height - 0.5)
+
+    # -- Panel C: per-timestep scatter --
     ax_scatter.scatter(per_sample_occ, sample_err, s=4, alpha=0.15,
                        edgecolors='none', rasterized=True)
 
