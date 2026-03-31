@@ -1524,7 +1524,7 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
         labels = [ln.replace('/', '/\n') for ln in display_order]
 
     bp = ax.boxplot(data, vert=False, patch_artist=True,
-                    labels=labels, widths=0.6)
+                    labels=labels, widths=0.6, showfliers=False)
 
     section_colors = {
         'enc/cnn': '#0055cc',
