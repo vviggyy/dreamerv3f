@@ -655,6 +655,105 @@ def plot_classification_summary(errors, shuffle, layer_name, save_dir):
     print(f"  Saved classification_{layer_name}.png")
 
 
+def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
+                            repr_name='deter', method='ridge',
+                            metadata=None):
+    """Two-panel figure: (A) occupancy heatmap on world, (B) per-visit error scatter.
+
+    Left:  Faint Crafter world map with occupancy hotspot overlay.
+    Right: One point per timestep — Manhattan decode error (y) vs tile
+           occupancy count (x).  No averaging: if the agent visited a tile
+           50 times, all 50 appear individually.
+
+    Inspired by pRNN trajectoryAnalysis.calculateCoverage.
+    """
+    pos_int = np.clip(pos.astype(int), 0, [width - 1, height - 1])
+
+    # Per-sample Manhattan error (integer tiles, both methods)
+    pred_int = np.clip(np.round(pred).astype(int), 0, [width - 1, height - 1])
+    sample_err = np.sum(np.abs(pred_int - pos_int), axis=1).astype(float)
+
+    # Per-tile visit count
+    tile_visits = np.zeros((width, height), dtype=float)
+    for x, y in pos_int:
+        tile_visits[x, y] += 1
+
+    # Look up occupancy for each timestep
+    per_sample_occ = tile_visits[pos_int[:, 0], pos_int[:, 1]]
+
+    # --- Figure ---
+    fig, (ax_heat, ax_scatter) = plt.subplots(
+        1, 2, figsize=(13, 5.5),
+        gridspec_kw={'width_ratios': [1, 1.15]})
+
+    # -- Panel A: world map + occupancy hotspot --
+    world_img = None
+    tile_size = 8
+    try:
+        from plot_trajectories import _render_crafter_world
+        world_img, _, tile_size = _render_crafter_world(metadata, tile_size)
+    except Exception:
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from plot_trajectories import _render_crafter_world
+            world_img, _, tile_size = _render_crafter_world(metadata, tile_size)
+        except Exception:
+            pass
+
+    if world_img is not None:
+        ax_heat.imshow(world_img, alpha=0.25, extent=[-0.5, width - 0.5,
+                       -0.5, height - 0.5], origin='lower', aspect='equal')
+
+    # Occupancy overlay (hot colormap, semi-transparent)
+    occ_plot = tile_visits.copy()
+    occ_plot[occ_plot == 0] = np.nan
+    im = ax_heat.imshow(occ_plot.T, origin='lower', cmap='hot',
+                        aspect='equal', interpolation='nearest',
+                        extent=[-0.5, width - 0.5, -0.5, height - 0.5],
+                        alpha=0.8)
+    cbar = plt.colorbar(im, ax=ax_heat, shrink=0.8)
+    cbar.set_label('Visit count')
+    ax_heat.set_xlabel('X')
+    ax_heat.set_ylabel('Y')
+    ax_heat.set_title('Tile occupancy')
+    ax_heat.set_xlim(-0.5, width - 0.5)
+    ax_heat.set_ylim(-0.5, height - 0.5)
+
+    # -- Panel B: per-timestep scatter --
+    ax_scatter.scatter(per_sample_occ, sample_err, s=4, alpha=0.15,
+                       edgecolors='none', rasterized=True)
+
+    # Binned mean trend line
+    occ_vals = np.sort(np.unique(per_sample_occ))
+    if len(occ_vals) > 20:
+        bin_edges = np.percentile(per_sample_occ,
+                                  np.linspace(0, 100, 16))
+        bin_edges = np.unique(bin_edges)
+    else:
+        bin_edges = np.append(occ_vals - 0.5, occ_vals[-1] + 0.5)
+    bin_cx, bin_cy = [], []
+    for b in range(len(bin_edges) - 1):
+        mask = (per_sample_occ >= bin_edges[b]) & (per_sample_occ < bin_edges[b + 1])
+        if mask.sum() >= 5:
+            bin_cx.append(np.mean(per_sample_occ[mask]))
+            bin_cy.append(np.mean(sample_err[mask]))
+    if len(bin_cx) >= 2:
+        ax_scatter.plot(bin_cx, bin_cy, 'r-o', markersize=4, linewidth=1.5,
+                        label='binned mean', zorder=5)
+        ax_scatter.legend(fontsize=8)
+
+    ax_scatter.set_xlabel('Tile occupancy (visit count)')
+    ax_scatter.set_ylabel('Manhattan decode error (tiles)')
+    ax_scatter.set_title(f'Decode error vs occupancy ({repr_name}, {method})')
+
+    fig.tight_layout()
+    fname = f'occupancy_vs_error_{repr_name}.png'
+    fig.savefig(save_dir / fname, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
 def plot_decoder_probmap(proba_all, pos, groups, layer_name, save_dir,
                          n_steps=12, episode=0):
     """Show decoder softmax probability over the grid with true agent position.
@@ -1545,13 +1644,15 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
         patch.set_alpha(0.7)
 
     if metric == 'r2':
-        xlabel = 'R² (higher = better spatial decoding)'
+        xlabel = 'R² over timesteps (higher = better spatial decoding)'
     elif metric == 'manhattan':
-        xlabel = 'Mean decode error (tiles, lower = better)'
+        xlabel = 'Decode error over timesteps (tiles, lower = better)'
     else:
-        xlabel = 'Cross-entropy loss (lower = better spatial decoding)'
+        xlabel = 'Cross-entropy loss over timesteps (lower = better spatial decoding)'
     ax.set_xlabel(xlabel, fontsize=11)
-    ax.set_title('Per-Layer Position Decoding', fontsize=13)
+    ax.set_title('Per-Layer Position Decoding\n'
+                 'orange line = median, black number = mean',
+                 fontsize=13)
     ax.grid(True, axis='x', alpha=0.3)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -1929,6 +2030,12 @@ if __name__ == '__main__':
 
         plot_regression_summary(reg_results, 'all', save_dir, pos)
 
+        # Occupancy vs decoder error
+        for name, res in reg_results.items():
+            plot_occupancy_vs_error(pos, res['pred'], width, height,
+                                   save_dir, repr_name=name, method='ridge',
+                                   metadata=metadata)
+
         # Per-neuron analysis
         if args.per_neuron:
             r2_deter = r2_stoch = None
@@ -1972,6 +2079,10 @@ if __name__ == '__main__':
                 print(f"  Mean Manhattan error: {errors.mean():.3f} "
                       f"(shuffle: {shuffle.mean():.3f})")
                 plot_classification_summary(errors, shuffle, name, save_dir)
+                plot_occupancy_vs_error(pos, pred_xy, width, height,
+                                       save_dir, repr_name=name,
+                                       method='classification',
+                                       metadata=metadata)
                 # Probability heatmap for each episode (deter only to avoid clutter)
                 if name == 'deter':
                     for ep_idx in range(len(np.unique(groups))):
