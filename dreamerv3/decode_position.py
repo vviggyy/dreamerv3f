@@ -145,22 +145,32 @@ class LinearClassifier:
         self.loss_fn = nn.CrossEntropyLoss()
 
     def fit(self, X, y_idx, batch_frac=0.75, n_iters=5000, verbose=True,
-            patience=500, smooth_window=200, min_delta=1e-4):
+            patience=500, smooth_window=200, min_delta=1e-4,
+            X_val=None, y_cls_val=None, pos_int_val=None,
+            width=None, height=None, manhattan_patience=500,
+            manhattan_check_every=100):
         """Train on (X, y_idx) where y_idx are integer class labels.
         Records self.loss_history (list of floats, one per iteration).
 
-        Early stopping: after at least 2*smooth_window iters, compares the
-        mean loss over the latest window to the best seen so far. Stops when
-        no improvement > min_delta for `patience` consecutive checks.
-        Set patience=0 to disable early stopping and run exactly n_iters."""
+        When val data is provided (X_val, pos_int_val, width, height):
+          Manhattan-based early stopping — every manhattan_check_every iters,
+          compute Manhattan distance on validation set. Stop when no
+          improvement for manhattan_patience checks.
+
+        When val data is NOT provided:
+          Run for exactly n_iters (no early stopping)."""
         X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
         y_t = torch.tensor(y_idx, dtype=torch.long, device=self.device)
         N = X_t.shape[0]
         batch_size = max(1, int(batch_frac * N))
         self.loss_history = []
         self.model.train()
-        best_smooth = float('inf')
+
+        has_val = (X_val is not None and pos_int_val is not None
+                   and width is not None and height is not None)
+        best_manhattan = float('inf')
         wait = 0
+
         for step in range(n_iters):
             idx = torch.randint(N, (batch_size,), device=self.device)
             logits = self.model(X_t[idx])
@@ -171,18 +181,21 @@ class LinearClassifier:
             self.loss_history.append(loss.item())
             if verbose and (step % 1000 == 0 or step == n_iters - 1):
                 print(f"  [{step:>5d}/{n_iters}] loss={loss.item():.4f}")
-            # Early stopping check
-            if patience > 0 and step >= 2 * smooth_window:
-                smooth = sum(self.loss_history[-smooth_window:]) / smooth_window
-                if smooth < best_smooth - min_delta:
-                    best_smooth = smooth
+            # Manhattan-based early stopping on validation set
+            if has_val and manhattan_patience > 0 and step > 0 and step % manhattan_check_every == 0:
+                pred_cls = self.predict(X_val)
+                pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
+                val_manhattan = np.sum(np.abs(pred_xy - pos_int_val), axis=1).mean()
+                self.model.train()  # switch back to train mode after predict
+                if val_manhattan < best_manhattan - 1e-3:
+                    best_manhattan = val_manhattan
                     wait = 0
                 else:
                     wait += 1
-                    if wait >= patience:
+                    if wait >= manhattan_patience:
                         if verbose:
                             print(f"  Early stop at step {step}, "
-                                  f"smooth_loss={smooth:.4f}")
+                                  f"val_manhattan={val_manhattan:.3f}")
                         break
 
     def predict(self, X):
@@ -958,27 +971,49 @@ def prepare_data_layers(episodes):
 def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
                                 y_cls, pos_int, width, height, n_iters, device,
                                 patience=500):
-    """Run one fold for a single layer; return (layer_name, fold, mean Manhattan error, loss_history)."""
+    """Run one fold for a single layer; return (layer_name, fold, per-timestep Manhattan array, loss_history)."""
+    # Split training data into 90% train / 10% val for Manhattan early stopping
+    rng = np.random.RandomState(42 + fold)
+    n_train = len(train_idx)
+    n_val = max(1, int(0.1 * n_train))
+    perm = rng.permutation(n_train)
+    val_sub = train_idx[perm[:n_val]]
+    train_sub = train_idx[perm[n_val:]]
+
     clf = LinearClassifier(X.shape[1], width * height, device=device)
-    clf.fit(X[train_idx], y_cls[train_idx], n_iters=n_iters, verbose=False,
-            patience=patience)
+    clf.fit(X[train_sub], y_cls[train_sub], n_iters=n_iters, verbose=False,
+            X_val=X[val_sub], y_cls_val=y_cls[val_sub],
+            pos_int_val=pos_int[val_sub], width=width, height=height,
+            manhattan_patience=patience)
     pred_cls = clf.predict(X[test_idx])
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
-    manhattan = np.sum(np.abs(pred_xy - pos_int[test_idx]), axis=1).mean()
-    return layer_name, fold, float(manhattan), clf.loss_history
+    manhattan_per_timestep = np.sum(np.abs(pred_xy - pos_int[test_idx]), axis=1).astype(np.float32)
+    return layer_name, fold, manhattan_per_timestep, clf.loss_history
 
 
 def _layer_classification_holdout(layer_name, X_train, y_cls_train,
-                                   X_test, pos_int_test, width, height,
-                                   n_iters, device, patience=500):
-    """Train on all train data, eval on held-out test. No CV."""
+                                   pos_int_train, X_test, pos_int_test,
+                                   width, height, n_iters, device,
+                                   patience=500):
+    """Train on train data with internal val split, eval on held-out test. No CV."""
+    # Split training data into 90% train / 10% val for Manhattan early stopping
+    rng = np.random.RandomState(42)
+    n = len(X_train)
+    n_val = max(1, int(0.1 * n))
+    perm = rng.permutation(n)
+    val_idx = perm[:n_val]
+    train_idx = perm[n_val:]
+
     clf = LinearClassifier(X_train.shape[1], width * height, device=device)
-    clf.fit(X_train, y_cls_train, n_iters=n_iters, verbose=False,
-            patience=patience)
+    clf.fit(X_train[train_idx], y_cls_train[train_idx], n_iters=n_iters,
+            verbose=False,
+            X_val=X_train[val_idx], y_cls_val=y_cls_train[val_idx],
+            pos_int_val=pos_int_train[val_idx], width=width, height=height,
+            manhattan_patience=patience)
     pred_cls = clf.predict(X_test)
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
-    manhattan = np.sum(np.abs(pred_xy - pos_int_test), axis=1).mean()
-    return layer_name, float(manhattan), clf.loss_history
+    manhattan_per_timestep = np.sum(np.abs(pred_xy - pos_int_test), axis=1).astype(np.float32)
+    return layer_name, manhattan_per_timestep, clf.loss_history
 
 
 def decode_layers_classification_holdout(
@@ -992,7 +1027,7 @@ def decode_layers_classification_holdout(
             (stratified by episode via _subsample_layers). 0 = use all.
 
     Returns (layer_values, ordered, loss_histories) where
-    layer_values = {layer: [manhattan]} (single-element list for compat).
+    layer_values = {layer: np.ndarray} (per-timestep Manhattan errors).
     """
     if not HAS_TORCH:
         raise RuntimeError("torch required for classification holdout")
@@ -1036,7 +1071,7 @@ def decode_layers_classification_holdout(
 
     raw = Parallel(n_jobs=n_jobs, prefer='processes')(
         delayed(_layer_classification_holdout)(
-            ln, layers_train[ln], y_cls_train,
+            ln, layers_train[ln], y_cls_train, pos_int_train,
             layers_test[ln], pos_int_test, width, height,
             n_iters, _job_device(i), patience=patience)
         for i, ln in enumerate(ordered)
@@ -1044,10 +1079,10 @@ def decode_layers_classification_holdout(
 
     layer_values = {}
     loss_histories = {}
-    for ln, manhattan, loss_hist in raw:
-        layer_values[ln] = [manhattan]
+    for ln, manhattan_arr, loss_hist in raw:
+        layer_values[ln] = manhattan_arr
         loss_histories[ln] = [loss_hist]
-        print(f"  {ln}: decode error={manhattan:.3f} tiles")
+        print(f"  {ln}: decode error={np.mean(manhattan_arr):.3f} tiles")
 
     return layer_values, ordered, loss_histories
 
@@ -1408,20 +1443,22 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
         for i, (ln, fold, train_idx, test_idx) in enumerate(all_jobs)
     )
 
-    # Reassemble per-layer
+    # Reassemble per-layer: concatenate per-timestep arrays across folds
     from collections import defaultdict
     fold_map = defaultdict(dict)
     loss_map = defaultdict(dict)
-    for ln, fold, manhattan, loss_hist in raw:
-        fold_map[ln][fold] = manhattan
+    for ln, fold, manhattan_arr, loss_hist in raw:
+        fold_map[ln][fold] = manhattan_arr
         loss_map[ln][fold] = loss_hist
 
     for ln in todo:
-        fold_manhattan = [fold_map[ln][f] for f in range(n_folds)]
-        mean_manhattan = np.mean(fold_manhattan)
+        fold_arrays = [fold_map[ln][f] for f in range(n_folds)]
+        all_manhattan = np.concatenate(fold_arrays)
+        mean_manhattan = np.mean(all_manhattan)
+        per_fold_means = [f'{np.mean(a):.3f}' for a in fold_arrays]
         print(f"  {ln}: mean decode error={mean_manhattan:.3f} tiles  "
-              f"(folds: {[f'{v:.3f}' for v in fold_manhattan]})")
-        layer_fold_manhattan[ln] = fold_manhattan
+              f"(folds: {per_fold_means})")
+        layer_fold_manhattan[ln] = all_manhattan
 
     # Collect loss histories: {layer: [[fold0_losses], [fold1_losses], ...]}
     layer_loss_histories = {}
@@ -1614,12 +1651,13 @@ if __name__ == '__main__':
                              'evaluated on --test_data with no CV. Works with '
                              'both --ridge_layers and classification. '
                              'Fastest option; requires a second trajectory set.')
-    parser.add_argument('--holdout_frac', type=float, default=0.0,
+    parser.add_argument('--holdout_frac', type=float, default=0.2,
                         help='[--mode layers] Fraction of episodes to hold out '
                              'as test set (e.g. 0.2 = 80/20 split). When >0 '
                              'and --test_data is not set, episodes are auto-split '
                              'into train/test, giving 1 classifier per layer '
-                             'instead of N_episodes LOGO folds. (default: 0.0)')
+                             'instead of N_episodes LOGO folds. Set to 0 for '
+                             'CV mode. (default: 0.2)')
     parser.add_argument('--patience', type=int, default=500,
                         help='Early stopping patience (in iters) for '
                              'classification decoder. Training stops when '
@@ -1786,7 +1824,7 @@ if __name__ == '__main__':
                   f"max_samples={ms}, device={args.device}). "
                   f"CV: {cv_desc}. "
                   f"Metric: mean Manhattan decode error (tiles, lower = better).\n"
-                  f"  Tip: add --holdout_frac 0.2 or --ridge_layers for faster runs.")
+                  f"  Tip: add --ridge_layers for faster runs, or use default --holdout_frac 0.2.")
             layer_fold_values, ordered, loss_histories = decode_layers(
                 layers, pos, groups, width, height,
                 n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,

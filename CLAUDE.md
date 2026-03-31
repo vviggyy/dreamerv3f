@@ -22,6 +22,7 @@
 - **egocentric_view**: must be an odd integer (e.g. 7). `egocentric_view=0` disables it (default). Set in configs.yaml under `env.crafter.egocentric_view` or pass `--env.crafter.egocentric_view 7`
 - **layer decode checkpoint**: checkpoint files record which metric was used (`r2`, `manhattan`, `ce_loss`). Mismatched metric triggers a warning and checkpoint is ignored — delete stale checkpoint if switching modes
 - **layer decode metric**: `--ridge_layers` → R²; classification (no flag) → mean Manhattan distance in tiles (joint x,y, lower = better)
+- **layer decode holdout default**: `--holdout_frac` defaults to 0.2 (auto 80/20 episode split, no CV). Use `--holdout_frac 0` for CV mode. Classification uses Manhattan-based early stopping on a validation split (not CE loss)
 
 ## commands
 
