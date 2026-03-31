@@ -147,7 +147,7 @@ class LinearClassifier:
     def fit(self, X, y_idx, batch_frac=0.75, n_iters=5000, verbose=True,
             patience=500, smooth_window=200, min_delta=1e-4,
             X_val=None, y_cls_val=None, pos_int_val=None,
-            width=None, height=None, manhattan_patience=500,
+            width=None, height=None, manhattan_patience=20,
             manhattan_check_every=100):
         """Train on (X, y_idx) where y_idx are integer class labels.
         Records self.loss_history (list of floats, one per iteration).
@@ -1019,12 +1019,14 @@ def _layer_classification_holdout(layer_name, X_train, y_cls_train,
 def decode_layers_classification_holdout(
         layers_train, pos_train, layers_test, pos_test,
         width, height, n_iters=50000, n_jobs=1, device='cpu', patience=500,
-        max_samples=0):
+        max_samples=0, checkpoint_path=None):
     """Train classifier on train set, evaluate on held-out test set. No CV.
 
     Args:
         max_samples: Subsample training timesteps to at most this many
             (stratified by episode via _subsample_layers). 0 = use all.
+        checkpoint_path: Auto-save partial results here after each batch
+            of layers. On restart, already-finished layers are skipped.
 
     Returns (layer_values, ordered, loss_histories) where
     layer_values = {layer: np.ndarray} (per-timestep Manhattan errors).
@@ -1034,10 +1036,27 @@ def decode_layers_classification_holdout(
 
     ordered = _ordered_layers(layers_train)
 
+    # Resume: load partial results
+    layer_values = {}
+    loss_histories = {}
+    if checkpoint_path and Path(checkpoint_path).exists():
+        with open(checkpoint_path, 'rb') as f:
+            prev = pickle.load(f)
+        saved_metric = prev.get('metric', 'manhattan')
+        if saved_metric != 'manhattan':
+            print(f"  WARNING: checkpoint has metric='{saved_metric}', "
+                  f"expected 'manhattan'. Ignoring checkpoint.")
+        else:
+            layer_values = prev.get('layer_fold_values', {})
+            print(f"  Resumed from checkpoint: {len(layer_values)} layers done")
+
+    todo = [ln for ln in ordered if ln not in layer_values]
+    print(f"  Layers to process: {len(todo)} / {len(ordered)}")
+    if not todo:
+        return layer_values, ordered, loss_histories
+
     # Subsample training data if requested
     if max_samples > 0 and len(pos_train) > max_samples:
-        # Build dummy groups from contiguous blocks (episodes)
-        # _subsample_layers needs groups; infer from pos_train ordering
         rng = np.random.RandomState(42)
         idx = rng.choice(len(pos_train), max_samples, replace=False)
         idx.sort()
@@ -1069,20 +1088,25 @@ def decode_layers_classification_holdout(
     print(f"  Layers: {len(ordered)}, train={len(pos_train)}, "
           f"test={len(pos_test)} samples")
 
-    raw = Parallel(n_jobs=n_jobs, prefer='processes')(
-        delayed(_layer_classification_holdout)(
+    # Run layers sequentially — each is fast on GPU, avoids CUDA subprocess
+    # spawn overhead that dominates with Parallel(prefer='processes').
+    dev = device if not device.startswith('cuda') else device
+    for i, ln in enumerate(todo):
+        print(f"  [{i+1}/{len(todo)}] Training {ln}...")
+        ln_out, manhattan_arr, loss_hist = _layer_classification_holdout(
             ln, layers_train[ln], y_cls_train, pos_int_train,
             layers_test[ln], pos_int_test, width, height,
             n_iters, _job_device(i), patience=patience)
-        for i, ln in enumerate(ordered)
-    )
-
-    layer_values = {}
-    loss_histories = {}
-    for ln, manhattan_arr, loss_hist in raw:
         layer_values[ln] = manhattan_arr
         loss_histories[ln] = [loss_hist]
-        print(f"  {ln}: decode error={np.mean(manhattan_arr):.3f} tiles")
+        print(f"  {ln}: decode error={np.mean(manhattan_arr):.3f} tiles "
+              f"({len(loss_hist)} iters)")
+
+        # Checkpoint after each layer
+        _save_layer_checkpoint(
+            checkpoint_path, layer_values, ordered,
+            grid=(width, height), n_samples=len(pos_train),
+            n_episodes=0, metric='manhattan')
 
     return layer_values, ordered, loss_histories
 
@@ -1782,7 +1806,7 @@ if __name__ == '__main__':
                 print("Error: torch required for classifier layer decoding. "
                       "Add --ridge_layers to use Ridge regression instead.")
                 raise SystemExit(1)
-            n_iters_layers = args.n_iters if args.max_iters is not None else max(args.n_iters, 50000)
+            n_iters_layers = args.n_iters
             pat = args.patience
             ms = args.max_samples
             print(f"  Mode: Classification holdout. No CV.  "
@@ -1793,7 +1817,7 @@ if __name__ == '__main__':
                     layers, pos, layers_test, pos_test, width, height,
                     n_iters=n_iters_layers, n_jobs=args.n_jobs,
                     device=args.device, patience=pat,
-                    max_samples=ms)
+                    max_samples=ms, checkpoint_path=checkpoint_path)
             metric = 'manhattan'
 
         elif args.ridge_layers:
@@ -1813,7 +1837,7 @@ if __name__ == '__main__':
                 print("Error: torch required for classifier layer decoding. "
                       "Add --ridge_layers to use Ridge regression instead.")
                 raise SystemExit(1)
-            n_iters_layers = args.n_iters if args.max_iters is not None else max(args.n_iters, 50000)
+            n_iters_layers = args.n_iters
             pat = args.patience
             ms = args.max_samples
             use_kf = args.kfold_layers
