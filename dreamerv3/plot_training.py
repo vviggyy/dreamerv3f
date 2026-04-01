@@ -20,6 +20,8 @@ import json
 import pathlib
 import re
 
+from run_info import log_run_info
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
@@ -381,6 +383,7 @@ def main():
         out = save_dir / 'training_progress.png'
         fig.savefig(out, dpi=150, bbox_inches='tight')
         print(f'Saved: {out}')
+        log_run_info(save_dir, 'plot_training', vars(args))
     else:
         plt.show()
 

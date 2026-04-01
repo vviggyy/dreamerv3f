@@ -42,6 +42,7 @@ from scipy.ndimage import label, maximum_filter
 from scipy.signal import correlate2d
 
 # Reuse data loading from decode_position
+from run_info import log_run_info
 from decode_position import (
     LAYER_ORDER,
     load_episodes,
@@ -846,6 +847,8 @@ def main():
         print(f"Plots saved to {save_dir}")
 
     print("\nDone.")
+
+    log_run_info(save_dir, 'tuning_curve', vars(args))
 
 
 if __name__ == '__main__':

@@ -55,6 +55,8 @@ import argparse
 import pickle
 from pathlib import Path
 
+from run_info import log_run_info
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -1922,6 +1924,11 @@ if __name__ == '__main__':
                     'from_model': str(args.from_model),
                 }, f)
             print(f"\nResults saved to {results_file}")
+            log_run_info(save_dir, 'decode_position', vars(args),
+                         extra={'sub_mode': 'layers/from_model',
+                                'n_layers': len(layer_results),
+                                'n_samples': len(pos),
+                                'grid': (width, height)})
             print("Done.")
             raise SystemExit(0)
 
@@ -2061,6 +2068,12 @@ if __name__ == '__main__':
         with open(results_file, 'wb') as f:
             pickle.dump(save_payload, f)
         print(f"\nResults saved to {results_file}")
+        log_run_info(save_dir, 'decode_position', vars(args),
+                     extra={'sub_mode': 'layers',
+                            'n_layers': len(layer_results),
+                            'n_samples': len(pos),
+                            'grid': (width, height),
+                            'metric': metric})
         print("Done.")
         raise SystemExit(0)
 
@@ -2277,4 +2290,10 @@ if __name__ == '__main__':
     with open(results_file, 'wb') as f:
         pickle.dump(save_data, f)
     print(f"\nResults saved to {results_file}")
+    log_run_info(save_dir, 'decode_position', vars(args),
+                 extra={'sub_mode': 'standard',
+                        'representations': list(representations.keys()),
+                        'n_samples': len(pos),
+                        'n_episodes': len(np.unique(groups)),
+                        'grid': (width, height)})
     print("Done.")

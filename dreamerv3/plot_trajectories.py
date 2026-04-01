@@ -26,6 +26,8 @@ from matplotlib.collections import LineCollection
 import matplotlib.animation as animation
 import numpy as np
 
+from run_info import log_run_info
+
 
 def _save_animation(anim, save_path, fps, dpi=100):
     """Save animation as GIF or MP4 depending on file extension."""
@@ -1085,6 +1087,10 @@ def main():
             view_half=args.view_half,
             step_ms=args.step_ms,
             save_path=save_path)
+
+    if save_dir:
+        log_run_info(save_dir, 'plot_trajectories', vars(args),
+                     extra={'plot_types': args.plot})
 
 
 if __name__ == '__main__':
