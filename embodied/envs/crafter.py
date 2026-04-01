@@ -11,10 +11,24 @@ class Crafter(embodied.Env):
 
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
-               egocentric_view=None):
+               egocentric_view=None, disable_mobs=False):
     assert task in ('reward', 'noreward')
     self._env = crafter.Env(
         area=area, size=size, reward=(task == 'reward'), seed=seed)
+    if disable_mobs:
+      # Wrap _balance_chunk to remove hostile mobs (zombies, skeletons)
+      # while keeping passive ones (cows). Works by letting the original
+      # spawning run, then scrubbing hostiles from the world object list.
+      import crafter.objects as _co
+      _hostile = (_co.Zombie, _co.Skeleton, _co.Arrow)
+      _orig_balance = self._env._balance_chunk
+      def _peaceful_balance(chunk, objs):
+        _orig_balance(chunk, objs)
+        world = self._env._world
+        for obj in list(world._objects):
+          if isinstance(obj, _hostile):
+            world.remove(obj)
+      self._env._balance_chunk = _peaceful_balance
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
     self._logdir and self._logdir.mkdir()
