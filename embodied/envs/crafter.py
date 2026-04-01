@@ -66,6 +66,10 @@ class Crafter(embodied.Env):
       self._ego_inv_rows = int(_std_item_rows * self._env._size[0] // self._env._view[0])
       # How many ego tiles the inventory occupies (to reduce forward crop)
       self._ego_inv_tiles = int(np.ceil(self._ego_inv_rows / int(self._ego_unit[0])))
+      # Precompute canonical player sprite (RGBA) — always "player-down" so the
+      # ego view never leaks facing direction through the character sprite.
+      self._ego_sprite = self._env._textures.get(
+          'player-down', self._ego_unit).copy()  # (upx, upx, 4)
 
   @property
   def obs_space(self):
@@ -231,6 +235,17 @@ class Crafter(embodied.Env):
       padded = np.zeros((self._pixel_size, self._pixel_size, 3), dtype=np.uint8)
       padded[:h, :w] = result
       result = padded
+    # Stamp canonical sprite over the player tile so facing direction
+    # is never leaked through the character sprite appearance.
+    upx = int(self._ego_unit[0])
+    inv_tiles = self._ego_inv_tiles
+    pr = (V - 1 - inv_tiles) * upx   # player row start (just above inventory)
+    pc = (V // 2) * upx              # player col start (center)
+    sprite = self._ego_sprite         # (upx, upx, 4) RGBA
+    alpha = sprite[:, :, 3:4].astype(np.float32) / 255.0
+    region = result[pr:pr+upx, pc:pc+upx].astype(np.float32)
+    blended = region * (1 - alpha) + sprite[:, :, :3].astype(np.float32) * alpha
+    result[pr:pr+upx, pc:pc+upx] = blended.astype(np.uint8)
     # Copy inventory bar from standard crafter image into bottom rows
     result[-self._ego_inv_rows:] = raw_image[-self._ego_inv_rows:]
     return result
