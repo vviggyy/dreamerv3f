@@ -84,6 +84,26 @@ def load_episodes(data_path):
     return episodes, None
 
 
+def filter_stuck_episodes(episodes, min_bbox_area):
+    """Remove episodes where the agent's bounding box area is below threshold.
+
+    Bounding box = (max_x - min_x) * (max_y - min_y) in tiles.
+    """
+    kept = []
+    for i, ep in enumerate(episodes):
+        p = ep.get('player_pos')
+        if p is None or len(p) == 0:
+            continue
+        dx = p[:, 0].max() - p[:, 0].min()
+        dy = p[:, 1].max() - p[:, 1].min()
+        bbox = dx * dy
+        if bbox >= min_bbox_area:
+            kept.append(ep)
+        else:
+            print(f"  Filtering episode {i+1}: bbox area={bbox:.0f} < {min_bbox_area}")
+    return kept
+
+
 def prepare_data(episodes):
     """Extract aligned (features, positions, groups) from episode list.
 
@@ -520,14 +540,15 @@ def eval_layer_decoders(from_model_dir, layers, pos, width, height):
 # ---------------------------------------------------------------------------
 
 def _ridge_fold(fold, train_idx, test_idx, X, pos):
-    """Run a single Ridge CV fold. Returns (fold, test_idx, pred, r2, mae)."""
+    """Run a single Ridge CV fold. Returns (fold, test_idx, train_idx, pred, train_pred, r2, mae)."""
     model = RidgeCV(alphas=np.logspace(-2, 4, 20))
     model.fit(X[train_idx], pos[train_idx])
     pred = model.predict(X[test_idx])
+    train_pred = model.predict(X[train_idx])
     r2 = r2_score(pos[test_idx], pred, multioutput='uniform_average')
     mae = mean_absolute_error(pos[test_idx], pred)
     print(f"  Fold {fold+1}: R²={r2:.4f}  MAE={mae:.3f}")
-    return fold, test_idx, pred, r2, mae
+    return fold, test_idx, train_idx, pred, train_pred, r2, mae
 
 
 def ridge_decode_cv(X, pos, groups, n_jobs=1):
@@ -546,11 +567,19 @@ def ridge_decode_cv(X, pos, groups, n_jobs=1):
     )
 
     pred_all = np.zeros_like(pos)
+    # For train predictions, average across folds where each sample was in train set
+    train_pred_sum = np.zeros_like(pos)
+    train_pred_count = np.zeros(len(pos))
     fold_r2, fold_mae = [], []
-    for fold, test_idx, pred, r2, mae in sorted(results, key=lambda x: x[0]):
+    for fold, test_idx, train_idx, pred, train_pred, r2, mae in sorted(results, key=lambda x: x[0]):
         pred_all[test_idx] = pred
+        train_pred_sum[train_idx] += train_pred
+        train_pred_count[train_idx] += 1
         fold_r2.append(r2)
         fold_mae.append(mae)
+
+    # Average train predictions (each sample appears in N-1 folds as train)
+    train_pred_all = train_pred_sum / np.maximum(train_pred_count, 1)[:, None]
 
     overall_r2 = r2_score(pos, pred_all, multioutput='uniform_average')
     overall_mae = mean_absolute_error(pos, pred_all)
@@ -561,6 +590,7 @@ def ridge_decode_cv(X, pos, groups, n_jobs=1):
         'overall_r2': overall_r2, 'overall_mae': overall_mae,
         'r2_x': r2_x, 'r2_y': r2_y,
         'pred': pred_all,
+        'train_pred': train_pred_all,
     }
 
 
@@ -655,33 +685,21 @@ def plot_classification_summary(errors, shuffle, layer_name, save_dir):
     print(f"  Saved classification_{layer_name}.png")
 
 
-def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
-                            repr_name='deter', method='ridge',
-                            metadata=None):
-    """Two-panel figure: (A) occupancy heatmap on world, (B) per-visit error scatter.
+def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
+                        repr_name, method, row_label):
+    """Draw one row of the occupancy-vs-error figure (3 panels)."""
+    ax_heat, ax_err_map, ax_scatter = axes
 
-    Left:  Faint Crafter world map with occupancy hotspot overlay.
-    Right: One point per timestep — Manhattan decode error (y) vs tile
-           occupancy count (x).  No averaging: if the agent visited a tile
-           50 times, all 50 appear individually.
-
-    Inspired by pRNN trajectoryAnalysis.calculateCoverage.
-    """
     pos_int = np.clip(pos.astype(int), 0, [width - 1, height - 1])
-
-    # Per-sample Manhattan error (integer tiles, both methods)
     pred_int = np.clip(np.round(pred).astype(int), 0, [width - 1, height - 1])
     sample_err = np.sum(np.abs(pred_int - pos_int), axis=1).astype(float)
 
-    # Per-tile visit count
     tile_visits = np.zeros((width, height), dtype=float)
     for x, y in pos_int:
         tile_visits[x, y] += 1
 
-    # Look up occupancy for each timestep
     per_sample_occ = tile_visits[pos_int[:, 0], pos_int[:, 1]]
 
-    # Per-tile mean error
     tile_error_sum = np.zeros((width, height), dtype=float)
     tile_error_count = np.zeros((width, height), dtype=float)
     for i in range(len(pos_int)):
@@ -692,12 +710,7 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     visited = tile_error_count > 0
     tile_mean_err[visited] = tile_error_sum[visited] / tile_error_count[visited]
 
-    # --- Figure ---
-    fig, (ax_heat, ax_err_map, ax_scatter) = plt.subplots(
-        1, 3, figsize=(18, 5.5),
-        gridspec_kw={'width_ratios': [1, 1, 1.15]})
-
-    # -- Render world map (shared by panels A and B) --
+    # Render world map
     world_img = None
     tile_size = 8
     try:
@@ -715,11 +728,10 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     world_extent = [-0.5, width - 0.5, -0.5, height - 0.5]
     world_img_lower = world_img[::-1] if world_img is not None else None
 
-    # -- Panel A: world map + occupancy hotspot --
+    # Panel A: occupancy
     if world_img_lower is not None:
         ax_heat.imshow(world_img_lower, alpha=0.25, extent=world_extent,
                        origin='lower', aspect='equal')
-
     occ_plot = tile_visits.copy()
     occ_plot[occ_plot == 0] = np.nan
     im = ax_heat.imshow(occ_plot.T, origin='lower', cmap='hot',
@@ -729,15 +741,14 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     cbar.set_label('Visit count')
     ax_heat.set_xlabel('X')
     ax_heat.set_ylabel('Y')
-    ax_heat.set_title('Tile occupancy')
+    ax_heat.set_title(f'Tile occupancy ({row_label})')
     ax_heat.set_xlim(-0.5, width - 0.5)
     ax_heat.set_ylim(-0.5, height - 0.5)
 
-    # -- Panel B: world map + mean decoder error per tile --
+    # Panel B: mean error per tile
     if world_img_lower is not None:
         ax_err_map.imshow(world_img_lower, alpha=0.25, extent=world_extent,
                           origin='lower', aspect='equal')
-
     im2 = ax_err_map.imshow(tile_mean_err.T, origin='lower', cmap='RdYlGn_r',
                             aspect='equal', interpolation='nearest',
                             extent=world_extent, alpha=0.8)
@@ -745,14 +756,13 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     cbar2.set_label('Mean Manhattan error (tiles)')
     ax_err_map.set_xlabel('X')
     ax_err_map.set_ylabel('Y')
-    ax_err_map.set_title('Mean decode error per tile')
+    ax_err_map.set_title(f'Mean decode error per tile ({row_label})')
     ax_err_map.set_xlim(-0.5, width - 0.5)
     ax_err_map.set_ylim(-0.5, height - 0.5)
 
-    # -- Panel C: raw scatter + mean error at each occupancy level --
+    # Panel C: scatter
     ax_scatter.scatter(per_sample_occ, sample_err, s=4, alpha=0.15,
                        edgecolors='none', rasterized=True, color='grey')
-
     occ_vals = np.sort(np.unique(per_sample_occ))
     mean_err_per_occ = np.array([sample_err[per_sample_occ == v].mean()
                                  for v in occ_vals])
@@ -763,10 +773,36 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
                         fmt='o-', markersize=4, linewidth=1.5, capsize=2,
                         color='#2196F3', label='mean ± SEM', zorder=5)
     ax_scatter.legend(fontsize=8)
-
     ax_scatter.set_xlabel('Tile occupancy (visit count)')
     ax_scatter.set_ylabel('Mean Manhattan error (tiles)')
-    ax_scatter.set_title(f'Decode error vs occupancy ({repr_name}, {method})')
+    ax_scatter.set_title(f'Decode error vs occupancy ({row_label}, {repr_name}, {method})')
+
+
+def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
+                            repr_name='deter', method='ridge',
+                            metadata=None,
+                            train_pos=None, train_pred=None):
+    """Occupancy-vs-error figure.
+
+    Top row: held-out / test data.
+    Bottom row (optional): training data (shown when train_pos/train_pred given).
+    Each row has 3 panels: occupancy heatmap, mean error map, error-vs-occupancy scatter.
+    """
+    has_train = train_pos is not None and train_pred is not None
+    nrows = 2 if has_train else 1
+
+    fig, axes = plt.subplots(
+        nrows, 3, figsize=(18, 5.5 * nrows),
+        gridspec_kw={'width_ratios': [1, 1, 1.15]})
+    if nrows == 1:
+        axes = axes[np.newaxis, :]  # ensure 2D
+
+    _plot_occupancy_row(axes[0], pos, pred, width, height, metadata,
+                        repr_name, method, 'test')
+
+    if has_train:
+        _plot_occupancy_row(axes[1], train_pos, train_pred, width, height,
+                            metadata, repr_name, method, 'train')
 
     fig.tight_layout()
     fname = f'occupancy_vs_error_{repr_name}.png'
@@ -1824,6 +1860,11 @@ if __name__ == '__main__':
                         help='[--mode layers] Path to a saved layer_decoders/ '
                              'directory (from --save_model). Loads pretrained '
                              'decoders and evaluates on --data without training.')
+    parser.add_argument('--min_bbox', type=float, default=0,
+                        help='Minimum bounding-box area (tiles²) per episode. '
+                             'Episodes where (max_x-min_x)*(max_y-min_y) < this '
+                             'are excluded as "stuck". 0 = no filtering. '
+                             '(default: 0)')
     args = parser.parse_args()
     # Resolve max_iters: if set, override n_iters
     if args.max_iters is not None:
@@ -1840,6 +1881,12 @@ if __name__ == '__main__':
     if metadata:
         area = metadata.get('area', None)
         print(f"  Metadata: {metadata}")
+
+    if args.min_bbox > 0:
+        n_before = len(episodes)
+        episodes = filter_stuck_episodes(episodes, args.min_bbox)
+        print(f"  Bbox filter: {n_before} → {len(episodes)} episodes "
+              f"(min_bbox={args.min_bbox})")
 
     # ---- Layer-wise decoding mode ----
     if args.mode == 'layers':
@@ -2055,7 +2102,8 @@ if __name__ == '__main__':
         for name, res in reg_results.items():
             plot_occupancy_vs_error(pos, res['pred'], width, height,
                                    save_dir, repr_name=name, method='ridge',
-                                   metadata=metadata)
+                                   metadata=metadata,
+                                   train_pos=pos, train_pred=res['train_pred'])
 
         # Per-neuron analysis
         if args.per_neuron:
@@ -2140,12 +2188,20 @@ if __name__ == '__main__':
                             np.random.randint(0, height, len(true_xy))
                         ]) - true_xy), axis=1)
                     test_pos = pos[test_mask]
+
+                    # Train predictions for occupancy plot
+                    train_pred_cls = clf.predict(X[train_mask])
+                    train_pred_xy = np.stack(
+                        np.unravel_index(train_pred_cls, (width, height)), axis=1)
+                    train_pos_cls = pos[train_mask]
                 else:
                     errors, shuffle, pred_xy, true_xy, proba = classification_decode(
                         X, pos, groups, width, height, n_iters=args.n_iters,
                         n_jobs=args.n_jobs, device=args.device,
                         patience=args.patience)
                     test_pos = pos
+                    train_pos_cls = None
+                    train_pred_xy = None
 
                 print(f"  Mean Manhattan error: {errors.mean():.3f} "
                       f"(shuffle: {shuffle.mean():.3f})")
@@ -2153,7 +2209,9 @@ if __name__ == '__main__':
                 plot_occupancy_vs_error(test_pos, pred_xy, width, height,
                                        save_dir, repr_name=name,
                                        method='classification',
-                                       metadata=metadata)
+                                       metadata=metadata,
+                                       train_pos=train_pos_cls,
+                                       train_pred=train_pred_xy)
                 # Probability heatmap for each episode (deter only, LOGO only)
                 if name == 'deter' and args.holdout_frac <= 0:
                     for ep_idx in range(len(np.unique(groups))):
