@@ -70,6 +70,12 @@ class Crafter(embodied.Env):
       # ego view never leaks facing direction through the character sprite.
       self._ego_sprite = self._env._textures.get(
           'player-down', self._ego_unit).copy()  # (upx, upx, 4)
+      # Egocentric action remapping: agent issues ego-relative movement
+      # (left/right/forward/backward) which we translate to world-relative
+      # crafter actions based on current facing direction.
+      # Actions: 1=move_left, 2=move_right, 3=move_up, 4=move_down
+      # World directions: move_left=(-1,0), move_right=(1,0), move_up=(0,-1), move_down=(0,1)
+      self._dir_to_action = {(-1, 0): 1, (1, 0): 2, (0, -1): 3, (0, 1): 4}
 
   @property
   def obs_space(self):
@@ -121,7 +127,10 @@ class Crafter(embodied.Env):
       assert mat in ('grass', 'path', 'sand'), (
           f"Player spawned on non-walkable material '{mat}' at {player_pos}")
       return self._obs(image, 0.0, {}, is_first=True)
-    image, reward, self._done, info = self._env.step(action['action'])
+    act = action['action']
+    if self._egocentric_view is not None and act in (1, 2, 3, 4):
+      act = self._remap_ego_action(act)
+    image, reward, self._done, info = self._env.step(act)
     self._reward += reward
     self._length += 1
     if self._done and self._logdir:
@@ -143,6 +152,26 @@ class Crafter(embodied.Env):
     idx = self._spawn_rng.randint(0, len(xs))
     new_pos = np.array([xs[idx], ys[idx]])
     world.move(player, new_pos)
+
+  def _remap_ego_action(self, ego_act):
+    """Remap egocentric movement action to world-relative crafter action.
+
+    In ego view the agent always faces 'up' on screen, so:
+      ego move_up(3)    = forward  (in facing direction)
+      ego move_down(4)  = backward (opposite facing)
+      ego move_left(1)  = strafe left  (90° CCW from facing)
+      ego move_right(2) = strafe right (90° CW from facing)
+    """
+    fx, fy = self._env._player.facing
+    d2a = self._dir_to_action
+    if ego_act == 3:    # forward
+      return d2a[(fx, fy)]
+    elif ego_act == 4:  # backward
+      return d2a[(-fx, -fy)]
+    elif ego_act == 1:  # left (CCW: (fx,fy) -> (fy,-fx))
+      return d2a[(fy, -fx)]
+    else:               # right (CW: (fx,fy) -> (-fy,fx))
+      return d2a[(-fy, fx)]
 
   def _obs(
       self, image, reward, info,
