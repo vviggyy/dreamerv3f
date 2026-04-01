@@ -687,11 +687,8 @@ def plot_classification_summary(errors, shuffle, layer_name, save_dir):
     print(f"  Saved classification_{layer_name}.png")
 
 
-def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
-                        repr_name, method, row_label):
-    """Draw one row of the occupancy-vs-error figure (3 panels)."""
-    ax_heat, ax_err_map, ax_scatter = axes
-
+def _compute_tile_stats(pos, pred, width, height):
+    """Compute per-tile occupancy, mean error, and per-sample arrays."""
     pos_int = np.clip(pos.astype(int), 0, [width - 1, height - 1])
     pred_int = np.clip(np.round(pred).astype(int), 0, [width - 1, height - 1])
     sample_err = np.sum(np.abs(pred_int - pos_int), axis=1).astype(float)
@@ -712,7 +709,16 @@ def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
     visited = tile_error_count > 0
     tile_mean_err[visited] = tile_error_sum[visited] / tile_error_count[visited]
 
-    # Render world map
+    return {
+        'tile_visits': tile_visits,
+        'tile_mean_err': tile_mean_err,
+        'sample_err': sample_err,
+        'per_sample_occ': per_sample_occ,
+    }
+
+
+def _get_world_img(metadata, width, height):
+    """Load and flip the Crafter world map image. Returns (img, extent) or (None, extent)."""
     world_img = None
     tile_size = 8
     try:
@@ -726,13 +732,23 @@ def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
             world_img, _, tile_size = _render_crafter_world(metadata, tile_size)
         except Exception:
             pass
+    extent = [-0.5, width - 0.5, -0.5, height - 0.5]
+    img_lower = world_img[::-1] if world_img is not None else None
+    return img_lower, extent
 
-    world_extent = [-0.5, width - 0.5, -0.5, height - 0.5]
-    world_img_lower = world_img[::-1] if world_img is not None else None
+
+def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
+                        repr_name, method, row_label):
+    """Draw one row of the occupancy-vs-error figure (3 panels)."""
+    ax_heat, ax_err_map, ax_scatter = axes
+    tile_visits = stats['tile_visits']
+    tile_mean_err = stats['tile_mean_err']
+    sample_err = stats['sample_err']
+    per_sample_occ = stats['per_sample_occ']
 
     # Panel A: occupancy
-    if world_img_lower is not None:
-        ax_heat.imshow(world_img_lower, alpha=0.25, extent=world_extent,
+    if world_img is not None:
+        ax_heat.imshow(world_img, alpha=0.25, extent=world_extent,
                        origin='lower', aspect='equal')
     occ_plot = tile_visits.copy()
     occ_plot[occ_plot == 0] = np.nan
@@ -744,12 +760,12 @@ def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
     ax_heat.set_xlabel('X')
     ax_heat.set_ylabel('Y')
     ax_heat.set_title(f'Tile occupancy ({row_label})')
-    ax_heat.set_xlim(-0.5, width - 0.5)
-    ax_heat.set_ylim(-0.5, height - 0.5)
+    ax_heat.set_xlim(world_extent[0], world_extent[1])
+    ax_heat.set_ylim(world_extent[2], world_extent[3])
 
     # Panel B: mean error per tile
-    if world_img_lower is not None:
-        ax_err_map.imshow(world_img_lower, alpha=0.25, extent=world_extent,
+    if world_img is not None:
+        ax_err_map.imshow(world_img, alpha=0.25, extent=world_extent,
                           origin='lower', aspect='equal')
     im2 = ax_err_map.imshow(tile_mean_err.T, origin='lower', cmap='RdYlGn_r',
                             aspect='equal', interpolation='nearest',
@@ -759,8 +775,8 @@ def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
     ax_err_map.set_xlabel('X')
     ax_err_map.set_ylabel('Y')
     ax_err_map.set_title(f'Mean decode error per tile ({row_label})')
-    ax_err_map.set_xlim(-0.5, width - 0.5)
-    ax_err_map.set_ylim(-0.5, height - 0.5)
+    ax_err_map.set_xlim(world_extent[0], world_extent[1])
+    ax_err_map.set_ylim(world_extent[2], world_extent[3])
 
     # Panel C: scatter
     ax_scatter.scatter(per_sample_occ, sample_err, s=4, alpha=0.15,
@@ -774,10 +790,137 @@ def _plot_occupancy_row(axes, pos, pred, width, height, metadata,
     ax_scatter.errorbar(occ_vals, mean_err_per_occ, yerr=sem_err_per_occ,
                         fmt='o-', markersize=4, linewidth=1.5, capsize=2,
                         color='#2196F3', label='mean ± SEM', zorder=5)
+    # Median + IQR
+    median_per_occ = np.array([np.median(sample_err[per_sample_occ == v])
+                               for v in occ_vals])
+    q25_per_occ = np.array([np.percentile(sample_err[per_sample_occ == v], 25)
+                            for v in occ_vals])
+    q75_per_occ = np.array([np.percentile(sample_err[per_sample_occ == v], 75)
+                            for v in occ_vals])
+    ax_scatter.fill_between(occ_vals, q25_per_occ, q75_per_occ,
+                            alpha=0.2, color='#FF9800', zorder=4)
+    ax_scatter.plot(occ_vals, median_per_occ, 's--', markersize=3,
+                    linewidth=1.2, color='#FF9800', label='median ± IQR',
+                    zorder=6)
     ax_scatter.legend(fontsize=8)
     ax_scatter.set_xlabel('Tile occupancy (visit count)')
-    ax_scatter.set_ylabel('Mean Manhattan error (tiles)')
+    ax_scatter.set_ylabel('Manhattan error (tiles)')
     ax_scatter.set_title(f'Decode error vs occupancy ({row_label}, {repr_name}, {method})')
+
+
+def _plot_diff_row(axes, test_stats, train_stats, width, height,
+                   world_img, world_extent, repr_name, method):
+    """Draw the train-minus-test difference row (3 panels)."""
+    ax_occ, ax_err, ax_scatter = axes
+
+    # -- Panel A: occupancy difference (% of each set's total) --
+    test_occ = test_stats['tile_visits']
+    train_occ = train_stats['tile_visits']
+    # Normalize to percentage of total visits
+    test_pct = test_occ / max(test_occ.sum(), 1) * 100
+    train_pct = train_occ / max(train_occ.sum(), 1) * 100
+    occ_diff = train_pct - test_pct
+    # Mask tiles never visited by either set
+    either_visited = (test_occ > 0) | (train_occ > 0)
+    occ_diff_plot = np.full((width, height), np.nan)
+    occ_diff_plot[either_visited] = occ_diff[either_visited]
+
+    if world_img is not None:
+        ax_occ.imshow(world_img, alpha=0.25, extent=world_extent,
+                      origin='lower', aspect='equal')
+    vmax = max(abs(np.nanmin(occ_diff_plot)), abs(np.nanmax(occ_diff_plot)), 0.01)
+    im = ax_occ.imshow(occ_diff_plot.T, origin='lower', cmap='RdBu_r',
+                       aspect='equal', interpolation='nearest',
+                       extent=world_extent, alpha=0.8,
+                       vmin=-vmax, vmax=vmax)
+    cbar = plt.colorbar(im, ax=ax_occ, shrink=0.8)
+    cbar.set_label('Occupancy % (train - test)')
+    ax_occ.set_xlabel('X')
+    ax_occ.set_ylabel('Y')
+    ax_occ.set_title('Occupancy difference (train - test)')
+    ax_occ.set_xlim(world_extent[0], world_extent[1])
+    ax_occ.set_ylim(world_extent[2], world_extent[3])
+
+    # -- Panel B: mean error difference per tile --
+    test_err = test_stats['tile_mean_err']
+    train_err = train_stats['tile_mean_err']
+    both_visited = np.isfinite(test_err) & np.isfinite(train_err)
+    err_diff = np.full((width, height), np.nan)
+    err_diff[both_visited] = train_err[both_visited] - test_err[both_visited]
+
+    if world_img is not None:
+        ax_err.imshow(world_img, alpha=0.25, extent=world_extent,
+                      origin='lower', aspect='equal')
+    vmax_e = max(abs(np.nanmin(err_diff)), abs(np.nanmax(err_diff)), 0.01)
+    im2 = ax_err.imshow(err_diff.T, origin='lower', cmap='RdBu_r',
+                        aspect='equal', interpolation='nearest',
+                        extent=world_extent, alpha=0.8,
+                        vmin=-vmax_e, vmax=vmax_e)
+    cbar2 = plt.colorbar(im2, ax=ax_err, shrink=0.8)
+    cbar2.set_label('Mean error diff (train - test)')
+    ax_err.set_xlabel('X')
+    ax_err.set_ylabel('Y')
+    ax_err.set_title('Mean decode error difference (train - test)')
+    ax_err.set_xlim(world_extent[0], world_extent[1])
+    ax_err.set_ylim(world_extent[2], world_extent[3])
+
+    # -- Panel C: test error vs normalized occupancy difference per tile --
+    # x = train% - test% for each tile; y = test decode error at that tile
+    # Negative x = tile overrepresented in test; positive = in train
+    test_occ = test_stats['tile_visits']
+    train_occ = train_stats['tile_visits']
+    test_pct = test_occ / max(test_occ.sum(), 1) * 100
+    train_pct = train_occ / max(train_occ.sum(), 1) * 100
+    occ_diff = train_pct - test_pct  # (width, height)
+
+    test_err_tile = test_stats['tile_mean_err']
+    test_visited = np.isfinite(test_err_tile)
+    tile_x = occ_diff[test_visited]
+    tile_y = test_err_tile[test_visited]
+
+    ax_scatter.scatter(tile_x, tile_y, s=12, alpha=0.5, edgecolors='none',
+                       rasterized=True, color='grey', zorder=3)
+    ax_scatter.axvline(0, color='k', linewidth=0.5, linestyle=':', alpha=0.5)
+
+    # Binned mean ± SEM and median ± IQR
+    n_bins = min(15, max(3, len(tile_x) // 5))
+    bin_edges = np.linspace(tile_x.min(), tile_x.max(), n_bins + 1)
+    bin_centers, bin_mean, bin_sem, bin_med, bin_q25, bin_q75 = [], [], [], [], [], []
+    for i in range(n_bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        if i < n_bins - 1:
+            mask = (tile_x >= lo) & (tile_x < hi)
+        else:
+            mask = (tile_x >= lo) & (tile_x <= hi)
+        if mask.sum() < 2:
+            continue
+        vals = tile_y[mask]
+        bin_centers.append((lo + hi) / 2)
+        bin_mean.append(vals.mean())
+        bin_sem.append(vals.std() / np.sqrt(len(vals)))
+        bin_med.append(np.median(vals))
+        bin_q25.append(np.percentile(vals, 25))
+        bin_q75.append(np.percentile(vals, 75))
+    bin_centers = np.array(bin_centers)
+    bin_mean = np.array(bin_mean)
+    bin_sem = np.array(bin_sem)
+    bin_med = np.array(bin_med)
+    bin_q25 = np.array(bin_q25)
+    bin_q75 = np.array(bin_q75)
+
+    if len(bin_centers) > 0:
+        ax_scatter.errorbar(bin_centers, bin_mean, yerr=bin_sem,
+                            fmt='o-', markersize=4, linewidth=1.5, capsize=2,
+                            color='#2196F3', label='mean ± SEM', zorder=5)
+        ax_scatter.fill_between(bin_centers, bin_q25, bin_q75,
+                                alpha=0.2, color='#FF9800', zorder=4)
+        ax_scatter.plot(bin_centers, bin_med, 's--', markersize=3,
+                        linewidth=1.2, color='#FF9800',
+                        label='median ± IQR', zorder=6)
+    ax_scatter.legend(fontsize=7)
+    ax_scatter.set_xlabel('Occupancy difference % (train - test)')
+    ax_scatter.set_ylabel('Test Manhattan error (tiles)')
+    ax_scatter.set_title(f'Test error vs occupancy bias ({repr_name}, {method})')
 
 
 def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
@@ -786,12 +929,12 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
                             train_pos=None, train_pred=None):
     """Occupancy-vs-error figure.
 
-    Top row: held-out / test data.
-    Bottom row (optional): training data (shown when train_pos/train_pred given).
-    Each row has 3 panels: occupancy heatmap, mean error map, error-vs-occupancy scatter.
+    Row 1: held-out / test data.
+    Row 2 (optional): training data.
+    Row 3 (optional): train-minus-test difference (occupancy %, error, overlay).
     """
     has_train = train_pos is not None and train_pred is not None
-    nrows = 2 if has_train else 1
+    nrows = 3 if has_train else 1
 
     fig, axes = plt.subplots(
         nrows, 3, figsize=(18, 5.5 * nrows),
@@ -799,12 +942,18 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     if nrows == 1:
         axes = axes[np.newaxis, :]  # ensure 2D
 
-    _plot_occupancy_row(axes[0], pos, pred, width, height, metadata,
-                        repr_name, method, 'test')
+    world_img, world_extent = _get_world_img(metadata, width, height)
+
+    test_stats = _compute_tile_stats(pos, pred, width, height)
+    _plot_occupancy_row(axes[0], test_stats, width, height,
+                        world_img, world_extent, repr_name, method, 'test')
 
     if has_train:
-        _plot_occupancy_row(axes[1], train_pos, train_pred, width, height,
-                            metadata, repr_name, method, 'train')
+        train_stats = _compute_tile_stats(train_pos, train_pred, width, height)
+        _plot_occupancy_row(axes[1], train_stats, width, height,
+                            world_img, world_extent, repr_name, method, 'train')
+        _plot_diff_row(axes[2], test_stats, train_stats, width, height,
+                       world_img, world_extent, repr_name, method)
 
     fig.tight_layout()
     fname = f'occupancy_vs_error_{repr_name}.png'
