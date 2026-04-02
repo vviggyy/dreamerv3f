@@ -539,6 +539,83 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     plt.close(fig)
 
 
+def plot_layer_si_ev(all_results, save_dir):
+    """Horizontal boxplots of SI and EV across layers (like layer_comparison.png).
+
+    Produces two figures: layer_si.png and layer_ev.png, each with one box per
+    layer ordered early → late.
+    """
+    # Collect per-layer arrays
+    layer_names = [r['layer_name'] for r in all_results]
+    ordered = get_sorted_layers(layer_names)
+    display_order = [ln for ln in ordered if ln in layer_names]
+    n = len(display_order)
+    if n == 0:
+        return
+
+    # Map layer_name → result
+    res_map = {r['layer_name']: r for r in all_results}
+
+    section_colors = {
+        'enc/cnn': '#0055cc',
+        'enc/mlp': '#0099ff',
+        'enc/tok': '#44ccff',
+        'dyn/sto': '#ff9900',
+        'dyn/det': '#ff5500',
+        'pol/mlp': '#33aa00',
+        'val/mlp': '#996600',
+    }
+
+    def _color(ln):
+        for prefix, c in section_colors.items():
+            if ln.startswith(prefix):
+                return c
+        return '#888888'
+
+    for metric_key, metric_label, fname in [
+        ('SI', 'Spatial Information (bits/spike)', 'layer_si.png'),
+        ('EVs', 'Explained Variance', 'layer_ev.png'),
+    ]:
+        fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
+
+        data_raw = [res_map[ln]['metrics'][metric_key] for ln in display_order]
+        # Filter out NaN/Inf for clean boxplots
+        data = [d[np.isfinite(d)] for d in data_raw]
+        n_neurons = [len(d) for d in data]
+        labels = [
+            ln.replace('/', '/\n') + f' ({nn})'
+            for ln, nn in zip(display_order, n_neurons)
+        ]
+
+        bp = ax.boxplot(data, vert=False, patch_artist=True,
+                        labels=labels, widths=0.6, showfliers=False)
+
+        for patch, ln in zip(bp['boxes'], display_order):
+            patch.set_facecolor(_color(ln))
+            patch.set_alpha(0.7)
+
+        # Annotate means
+        for i, (ln, d) in enumerate(zip(display_order, data), start=1):
+            mean_v = np.nanmean(d)
+            ax.text(mean_v, i, f' {mean_v:.3f}', va='center', fontsize=7,
+                    color='black')
+
+        ax.set_xlabel(metric_label, fontsize=11)
+        ax.set_title(f'Per-Layer {metric_label}\n'
+                     f'orange line = median, black number = mean',
+                     fontsize=12)
+        ax.grid(True, axis='x', alpha=0.3)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='y', labelsize=8)
+
+        fig.tight_layout()
+        out = save_dir / fname
+        fig.savefig(out, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Saved {out}")
+
+
 def plot_layer_summary(all_results, save_path):
     """Cross-layer cell type fraction bar chart."""
     layer_names = [r['layer_name'] for r in all_results]
@@ -843,6 +920,7 @@ def main():
 
         if len(all_results) > 1:
             plot_layer_summary(all_results, save_dir / 'layer_summary.png')
+            plot_layer_si_ev(all_results, save_dir)
 
         print(f"Plots saved to {save_dir}")
 
