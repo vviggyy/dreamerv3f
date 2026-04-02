@@ -1003,20 +1003,22 @@ def main():
         for res in all_results:
             ln = res['layer_name']
             safe_name = ln.replace('/', '_')
+            layer_dir = save_dir / safe_name
+            layer_dir.mkdir(parents=True, exist_ok=True)
 
             plot_si_ev_scatter(
                 res['metrics'], res['group_ids'], ln,
-                save_dir / f'{safe_name}_si_ev_scatter.png',
+                layer_dir / 'si_ev_scatter.png',
                 tc_array=res['tuning_curves'],
                 interactive=args.interactive,
             )
             plot_cell_types(
                 res['group_ids'], ln,
-                save_dir / f'{safe_name}_cell_types.png',
+                layer_dir / 'cell_types.png',
             )
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
-                save_dir / f'{safe_name}_example_tuning_curves.png',
+                layer_dir / 'example_tuning_curves.png',
                 area=area,
             )
 
