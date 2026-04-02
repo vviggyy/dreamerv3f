@@ -540,6 +540,95 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     plt.close(fig)
 
 
+def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
+    """N×(1+M) grid: SI vs EV scatter (col 0) + M sampled tuning curves per layer.
+
+    Sampled neurons are highlighted on the scatter with colored circles matching
+    the tuning curve border color.
+
+    Args:
+        all_results: list of dicts with 'layer_name', 'metrics', 'tuning_curves'.
+        save_path: output file path.
+        m: number of sampled tuning curves per layer.
+        seed: random seed for neuron sampling (None = random).
+    """
+    if seed is None:
+        seed = np.random.randint(0, 2**31)
+    layer_names = [r['layer_name'] for r in all_results]
+    ordered = get_sorted_layers(layer_names)
+    res_map = {r['layer_name']: r for r in all_results}
+    display_order = [ln for ln in ordered if ln in res_map]
+    n = len(display_order)
+    if n == 0:
+        return
+
+    rng = np.random.RandomState(seed)
+    ncols = 1 + m
+    # Distinct colors for each sampled neuron
+    sample_colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
+                     '#911eb4', '#42d4f4', '#f032e6'][:m]
+    fig, axes = plt.subplots(n, ncols, figsize=(2.5 * ncols, 2.5 * n),
+                              squeeze=False)
+
+    for row, ln in enumerate(display_order):
+        res = res_map[ln]
+        si = res['metrics']['SI']
+        ev = res['metrics']['EVs']
+        tc_array = res.get('tuning_curves')
+
+        # Col 0: SI vs EV scatter
+        ax = axes[row, 0]
+        ax.scatter(si, ev, s=4, alpha=0.3, color='steelblue', rasterized=True)
+        ax.set_xlabel('SI', fontsize=7)
+        ax.set_ylabel('EV', fontsize=7)
+        ax.set_title(ln, fontsize=8, fontweight='bold')
+        ax.tick_params(labelsize=6)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        # Cols 1..m: sampled tuning curves
+        if tc_array is None or len(tc_array) == 0:
+            for c in range(1, ncols):
+                axes[row, c].axis('off')
+            continue
+
+        n_neurons = tc_array.shape[0]
+        # Uniform random sampling
+        chosen = rng.choice(n_neurons, size=min(m, n_neurons), replace=False)
+
+        # Highlight chosen neurons on the scatter with colored circles
+        for c_idx, neuron_idx in enumerate(chosen):
+            color = sample_colors[c_idx % len(sample_colors)]
+            ax.scatter(si[neuron_idx], ev[neuron_idx],
+                       s=50, facecolors='none', edgecolors=color,
+                       linewidths=1.5, zorder=5)
+
+        for c_idx, neuron_idx in enumerate(chosen):
+            color = sample_colors[c_idx % len(sample_colors)]
+            tc_ax = axes[row, 1 + c_idx]
+            tc = tc_array[neuron_idx]
+            tc_ax.imshow(tc.T, origin='lower', interpolation='nearest',
+                         aspect='equal')
+            tc_ax.set_title(
+                f'n{neuron_idx}\nSI={si[neuron_idx]:.2f} EV={ev[neuron_idx]:.2f}',
+                fontsize=6, color=color)
+            tc_ax.tick_params(labelsize=5)
+            # Colored border to match scatter highlight
+            for spine in tc_ax.spines.values():
+                spine.set_edgecolor(color)
+                spine.set_linewidth(2.5)
+
+        # Hide unused columns
+        for c_idx in range(len(chosen), m):
+            axes[row, 1 + c_idx].axis('off')
+
+    fig.suptitle(f'seed={seed}', fontsize=9, color='grey', y=1.0)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {save_path} (seed={seed})")
+
+
 def plot_layer_si_ev(all_results, save_dir):
     """Horizontal boxplots of SI and EV across layers (like layer_comparison.png).
 
@@ -934,6 +1023,7 @@ def main():
         if len(all_results) > 1:
             plot_layer_summary(all_results, save_dir / 'layer_summary.png')
             plot_layer_si_ev(all_results, save_dir)
+            plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.png')
 
         print(f"Plots saved to {save_dir}")
 
