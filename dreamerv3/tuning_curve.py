@@ -45,6 +45,7 @@ from scipy.signal import correlate2d
 from run_info import log_run_info
 from decode_position import (
     LAYER_ORDER,
+    filter_stuck_episodes,
     load_episodes,
     prepare_data,
     prepare_data_layers,
@@ -726,6 +727,8 @@ def main():
     parser.add_argument('--EV_thresh', type=float, default=0.5)
     parser.add_argument('--EV_unthresh', type=float, default=0.15)
     parser.add_argument('--HD_thresh', type=float, default=0.5)
+    parser.add_argument('--min_bbox', type=float, default=0,
+                        help='Min bounding-box area (tiles²) to keep an episode (0=no filter)')
     parser.add_argument('--interactive', action='store_true',
                         help='Show interactive SI vs EV scatter (click to see tuning curves)')
     parser.add_argument('--from_pkl', default=None,
@@ -768,6 +771,12 @@ def main():
     episodes, metadata = load_episodes(args.data)
     print(f"  {len(episodes)} episodes loaded")
 
+    if args.min_bbox > 0:
+        n_before = len(episodes)
+        episodes = filter_stuck_episodes(episodes, args.min_bbox)
+        print(f"  {n_before} → {len(episodes)} episodes after bbox filter "
+              f"(min_bbox={args.min_bbox})")
+
     area = metadata.get('area', (64, 64)) if metadata else (64, 64)
     if isinstance(area, (list, tuple)):
         area = tuple(area)
@@ -779,6 +788,10 @@ def main():
         print(f"Loading test episodes from {args.test_data}")
         test_episodes, _ = load_episodes(args.test_data)
         print(f"  {len(test_episodes)} test episodes loaded")
+        if args.min_bbox > 0:
+            n_before = len(test_episodes)
+            test_episodes = filter_stuck_episodes(test_episodes, args.min_bbox)
+            print(f"  {n_before} → {len(test_episodes)} test episodes after bbox filter")
 
     # Prepare layer data
     print("Preparing layer data...")
