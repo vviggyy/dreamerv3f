@@ -1831,7 +1831,7 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
         labels = [ln.replace('/', '/\n') for ln in display_order]
 
     bp = ax.boxplot(data, vert=False, patch_artist=True,
-                    labels=labels, widths=0.6, showfliers=False)
+                    tick_labels=labels, widths=0.6, showfliers=False)
 
     section_colors = {
         'enc/cnn': '#0055cc',
@@ -2075,7 +2075,7 @@ if __name__ == '__main__':
             print(f"\nResults saved to {results_file}")
             log_run_info(save_dir, 'decode_position', vars(args),
                          extra={'sub_mode': 'layers/from_model',
-                                'n_layers': len(layer_results),
+                                'n_layers': len(ordered),
                                 'n_samples': len(pos),
                                 'grid': (width, height)})
             print("Done.")
@@ -2219,7 +2219,7 @@ if __name__ == '__main__':
         print(f"\nResults saved to {results_file}")
         log_run_info(save_dir, 'decode_position', vars(args),
                      extra={'sub_mode': 'layers',
-                            'n_layers': len(layer_results),
+                            'n_layers': len(ordered),
                             'n_samples': len(pos),
                             'grid': (width, height),
                             'metric': metric})

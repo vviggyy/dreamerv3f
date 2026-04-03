@@ -336,13 +336,14 @@ def main():
     # Check if metrics.jsonl has training loss data
     has_train = any('train/loss/image' in r for r in metric_records)
 
-    # Fixed panels: episode score, crafter score, per-achievement unlock rate
-    panels = ['score', 'crafter_score', 'achievements']
+    # Row 1: episode score, crafter score, per-achievement unlock rate
+    # Row 2: cumulative reward, training losses, reward & value estimates
+    top_panels = ['score', 'crafter_score', 'achievements']
+    bot_panels = ['cumulative', 'losses', 'reward_value']
 
-    n_panels = len(panels)
-    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4.5))
-    if n_panels == 1:
-        axes = [axes]
+    n_cols = 3
+    n_rows = 2
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.5 * n_rows))
     fig.suptitle(f'Training Progress — {logdir.name}', fontsize=14, fontweight='bold')
 
     def empty_panel(ax, title):
@@ -354,8 +355,7 @@ def main():
     # Use smoothing window scaled for metric records (fewer data points)
     metric_smooth = max(1, args.smooth // 10)
 
-    for i, panel_type in enumerate(panels):
-        ax = axes[i]
+    def render_panel(ax, panel_type):
         if panel_type == 'score':
             if len(ep_steps):
                 plot_episode_score(ax, ep_steps, ep_scores, args.smooth)
@@ -374,6 +374,11 @@ def main():
             plot_crafter_score(ax, score_records, args.smooth)
         elif panel_type == 'achievements':
             plot_achievement_rates(ax, metric_records, args.smooth)
+
+    for i, panel_type in enumerate(top_panels):
+        render_panel(axes[0, i], panel_type)
+    for i, panel_type in enumerate(bot_panels):
+        render_panel(axes[1, i], panel_type)
 
     plt.tight_layout()
 
