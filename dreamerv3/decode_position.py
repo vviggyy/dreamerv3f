@@ -1275,6 +1275,38 @@ def prepare_data_layers(episodes):
     return layers, pos, groups
 
 
+def _prepare_single_layer(episodes, layer_name):
+    """Extract (X, pos, groups) for one layer only — much lower peak memory
+    than prepare_data_layers which loads all layers simultaneously.
+
+    Returns:
+        X:      np.ndarray (N, D)
+        pos:    np.ndarray (N, 2)
+        groups: np.ndarray (N,)
+    """
+    all_x, all_pos, all_groups = [], [], []
+    act_key = f'act/{layer_name}'
+    for i, ep in enumerate(episodes):
+        if 'player_pos' not in ep:
+            continue
+        arr = ep.get(act_key)
+        if arr is None or len(arr) == 0:
+            continue
+        p = np.array(ep['player_pos'], dtype=np.float32)
+        a = np.array(arr, dtype=np.float32)
+        T = min(len(p), len(a))
+        if a.ndim > 2:
+            a = a[:T].reshape(T, -1)
+        else:
+            a = a[:T]
+        all_pos.append(p[:T])
+        all_x.append(a)
+        all_groups.append(np.full(T, i))
+    if not all_pos:
+        raise ValueError(f"No valid episodes for layer {layer_name}")
+    return np.concatenate(all_x), np.concatenate(all_pos), np.concatenate(all_groups)
+
+
 def _layer_classification_fold(layer_name, fold, train_idx, test_idx, X,
                                 y_cls, pos_int, width, height, n_iters, device,
                                 patience=500):
@@ -2042,8 +2074,25 @@ if __name__ == '__main__':
     # ---- Layer-wise decoding mode ----
     if args.mode == 'layers':
         print("\n=== Per-Layer Position Decoding ===")
-        layers, pos, groups = prepare_data_layers(episodes)
-        print(f"  Layers found: {sorted(layers.keys())}")
+
+        # Strip image data to save memory (not needed for decoding)
+        for ep in episodes:
+            for k in ['image', 'images']:
+                if k in ep:
+                    del ep[k]
+
+        # Discover layer names without loading all activations
+        all_layer_keys = set()
+        for ep in episodes:
+            all_layer_keys.update(
+                k[len('act/'):] for k in ep if k.startswith('act/'))
+        if not all_layer_keys:
+            raise ValueError("No 'act/*' keys in episodes.")
+        print(f"  Layers found: {sorted(all_layer_keys)}")
+
+        # Get pos/groups from a lightweight single-layer load
+        _first_ln = sorted(all_layer_keys)[0]
+        _, pos, groups = _prepare_single_layer(episodes, _first_ln)
         print(f"  pos: {pos.shape}  groups: {groups.shape}")
         if metadata and 'area' in metadata:
             width, height = metadata['area']
@@ -2051,10 +2100,16 @@ if __name__ == '__main__':
             width = int(pos[:, 0].max()) + 1
             height = int(pos[:, 1].max()) + 1
         print(f"  Grid: {width}x{height}")
+        del _  # free the activation array from the probe load
 
         # --- Eval-only from saved decoders ---
         if args.from_model:
             print(f"\n  Loading pretrained decoders from {args.from_model}")
+            # from_model needs all layers loaded — load one at a time
+            layers = {}
+            for ln in sorted(all_layer_keys):
+                X_ln, _, _ = _prepare_single_layer(episodes, ln)
+                layers[ln] = X_ln
             layer_fold_values, ordered, metric = eval_layer_decoders(
                 args.from_model, layers, pos, width, height)
             layer_sizes = {ln: layers[ln].shape[1] for ln in ordered
@@ -2086,40 +2141,81 @@ if __name__ == '__main__':
         loss_histories = {}
 
         # --- Determine train/test split ---
+        # Load layers lazily (one at a time) to avoid OOM
         has_test = False
+        test_episodes = None
         if args.test_data:
             print("Loading held-out test trajectories...")
             test_episodes, _ = load_episodes(Path(args.test_data))
             print(f"  {len(test_episodes)} test episodes loaded")
-            layers_test, pos_test, _ = prepare_data_layers(test_episodes)
-            # Only keep layers present in both sets
-            common = set(layers.keys()) & set(layers_test.keys())
-            layers = {k: v for k, v in layers.items() if k in common}
-            layers_test = {k: v for k, v in layers_test.items() if k in common}
+            for ep in test_episodes:
+                for k in ['image', 'images']:
+                    if k in ep:
+                        del ep[k]
+            # Discover common layers
+            test_layer_keys = set()
+            for ep in test_episodes:
+                test_layer_keys.update(
+                    k[len('act/'):] for k in ep if k.startswith('act/'))
+            common = all_layer_keys & test_layer_keys
+            all_layer_keys = common
             has_test = True
         elif args.holdout_frac > 0:
-            # Auto-split episodes into train/test
+            # Auto-split episodes into train/test by episode index
             ep_ids = np.unique(groups)
             n_eps = len(ep_ids)
             n_test = max(1, int(round(n_eps * args.holdout_frac)))
             n_train = n_eps - n_test
             rng = np.random.RandomState(42)
             rng.shuffle(ep_ids)
-            test_eps = set(ep_ids[:n_test])
+            test_eps = set(ep_ids[:n_test].tolist())
             train_mask = np.array([g not in test_eps for g in groups])
             test_mask = ~train_mask
             print(f"  Auto holdout split: {n_train} train / {n_test} test episodes "
                   f"({train_mask.sum()} / {test_mask.sum()} timesteps)")
-            layers_test = {ln: arr[test_mask] for ln, arr in layers.items()}
             pos_test = pos[test_mask]
-            layers = {ln: arr[train_mask] for ln, arr in layers.items()}
             pos = pos[train_mask]
             has_test = True
+
+        # Helper: load one layer, apply train/test split
+        def _load_layer(ln):
+            """Load a single layer's activations, return (X_train, X_test) or (X, None)."""
+            import gc as _gc
+            if args.test_data and test_episodes is not None:
+                X_train, _, _ = _prepare_single_layer(episodes, ln)
+                X_test, _, _ = _prepare_single_layer(test_episodes, ln)
+                return X_train, X_test
+            elif args.holdout_frac > 0 and has_test:
+                X_full, _, _ = _prepare_single_layer(episodes, ln)
+                X_train = X_full[train_mask]
+                X_test = X_full[test_mask]
+                del X_full
+                _gc.collect()
+                return X_train, X_test
+            else:
+                X_full, _, _ = _prepare_single_layer(episodes, ln)
+                return X_full, None
+
+        # Build layers dicts lazily for the decode functions.
+        # For holdout/test modes, build both train and test dicts one layer
+        # at a time so only one layer's activations are in memory at once
+        # during the dict-building phase.
+        import gc as _gc
+        ordered = _ordered_layers(all_layer_keys)
+        layers = {}
+        layers_test_dict = {} if has_test else None
+        for ln in ordered:
+            X_tr, X_te = _load_layer(ln)
+            mem_mb = X_tr.nbytes / 1e6
+            print(f"  Loaded {ln}: {X_tr.shape} ({mem_mb:.0f} MB)")
+            layers[ln] = X_tr
+            if X_te is not None:
+                layers_test_dict[ln] = X_te
 
         if has_test and args.ridge_layers:
             print(f"  Mode: Ridge holdout. No CV.  max_dims={args.max_dims}")
             layer_results, ordered = decode_layers_ridge_holdout(
-                layers, pos, layers_test, pos_test,
+                layers, pos, layers_test_dict, pos_test,
                 n_jobs=args.n_jobs,
                 max_samples=args.max_samples,
                 max_dims=args.max_dims)
@@ -2139,7 +2235,7 @@ if __name__ == '__main__':
                   f"max_samples={ms}, device={args.device}")
             layer_fold_values, ordered, loss_histories = \
                 decode_layers_classification_holdout(
-                    layers, pos, layers_test, pos_test, width, height,
+                    layers, pos, layers_test_dict, pos_test, width, height,
                     n_iters=n_iters_layers, n_jobs=args.n_jobs,
                     device=args.device, patience=pat,
                     max_samples=ms, checkpoint_path=checkpoint_path)

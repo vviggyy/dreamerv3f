@@ -30,6 +30,7 @@ Usage:
 """
 
 import argparse
+import gc
 import pickle
 from pathlib import Path
 
@@ -45,11 +46,28 @@ from scipy.signal import correlate2d
 from run_info import log_run_info
 from decode_position import (
     LAYER_ORDER,
+    _prepare_single_layer,
     filter_stuck_episodes,
     load_episodes,
     prepare_data,
     prepare_data_layers,
 )
+
+
+def _discover_layer_names(episodes):
+    """Return sorted list of act/* layer names without loading activations."""
+    keys = set()
+    for ep in episodes:
+        keys.update(k[len('act/'):] for k in ep if k.startswith('act/'))
+    return sorted(keys)
+
+
+def _strip_heavy_keys(episodes):
+    """Drop image data from episodes in-place to free memory."""
+    for ep in episodes:
+        for k in ['image', 'images']:
+            if k in ep:
+                del ep[k]
 
 # ---------------------------------------------------------------------------
 # Autocorrelation metrics (from pRNN TuningCurveAnalysis.py)
@@ -871,6 +889,9 @@ def main():
         area = tuple(area)
     print(f"  Area: {area}")
 
+    # Drop image data to free memory (not needed for tuning analysis)
+    _strip_heavy_keys(episodes)
+
     # Load test data if provided
     test_episodes = None
     if args.test_data:
@@ -881,67 +902,61 @@ def main():
             n_before = len(test_episodes)
             test_episodes = filter_stuck_episodes(test_episodes, args.min_bbox)
             print(f"  {n_before} → {len(test_episodes)} test episodes after bbox filter")
+        _strip_heavy_keys(test_episodes)
 
-    # Prepare layer data
-    print("Preparing layer data...")
-    try:
-        layers, pos, groups = prepare_data_layers(episodes)
-    except ValueError:
+    # Discover layer names and determine order
+    layer_names = _discover_layer_names(episodes)
+    if not layer_names:
+        # Fallback: deter/stoch only
         print("  No act/* layers found, falling back to deter/stoch only")
-        deter, stoch, pos, groups = prepare_data(episodes)
-        layers = {'dyn/deter': deter, 'dyn/stoch': stoch}
-
-    # Prepare test layer data
-    test_layers, test_pos, test_groups = None, None, None
-    if test_episodes is not None:
-        try:
-            test_layers, test_pos, test_groups = prepare_data_layers(test_episodes)
-        except ValueError:
-            deter_t, stoch_t, test_pos, test_groups = prepare_data(test_episodes)
-            test_layers = {'dyn/deter': deter_t, 'dyn/stoch': stoch_t}
-
-    # Extract facing direction
-    facing = extract_facing_aligned(episodes, groups) if not args.no_hd else None
-    test_facing = None
-    if test_episodes and not args.no_hd:
-        test_facing = extract_facing_aligned(test_episodes, test_groups) if test_groups is not None else None
-
-    # Filter/sort layers
-    ordered = get_sorted_layers(layers)
+        layer_names = ['dyn/deter', 'dyn/stoch']
+    ordered = get_sorted_layers(layer_names)
     if args.layers:
         ordered = [ln for ln in ordered if ln in args.layers]
     print(f"  Layers to analyze: {ordered}")
 
-    # Analyze each layer
+    # Extract facing direction (once, small — just 2 floats per timestep)
+    # Use a dummy single-layer load to get aligned groups for facing extraction
+    _, _tmp_pos, _tmp_groups = _prepare_single_layer(episodes, ordered[0])
+    facing = extract_facing_aligned(episodes, _tmp_groups) if not args.no_hd else None
+    del _tmp_pos, _tmp_groups
+
+    test_facing = None
+    if test_episodes and not args.no_hd:
+        _, _tp, _tg = _prepare_single_layer(test_episodes, ordered[0])
+        test_facing = extract_facing_aligned(test_episodes, _tg)
+        del _tp, _tg
+
+    # Analyze each layer sequentially — load one at a time to keep memory low
     all_results = []
 
-    def _run_layer(layer_name):
-        X = layers[layer_name]
+    for ln in ordered:
+        print(f"\n--- Loading layer: {ln} ---")
+        X, pos, groups = _prepare_single_layer(episodes, ln)
         if args.max_neurons > 0 and X.shape[1] > args.max_neurons:
             X = X[:, :args.max_neurons]
+        mem_mb = X.nbytes / 1e6
+        print(f"  {ln}: {X.shape} ({mem_mb:.0f} MB)")
 
-        test_X = None
-        if test_layers and layer_name in test_layers:
-            test_X = test_layers[layer_name]
+        test_X, test_pos, test_groups = None, None, None
+        if test_episodes is not None:
+            test_X, test_pos, test_groups = _prepare_single_layer(test_episodes, ln)
             if args.max_neurons > 0 and test_X.shape[1] > args.max_neurons:
                 test_X = test_X[:, :args.max_neurons]
 
-        return analyze_layer(
-            layer_name, X, pos, groups, area,
+        result = analyze_layer(
+            ln, X, pos, groups, area,
             facing=facing,
             test_activations=test_X,
             test_positions=test_pos,
             test_groups=test_groups,
             compute_hd=not args.no_hd and facing is not None,
         )
+        all_results.append(result)
 
-    if args.n_jobs == 1 or len(ordered) == 1:
-        for ln in ordered:
-            all_results.append(_run_layer(ln))
-    else:
-        all_results = Parallel(n_jobs=args.n_jobs, verbose=10)(
-            delayed(_run_layer)(ln) for ln in ordered
-        )
+        # Free the large activation array before next layer
+        del X, pos, groups, test_X, test_pos, test_groups
+        gc.collect()
 
     # Reclassify with custom thresholds if provided
     for res in all_results:
