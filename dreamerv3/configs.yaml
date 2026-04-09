@@ -57,6 +57,12 @@ defaults:
     save_path: ''
     num_episodes: 3
 
+  replay_activations:
+    source_data: ''
+    save_path: ''
+    load_checkpoint: True
+    max_episodes: 0
+
   run:
     steps: 1e10
     duration: 0

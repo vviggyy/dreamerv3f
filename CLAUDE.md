@@ -1,13 +1,14 @@
 # dreamerv3f repo guide
 
 ## arch
-- `dreamerv3/main.py` — entry point, dispatches on `--script {train,train_eval,eval_only,eval_trajectory,dream_decode,parallel,parallel_env,parallel_envs,parallel_replay}`
+- `dreamerv3/main.py` — entry point, dispatches on `--script {train,train_eval,eval_only,eval_trajectory,dream_decode,replay_activations,parallel,parallel_env,parallel_envs,parallel_replay}`
 - `dreamerv3/agent.py` — JAX agent (DreamerV3 world model)
 - `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size{1m,12m,25m,50m,100m,200m,400m}`, `debug`, `atari`, `atari100k`, `procgen`, `minecraft`, `dmlab`, `dmc_proprio`, `dmc_vision`, `bsuite`, `loconav`, `multicpu`
 - `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl. Auto-detects checkpoint from `logdir/ckpt/latest` if `--run.from_checkpoint` is empty. Inherits env settings from training run's saved `config.yaml`
 - `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, worldview, world_only, animations (GIF/MP4)
 - `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Two modes: `standard` (single-repr decoding with CV) and `layers` (per-layer comparison boxplot). Includes `plot_probmap_on_world` (P(pos) heatmap on world map) and `plot_occupancy_vs_error` (occupancy hotspots + Manhattan error scatter). `--save_model` saves fitted decoders for dream_decode. Layer metrics: `--ridge_layers` → R²; classification → mean Manhattan distance (tiles)
 - `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories. Config: `--dream_decode.decoder_type {ridge,classifier}`
+- `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
 - `dreamerv3/plot_training.py` — reads `scores.jsonl` + `metrics.jsonl`, produces training_progress.png with episode score, cumulative reward, Crafter score, per-achievement unlock rates, and optionally loss/reward/value panels
 - `dreamerv3/run_info.py` — lightweight run provenance logger. `log_run_info(save_dir, stage, args, outputs, extra)` appends a JSON entry to `<save_dir>/run_info.json` with timestamp, git SHA, command line, SLURM job ID, and all args. Integrated into decode_position, plot_trajectories, plot_training, and tuning_curve
@@ -135,6 +136,30 @@ python dreamerv3/main.py \
 ```
 Outputs: dream_trajectories_world.png, dream_probmap_*.png (classifier only), dream_vs_real.png, dream_results.pkl
 Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.decoder_type {ridge,classifier}`, `--dream_decode.num_episodes N`.
+
+### replay activations (untrained control)
+```
+# Untrained control (random weights):
+python dreamerv3/main.py \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
+  --script replay_activations \
+  --replay_activations.source_data ./logdir/my_run/trajectories \
+  --replay_activations.save_path ./logdir/my_run/untrained_activations \
+  --replay_activations.load_checkpoint False \
+  --jax.platform cpu
+
+# Trained replay (same obs sequence, trained weights):
+python dreamerv3/main.py \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
+  --script replay_activations \
+  --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP \
+  --replay_activations.source_data ./logdir/my_run/trajectories \
+  --replay_activations.save_path ./logdir/my_run/trained_replay \
+  --jax.platform cpu
+```
+Output format is identical to eval_trajectory — run decode_position/tuning_curve on the output as usual. Key args: `--replay_activations.max_episodes N` (0=all), `--replay_activations.load_checkpoint {True,False}`.
 
 ### plot training progress
 ```

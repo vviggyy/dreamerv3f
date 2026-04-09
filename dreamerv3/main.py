@@ -78,6 +78,7 @@ def main(argv=None):
       replay_context=config.replay_context,
       eval_trajectory=config.eval_trajectory,
       dream_decode=config.dream_decode,
+      replay_activations=config.replay_activations,
   )
 
   if config.script == 'train':
@@ -124,6 +125,14 @@ def main(argv=None):
         bind(make_env, config),
         bind(make_replay, config, 'replay'),
         bind(make_stream, config),
+        bind(make_logger, config),
+        args)
+
+  elif config.script == 'replay_activations':
+    config = config.update({'agent.record_activations': True})
+    from . import replay_activations
+    replay_activations.replay_activations(
+        bind(make_agent, config),
         bind(make_logger, config),
         args)
 
