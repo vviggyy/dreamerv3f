@@ -4,21 +4,40 @@
 - `dreamerv3/main.py` — entry point, dispatches on `--script {train,train_eval,eval_only,eval_trajectory,dream_decode,parallel,parallel_env,parallel_envs,parallel_replay}`
 - `dreamerv3/agent.py` — JAX agent (DreamerV3 world model)
 - `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size{1m,12m,25m,50m,100m,200m,400m}`, `debug`, `atari`, `atari100k`, `procgen`, `minecraft`, `dmlab`, `dmc_proprio`, `dmc_vision`, `bsuite`, `loconav`, `multicpu`
-- `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl
-- `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, animations
-- `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Includes `plot_probmap_on_world` which overlays decoder P(pos) heatmap on rendered Crafter world map with trajectory. `plot_occupancy_vs_error` produces a two-panel figure: faint world map + occupancy hotspots (left), per-timestep Manhattan error vs tile visit count scatter (right). `--save_model` saves fitted decoders for use by `dream_decode.py`. Layer-wise decoding (`--mode layers`): Ridge uses R², classification uses mean Manhattan distance (tiles).
-- `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories
-- `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers
-- `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world. `random_spawn=True` relocates player to random walkable tile each episode. `egocentric_view=N` (odd int, e.g. 7) renders N×N egocentric view centered on player facing direction; inventory bar is copied from the standard render into the bottom rows. Also exposes: `log/player_facing_x`, `log/player_facing_y` (facing direction as ±1/0 ints), `log/achievement_*` (per-achievement binary), `log/reward` (raw crafter reward). Writes `stats.jsonl` to logdir if configured.
+- `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl. Auto-detects checkpoint from `logdir/ckpt/latest` if `--run.from_checkpoint` is empty. Inherits env settings from training run's saved `config.yaml`
+- `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, worldview, world_only, animations (GIF/MP4)
+- `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Two modes: `standard` (single-repr decoding with CV) and `layers` (per-layer comparison boxplot). Includes `plot_probmap_on_world` (P(pos) heatmap on world map) and `plot_occupancy_vs_error` (occupancy hotspots + Manhattan error scatter). `--save_model` saves fitted decoders for dream_decode. Layer metrics: `--ridge_layers` → R²; classification → mean Manhattan distance (tiles)
+- `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories. Config: `--dream_decode.decoder_type {ridge,classifier}`
+- `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
+- `dreamerv3/plot_training.py` — reads `scores.jsonl` + `metrics.jsonl`, produces training_progress.png with episode score, cumulative reward, Crafter score, per-achievement unlock rates, and optionally loss/reward/value panels
+- `dreamerv3/run_info.py` — lightweight run provenance logger. `log_run_info(save_dir, stage, args, outputs, extra)` appends a JSON entry to `<save_dir>/run_info.json` with timestamp, git SHA, command line, SLURM job ID, and all args. Integrated into decode_position, plot_trajectories, plot_training, and tuning_curve
+- `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world. `random_spawn=True` relocates player to random walkable tile each episode. `egocentric_view=N` (odd int, e.g. 7) renders N×N egocentric view centered on player facing direction; inventory bar is copied from the standard render into the bottom rows. Also exposes: `log/player_facing_x`, `log/player_facing_y` (facing direction as ±1/0 ints), `log/achievement_*` (per-achievement binary), `log/reward` (raw crafter reward). Writes `stats.jsonl` to logdir if configured
 - `embodied/jax/agent.py` — JAX Agent.__new__ calls internal.setup() then __init__. Line 72: jax.devices()
 - `embodied/jax/internal.py` — setup() sets jax platform, XLA flags. Line 34: `platform and jax.config.update('jax_platforms', platform)`
 - `embodied/tests/test_crafter_world.py` — world consistency tests (fixed_seed, walkable spawn, determinism)
 
+## SLURM scripts (repo root)
+- `run_Crafter.sh` — train model (H100, parametrized env/size/activation/wd). Saves `hyperparams.txt` to logdir
+- `run_Trajectory.sh` — eval trajectories (CPU, matches training hyperparams). Auto-resolves checkpoint from `$LOGDIR/ckpt/latest`
+- `run_Loop.sh` — full pipeline: train → eval trajectory → plot → layer decoding → tuning (A100). Saves `hyperparams.txt`
+- `run_Decoding.sh` — standard position decoding (GPU). Settings: method, repr, device, n_jobs
+- `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, ridge/classification, holdout, resume
+- `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
+- `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
+
+## run provenance
+Every analysis script appends to `<save_dir>/run_info.json` via `dreamerv3/run_info.py`:
+- `stage`, `timestamp`, `git_sha`, `command`, `slurm_job_id`, `args`, `outputs`, `extra`
+
+Training runs also produce:
+- `<logdir>/config.yaml` — full resolved DreamerV3 config (saved by `main.py`)
+- `<logdir>/hyperparams.txt` — SLURM-level settings (saved by `run_Crafter.sh` / `run_Loop.sh`)
+
 ## critical gotchas
-- **jax.platform**: default is `cuda` (configs.yaml L78). On mac/cpu: `--jax.platform cpu` or get AssertionError in jax backends
-- **checkpoint path**: pass the timestamped DIR not the `latest` file. e.g. `./logdir/.../ckpt/20260129T183613F519148`
+- **jax.platform**: default is `cuda` (configs.yaml). On mac/cpu: `--jax.platform cpu` or get AssertionError in jax backends
+- **checkpoint path**: pass the timestamped DIR not the `latest` file. e.g. `./logdir/.../ckpt/20260129T183613F519148`. eval_trajectory auto-detects from `logdir/ckpt/latest` if omitted
 - **crafter area**: `crafter_small` uses `area=[32,32]` not default 64x64. plot_trajectories.py reads area from metadata
-- **world seed**: crafter derives seed as `hash((self._seed, self._episode))`. fixed_seed resets _episode=0 so same world each ep
+- **seed flow**: `--seed` sets `config.seed` (default 0). `make_env` computes `env_seed = hash((config.seed, env_index))`. Crafter world seed = `hash((env_seed, episode_number))`. `fixed_seed=True` resets episode_number to 0 each reset → same world. `fixed_seed=False` increments naturally → different world each episode. Different `--seed` → different world even with `fixed_seed=True`
 - **egocentric_view**: must be an odd integer (e.g. 7). `egocentric_view=0` disables it (default). Set in configs.yaml under `env.crafter.egocentric_view` or pass `--env.crafter.egocentric_view 7`
 - **layer decode checkpoint**: checkpoint files record which metric was used (`r2`, `manhattan`, `ce_loss`). Mismatched metric triggers a warning and checkpoint is ignored — delete stale checkpoint if switching modes
 - **layer decode metric**: `--ridge_layers` → R²; classification (no flag) → mean Manhattan distance in tiles (joint x,y, lower = better)
@@ -28,37 +47,38 @@
 
 ### train
 ```
-python dreamerv3/main.py --configs crafter_small size1m --logdir ./logdir/crafter_small_1m --jax.platform cpu
+python dreamerv3/main.py --configs crafter_small size25m --logdir ./logdir/my_run \
+  --env.crafter.random_spawn True --env.crafter.fixed_seed False
 ```
 
 ### eval trajectory
 ```
 python dreamerv3/main.py \
-  --configs crafter_small size1m \
-  --logdir ./logdir/crafter_small_1m \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
   --script eval_trajectory \
-  --run.from_checkpoint ./logdir/crafter_small_1m/ckpt/TIMESTAMP_DIR \
-  --eval_trajectory.num_episodes 5 \
-  --eval_trajectory.save_path ./logdir/crafter_small_1m/trajectories \
+  --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
+  --eval_trajectory.num_episodes 100 \
+  --eval_trajectory.save_path ./logdir/my_run/trajectories \
   --seed 42 --jax.platform cpu
 ```
 Saves: per-episode pkl + all_episodes.pkl with metadata {env_seed, world_seed, fixed_seed, task, area}
 
-### plot
+### plot trajectories
 ```
 MPLBACKEND=Agg python dreamerv3/plot_trajectories.py \
-  --data ./logdir/crafter_small_1m/trajectories --plot all --save ./logdir/crafter_small_1m/plots
+  --data ./logdir/my_run/trajectories --plot all --save ./logdir/my_run/plots
 ```
-Drop MPLBACKEND=Agg if running with display. Plot types: trajectories, heatmap, activation, spatial, world, fullworld, animate, animate_world, worldview, all. Extra args for worldview/animate: `--egocentric_view N`, `--view_half N`, `--window_tiles N`, `--step_ms N`, `--mp4` (save as MP4 instead of GIF).
+Drop MPLBACKEND=Agg if running with display. Plot types: trajectories, heatmap, activation, spatial, world, fullworld, animate, animate_world, worldview, world_only, all. Extra args for worldview/animate: `--egocentric_view N`, `--view_half N`, `--window_tiles N`, `--step_ms N`, `--mp4` (save as MP4 instead of GIF).
 
-### decode position
+### decode position (standard)
 ```
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
-  --data ./logdir/crafter_small_1m/trajectories \
-  --save ./logdir/crafter_small_1m/decoder_results \
-  --method both
+  --data ./logdir/my_run/trajectories \
+  --save ./logdir/my_run/decoder_results \
+  --method both --n_jobs -1
 ```
-Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Add `--repr {deter,stoch,combined,all}` to select representation. Add `--no_per_neuron` to skip per-neuron R² analysis. Add `--save_model` to save fitted decoders for dream_decode. Add `--n_jobs N` for parallel jobs (`-1` = all CPUs). Add `--device cuda` for GPU classification (multi-GPU round-robin with `n_jobs>1`). Add `--n_iters N` for classification training iterations (default 5000). Add `--resume PATH` for layer mode to resume from partial checkpoint. Auto-generates `occupancy_vs_error_{repr}.png` (world-overlay occupancy heatmap + per-timestep Manhattan error vs visit count scatter).
+Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Key args: `--repr {deter,stoch,combined,all}`, `--no_per_neuron`, `--save_model`, `--n_jobs N`, `--device cuda`, `--n_iters N` (default 5000), `--patience N` (default 500), `--min_bbox N`.
 
 ### layer-wise decoding
 
@@ -91,41 +111,36 @@ Loads pretrained decoders, evaluates on `--data`, produces `layer_comparison.png
 ```
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1
+  --mode layers --ridge_layers --n_jobs -1 --holdout_frac 0
 ```
 Uses 5-fold KFold (NOT LOGO — LOGO creates O(N_eps × N_layers) jobs, crushingly slow with randspawn).
 Key args: `--max_samples 10000`, `--max_dims 256` (truncated PCA, critical for 4096-dim deter), `--n_cv_folds 5`.
-
-### eval trajectory on GPU (fast for 400M param models)
-Drop `--jax.platform cpu` on GPU nodes — JAX uses CUDA by default, 50-100x faster.
-400M = 400 million parameters (weights) total across the full model.
 
 ### dream decode
 ```
 # Step 1: Save decoder model
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
-  --data ./logdir/crafter_small_1m/trajectories \
-  --save ./logdir/crafter_small_1m/decoder_results \
+  --data ./logdir/my_run/trajectories \
+  --save ./logdir/my_run/decoder_results \
   --method both --save_model
 
 # Step 2: Run dream decode
 python dreamerv3/main.py \
-  --configs crafter_small size1m \
-  --logdir ./logdir/crafter_small_1m \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
   --script dream_decode \
-  --run.from_checkpoint ./logdir/crafter_small_1m/ckpt/TIMESTAMP_DIR \
-  --dream_decode.decoder_model ./logdir/crafter_small_1m/decoder_results/ridge_deter.pkl \
-  --dream_decode.save_path ./logdir/crafter_small_1m/dream_results \
-  --jax.platform cpu
+  --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
+  --dream_decode.decoder_model ./logdir/my_run/decoder_results/ridge_deter.pkl \
+  --dream_decode.save_path ./logdir/my_run/dream_results
 ```
 Outputs: dream_trajectories_world.png, dream_probmap_*.png (classifier only), dream_vs_real.png, dream_results.pkl
-Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.decoder_type {ridge,...}`, `--dream_decode.num_episodes N`.
+Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.decoder_type {ridge,classifier}`, `--dream_decode.num_episodes N`.
 
 ### plot training progress
 ```
 MPLBACKEND=Agg python dreamerv3/plot_training.py \
-  --logdir ./logdir/crafter_small_1m \
-  --save ./logdir/crafter_small_1m/plots \
+  --logdir ./logdir/my_run \
+  --save ./logdir/my_run/plots \
   --smooth 50
 ```
 Reads `scores.jsonl` (episode score + per-episode achievement success) and `metrics.jsonl` (per-achievement stats) from logdir. Produces `training_progress.png` with up to 4 panels: episode score, cumulative reward, Crafter score (geometric mean of achievement success rates), per-achievement unlock rate. Add `--no_achievements` to skip the per-achievement panel. Add `--no_losses` to skip loss/reward/value panels. The Crafter score panel appears automatically when `scores.jsonl` contains per-episode achievement data (requires training with the updated logger).
@@ -133,11 +148,11 @@ Reads `scores.jsonl` (episode score + per-episode achievement success) and `metr
 ### tuning curve analysis
 ```
 MPLBACKEND=Agg python dreamerv3/tuning_curve.py \
-  --data ./logdir/crafter_small_1m/trajectories \
-  --save ./logdir/crafter_small_1m/tuning_results \
+  --data ./logdir/my_run/trajectories \
+  --save ./logdir/my_run/tuning_results \
   --n_jobs -1
 ```
-Analyzes all recorded layers (enc/*, dyn/*, pol/*, val/*). Computes per-neuron: 2D spatial tuning curves + spatial information (pynapple), HD tuning + mutual info, EV reliability, autocorrelation peaks/field size/asymmetry. Classifies neurons into 7 types: untuned, HD_cells, single_field, border_cells, spatial_HD, complex_cells, dead. Add `--test_data` for held-out EV reliability. Add `--layers dyn/deter dyn/stoch` to filter layers. Add `--no_hd` to skip HD analysis. Add `--no_plots` to skip plots. Add `--max_neurons N` to subsample large layers (0=all). Add `--interactive` to show interactive SI vs EV scatter during analysis. Threshold overrides: `--SI_thresh`, `--EV_thresh`, `--EV_unthresh`, `--HD_thresh`.
+Analyzes all recorded layers (enc/*, dyn/*, pol/*, val/*). Computes per-neuron: 2D spatial tuning curves + spatial information (pynapple), HD tuning + mutual info, EV reliability, autocorrelation peaks/field size/asymmetry. Classifies neurons into 7 types: untuned, HD_cells, single_field, border_cells, spatial_HD, complex_cells, dead. Add `--test_data` for held-out EV reliability. Add `--layers dyn/deter dyn/stoch` to filter layers. Add `--no_hd` to skip HD analysis. Add `--no_plots` to skip plots. Add `--max_neurons N` to subsample large layers (0=all). Add `--interactive` to show interactive SI vs EV scatter during analysis. Add `--min_bbox N` to filter small-bbox episodes. Threshold overrides: `--SI_thresh`, `--EV_thresh`, `--EV_unthresh`, `--HD_thresh`.
 
 Outputs: `tuning_results.pkl` (per-layer tuning curves, metrics, cell groups), `{layer}_si_ev_scatter.png`, `{layer}_cell_types.png`, `{layer}_example_tuning_curves.png`, `layer_summary.png`.
 
@@ -150,18 +165,12 @@ Loads precomputed `tuning_results.pkl` and launches an interactive matplotlib SI
 
 ### tests
 ```
-PYTHONPATH=/Users/viggy/Desktop/dreamerv3f python embodied/tests/test_crafter_world.py
+PYTHONPATH=. python embodied/tests/test_crafter_world.py
 ```
 
-## deps not in requirements.txt that were needed
-All now added: crafter, matplotlib, pandas, Pillow, pynapple, ruamel.yaml. Install with `pip install -r requirements.txt`.
-jax pinned to cuda in requirements but use `pip install jax==0.4.35 jaxlib==0.4.35 chex==0.1.87 optax==0.2.3` for cpu-compatible versions.
-
-## current state
-- checkpoint: `logdir/crafter_small_1m/ckpt/20260129T183613F519148` (1M steps, crafter_small size1m)
-- trajectories: 5 eps saved, fixed_seed=True, area=(32,32), spawn=(16,16), env_seed=790160138
-- plots: all generated in `logdir/crafter_small_1m/plots/`
-- spatial units: deter[436] y_corr=0.875, deter[245] x_corr=-0.789 (top place cells)
+## deps
+All in `requirements.txt`: crafter, matplotlib, pandas, Pillow, pynapple, ruamel.yaml, av (for MP4), etc.
+JAX pinned to cuda in requirements but use `pip install jax==0.4.35 jaxlib==0.4.35 chex==0.1.87 optax==0.2.3` for cpu-compatible versions.
 
 ## agent internals (compressed reference)
 
