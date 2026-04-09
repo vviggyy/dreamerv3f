@@ -209,6 +209,14 @@ class Agent(embodied.jax.Agent):
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
 
+    # L1 activity regularization
+    if self.config.l1_enc:
+      losses['image'] = losses['image'] + self.config.l1_enc * jnp.abs(tokens).mean(axis=-1)
+      metrics['l1/enc_tokens'] = jnp.abs(tokens).mean()
+    if self.config.l1_deter:
+      losses['dyn'] = losses['dyn'] + self.config.l1_deter * jnp.abs(repfeat['deter']).mean(axis=-1)
+      metrics['l1/deter'] = jnp.abs(repfeat['deter']).mean()
+
     B, T = reset.shape
     shapes = {k: v.shape for k, v in losses.items()}
     assert all(x == (B, T) for x in shapes.values()), ((B, T), shapes)
