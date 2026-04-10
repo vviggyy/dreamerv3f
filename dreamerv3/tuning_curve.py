@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pynapple as nap
 from joblib import Parallel, delayed
-from scipy.ndimage import label, maximum_filter
+from scipy.ndimage import gaussian_filter, label, maximum_filter
 from scipy.signal import correlate2d
 
 # Reuse data loading from decode_position
@@ -303,8 +303,12 @@ def build_pynapple_objects(positions, activations, groups, area, facing=None):
     return rates, position, hd, epoch
 
 
-def compute_tuning_curves_and_si(rates, position, epoch, area):
+def compute_tuning_curves_and_si(rates, position, epoch, area, smooth_sigma=0):
     """Compute 2D spatial tuning curves and mutual information via pynapple.
+
+    Args:
+        smooth_sigma: Gaussian smoothing sigma (in bins) applied to tuning
+            curves before computing SI. 0 = no smoothing.
 
     Returns:
         tc_array: (N_neurons, area_x, area_y) tuning curves
@@ -317,6 +321,13 @@ def compute_tuning_curves_and_si(rates, position, epoch, area):
         rates, position, ep=epoch,
         nb_bins=nb_bins, minmax=minmax,
     )
+
+    # Optional Gaussian smoothing before SI computation
+    if smooth_sigma > 0:
+        for neuron_idx in place_fields:
+            tc = place_fields[neuron_idx]
+            tc = np.nan_to_num(tc, nan=0.0)
+            place_fields[neuron_idx] = gaussian_filter(tc, sigma=smooth_sigma)
 
     si_df = nap.compute_2d_mutual_info(
         place_fields, position, position.time_support, bitssec=False, minmax=minmax
@@ -361,7 +372,7 @@ def compute_hd_info(rates, hd, epoch):
 
 def analyze_layer(layer_name, activations, positions, groups, area,
                   facing=None, test_activations=None, test_positions=None,
-                  test_groups=None, compute_hd=True):
+                  test_groups=None, compute_hd=True, smooth_sigma=0):
     """Full tuning curve analysis for one layer.
 
     Args:
@@ -375,6 +386,7 @@ def analyze_layer(layer_name, activations, positions, groups, area,
         test_positions: optional held-out positions for EV.
         test_groups: optional held-out episode groups.
         compute_hd: whether to compute HD metrics.
+        smooth_sigma: Gaussian smoothing sigma (bins) for tuning curves before SI.
 
     Returns:
         dict with tuning_curves, metrics, groups, group_ids.
@@ -390,7 +402,7 @@ def analyze_layer(layer_name, activations, positions, groups, area,
 
     # Tuning curves + spatial info
     tc_array, si_values = compute_tuning_curves_and_si(
-        rates, position, epoch, area,
+        rates, position, epoch, area, smooth_sigma=smooth_sigma,
     )
 
     # HD info
@@ -838,6 +850,8 @@ def main():
     parser.add_argument('--EV_thresh', type=float, default=0.5)
     parser.add_argument('--EV_unthresh', type=float, default=0.15)
     parser.add_argument('--HD_thresh', type=float, default=0.5)
+    parser.add_argument('--smooth_sigma', type=float, default=0,
+                        help='Gaussian smoothing sigma (bins) on tuning curves before SI (0=off)')
     parser.add_argument('--min_bbox', type=float, default=0,
                         help='Min bounding-box area (tiles²) to keep an episode (0=no filter)')
     parser.add_argument('--interactive', action='store_true',
@@ -955,6 +969,7 @@ def main():
             test_positions=test_pos,
             test_groups=test_groups,
             compute_hd=not args.no_hd and facing is not None,
+            smooth_sigma=args.smooth_sigma,
         )
         all_results.append(result)
 
