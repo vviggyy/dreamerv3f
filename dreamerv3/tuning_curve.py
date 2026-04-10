@@ -611,8 +611,12 @@ def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
             continue
 
         n_neurons = tc_array.shape[0]
-        # Uniform random sampling
-        chosen = rng.choice(n_neurons, size=min(m, n_neurons), replace=False)
+        # Sample from top 10th percentile of EV
+        ev_cutoff = np.percentile(ev, 90)
+        top_ev_idx = np.where(ev >= ev_cutoff)[0]
+        if len(top_ev_idx) == 0:
+            top_ev_idx = np.arange(n_neurons)
+        chosen = rng.choice(top_ev_idx, size=min(m, len(top_ev_idx)), replace=False)
 
         # Highlight chosen neurons on the scatter with colored circles
         for c_idx, neuron_idx in enumerate(chosen):
