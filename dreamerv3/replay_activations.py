@@ -32,6 +32,7 @@ import signal
 import sys
 from collections import defaultdict
 
+import jax
 import elements
 import numpy as np
 
@@ -93,6 +94,11 @@ def replay_activations(make_agent, make_logger, args):
     # 2. Create agent (random weights initially)
     print('Creating agent...')
     agent = make_agent()
+    # Allow numpy→device transfers (bypass transfer_guard='disallow' set by
+    # internal.setup) since we construct obs from saved numpy arrays.
+    # Must be AFTER make_agent() because Agent.__new__ → internal.setup()
+    # overwrites the transfer guard back to 'disallow'.
+    jax.config.update('jax_transfer_guard', 'allow')
 
     # 3. Optionally load checkpoint
     if load_checkpoint:
@@ -173,9 +179,9 @@ def replay_activations(make_agent, make_logger, args):
                 saved_action = int(ep['action'][t])
                 # After _split(), carry is a 4-tuple of pytrees with list leaves.
                 # Element [3] is the prevact: {'action': [np.array(...)]}
-                enc_c, dyn_c, dec_c, _ = carry
-                carry = (enc_c, dyn_c, dec_c,
-                         {'action': [np.array([saved_action], dtype=np.int32)]})
+                # Mutate in-place to preserve the list-of-arrays format that
+                # _stack expects (avoid raw numpy → device transfer errors).
+                carry[3]['action'][0] = np.int32(saved_action)
 
                 # Collect trajectory data
                 episode_data['image'].append(ep['image'][t])
