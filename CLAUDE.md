@@ -10,6 +10,7 @@
 - `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories. Config: `--dream_decode.decoder_type {ridge,classifier}`
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
+- `dreamerv3/compare_conditions.py` — cross-condition comparison: loads layer_decode_results.pkl and tuning_results.pkl from N runs, produces heatmaps, line plots, cell type composition charts, and summary CSV
 - `dreamerv3/plot_training.py` — reads `scores.jsonl` + `metrics.jsonl`, produces training_progress.png with episode score, cumulative reward, Crafter score, per-achievement unlock rates, and optionally loss/reward/value panels
 - `dreamerv3/run_info.py` — lightweight run provenance logger. `log_run_info(save_dir, stage, args, outputs, extra)` appends a JSON entry to `<save_dir>/run_info.json` with timestamp, git SHA, command line, SLURM job ID, and all args. Integrated into decode_position, plot_trajectories, plot_training, and tuning_curve
 - `embodied/envs/crafter.py` — Crafter wrapper. `fixed_seed=True` resets `_episode=0` before each reset so same world. `random_spawn=True` relocates player to random walkable tile each episode. `egocentric_view=N` (odd int, e.g. 7) renders N×N egocentric view centered on player facing direction; inventory bar is copied from the standard render into the bottom rows. Also exposes: `log/player_facing_x`, `log/player_facing_y` (facing direction as ±1/0 ints), `log/achievement_*` (per-achievement binary), `log/reward` (raw crafter reward). Writes `stats.jsonl` to logdir if configured
@@ -180,6 +181,16 @@ MPLBACKEND=Agg python dreamerv3/tuning_curve.py \
 Analyzes all recorded layers (enc/*, dyn/*, pol/*, val/*). Computes per-neuron: 2D spatial tuning curves + spatial information (pynapple), HD tuning + mutual info, EV reliability, autocorrelation peaks/field size/asymmetry. Classifies neurons into 7 types: untuned, HD_cells, single_field, border_cells, spatial_HD, complex_cells, dead. Add `--test_data` for held-out EV reliability. Add `--layers dyn/deter dyn/stoch` to filter layers. Add `--no_hd` to skip HD analysis. Add `--no_plots` to skip plots. Add `--max_neurons N` to subsample large layers (0=all). Add `--interactive` to show interactive SI vs EV scatter during analysis. Add `--min_bbox N` to filter small-bbox episodes. Threshold overrides: `--SI_thresh`, `--EV_thresh`, `--EV_unthresh`, `--HD_thresh`.
 
 Outputs: `tuning_results.pkl` (per-layer tuning curves, metrics, cell groups), `{layer}_si_ev_scatter.png`, `{layer}_cell_types.png`, `{layer}_example_tuning_curves.png`, `layer_summary.png`.
+
+### compare conditions
+```
+MPLBACKEND=Agg python dreamerv3/compare_conditions.py \
+  --conditions ./logdir/run1:label1 ./logdir/run2:label2 \
+  --save ./logdir/comparison_plots
+```
+Loads `layer_decode_results.pkl` and `tuning_results.pkl` from N conditions and produces comparison plots. Key args: `--decode_subdir NAME` (default `layer_decoder_results`), `--tuning_subdir NAME` (default `tuning_results`), `--layers dyn/deter dyn/stoch` (optional filter), `--no_decode` / `--no_tuning` (skip one analysis type).
+
+Outputs: `decode_heatmap.png` (conditions × layers heatmap), `decode_lineplot.png` (line plot with IQR bands), `tuning_si_heatmap.png`, `tuning_ev_heatmap.png`, `tuning_celltypes.png` (grouped stacked bar), `summary.csv`.
 
 ### interactive tuning viewer (from precomputed pkl)
 ```
