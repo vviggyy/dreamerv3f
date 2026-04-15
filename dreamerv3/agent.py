@@ -189,8 +189,12 @@ class Agent(embodied.jax.Agent):
     metrics = {}
 
     # World model
-    enc_carry, enc_entries, tokens = self.enc(
-        enc_carry, obs, reset, training)
+    if self.config.l1_wm:
+      enc_carry, enc_entries, tokens, enc_acts = self.enc(
+          enc_carry, obs, reset, training, return_activations=True)
+    else:
+      enc_carry, enc_entries, tokens = self.enc(
+          enc_carry, obs, reset, training)
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
         dyn_carry, tokens, prevact, reset, training)
     losses.update(los)
@@ -209,13 +213,25 @@ class Agent(embodied.jax.Agent):
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
 
-    # L1 activity regularization
-    if self.config.l1_enc:
-      losses['image'] = losses['image'] + self.config.l1_enc * jnp.abs(tokens).mean(axis=-1)
-      metrics['l1/enc_tokens'] = jnp.abs(tokens).mean()
-    if self.config.l1_deter:
-      losses['dyn'] = losses['dyn'] + self.config.l1_deter * jnp.abs(repfeat['deter']).mean(axis=-1)
-      metrics['l1/deter'] = jnp.abs(repfeat['deter']).mean()
+    # L1 activity regularization on world model representations
+    if self.config.l1_wm:
+      # Encoder CNN/MLP layer activations
+      l1_enc_layers = []
+      for name, act in enc_acts.items():
+        if name == 'enc/tokens':
+          continue  # tokens handled separately below
+        l1_layer = jnp.abs(act).mean(axis=-1)
+        l1_enc_layers.append(l1_layer)
+        metrics[f'l1/{name}'] = l1_layer.mean()
+      l1_enc = jnp.abs(tokens).mean(axis=-1)
+      l1_deter = jnp.abs(repfeat['deter']).mean(axis=-1)
+      l1_stoch = jnp.abs(repfeat['stoch']).mean(axis=(-1, -2))
+      all_l1 = l1_enc_layers + [l1_enc, l1_deter, l1_stoch]
+      l1_mean = sum(all_l1) / len(all_l1)
+      losses['dyn'] = losses['dyn'] + self.config.l1_wm * l1_mean
+      metrics['l1/wm_enc_tokens'] = l1_enc.mean()
+      metrics['l1/wm_deter'] = l1_deter.mean()
+      metrics['l1/wm_stoch'] = l1_stoch.mean()
 
     B, T = reset.shape
     shapes = {k: v.shape for k, v in losses.items()}
