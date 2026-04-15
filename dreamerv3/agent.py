@@ -236,18 +236,38 @@ class Agent(embodied.jax.Agent):
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
     inp = self.feat2tensor(imgfeat)
+    if self.config.l1_policy:
+      pol_dist, pol_intermediates = self.pol(inp, 2, return_intermediates=True)
+    else:
+      pol_dist = self.pol(inp, 2)
+      pol_intermediates = {}
+    if self.config.l1_value:
+      val_dist, val_intermediates = self.val(inp, 2, return_intermediates=True)
+    else:
+      val_dist = self.val(inp, 2)
+      val_intermediates = {}
     los, imgloss_out, mets = imag_loss(
         imgact,
         self.rew(inp, 2).pred(),
         self.con(inp, 2).prob(1),
-        self.pol(inp, 2),
-        self.val(inp, 2),
+        pol_dist,
+        val_dist,
         self.slowval(inp, 2),
         self.retnorm, self.valnorm, self.advnorm,
         update=training,
         contdisc=self.config.contdisc,
         horizon=self.config.horizon,
         **self.config.imag_loss)
+    if self.config.l1_policy and pol_intermediates:
+      l1_vals = [jnp.abs(v).mean(axis=-1) for v in pol_intermediates.values()]
+      l1_pol = sum(l1_vals) / len(l1_vals)
+      los['policy'] = los['policy'] + self.config.l1_policy * l1_pol[:, :-1]
+      metrics['l1/policy'] = sum(v.mean() for v in l1_vals) / len(l1_vals)
+    if self.config.l1_value and val_intermediates:
+      l1_vals = [jnp.abs(v).mean(axis=-1) for v in val_intermediates.values()]
+      l1_val = sum(l1_vals) / len(l1_vals)
+      los['value'] = los['value'] + self.config.l1_value * l1_val[:, :-1]
+      metrics['l1/value'] = sum(v.mean() for v in l1_vals) / len(l1_vals)
     losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
     metrics.update(mets)
 

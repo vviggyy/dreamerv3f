@@ -533,12 +533,14 @@ def plot_cell_types(group_ids, layer_name, save_path):
 
 
 def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
-                               save_path, n_examples=20, area=None):
-    """Grid of example tuning curves sorted by SI."""
+                               save_path, n_examples=20, area=None,
+                               sort_by='SI'):
+    """Grid of example tuning curves sorted by SI or EV."""
     n_neurons = tc_array.shape[0]
     n_show = min(n_examples, n_neurons)
-    si_order = np.argsort(metrics['SI'])[::-1]
-    selected = si_order[:n_show]
+    metric_key = 'EVs' if sort_by == 'EV' else 'SI'
+    order = np.argsort(metrics[metric_key])[::-1]
+    selected = order[:n_show]
 
     ncols = min(5, n_show)
     nrows = int(np.ceil(n_show / ncols))
@@ -555,7 +557,8 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         ax = axes[r, c]
         tc = tc_array[neuron_idx]
         im = ax.imshow(tc.T, origin='lower', interpolation='nearest')
-        ax.set_title(f'n{neuron_idx}\nSI={metrics["SI"][neuron_idx]:.2f}',
+        val = metrics[metric_key][neuron_idx]
+        ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
                      fontsize=7)
         ax.axis('off')
 
@@ -564,7 +567,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         r, c = idx // ncols, idx % ncols
         axes[r, c].axis('off')
 
-    fig.suptitle(f'{layer_name}: Top Tuning Curves (by SI)', fontsize=10)
+    fig.suptitle(f'{layer_name}: Top Tuning Curves (by {sort_by})', fontsize=10)
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
@@ -1053,7 +1056,12 @@ def main():
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                 layer_dir / 'example_tuning_curves.png',
-                area=area,
+                area=area, sort_by='SI',
+            )
+            plot_example_tuning_curves(
+                res['tuning_curves'], res['metrics'], res['group_ids'], ln,
+                layer_dir / 'example_tuning_curves_ev.png',
+                area=area, sort_by='EV',
             )
 
         if len(all_results) > 1:

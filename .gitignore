@@ -8,5 +8,5 @@ MUJOCO_LOG.TXT
 logdir/
 logs/
 comparison/
-
+*.sh
 .claude/
