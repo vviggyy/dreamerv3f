@@ -189,7 +189,7 @@ class Agent(embodied.jax.Agent):
     metrics = {}
 
     # World model
-    if self.config.l1_wm:
+    if self.config.l1_coeff:
       enc_carry, enc_entries, tokens, enc_acts = self.enc(
           enc_carry, obs, reset, training, return_activations=True)
     else:
@@ -214,7 +214,7 @@ class Agent(embodied.jax.Agent):
       losses[key] = recon.loss(sg(target))
 
     # L1 activity regularization on world model representations
-    if self.config.l1_wm:
+    if self.config.l1_coeff:
       # Encoder CNN/MLP layer activations
       l1_enc_layers = []
       for name, act in enc_acts.items():
@@ -228,7 +228,7 @@ class Agent(embodied.jax.Agent):
       l1_stoch = jnp.abs(repfeat['stoch']).mean(axis=(-1, -2))
       all_l1 = l1_enc_layers + [l1_enc, l1_deter, l1_stoch]
       l1_mean = sum(all_l1) / len(all_l1)
-      losses['dyn'] = losses['dyn'] + self.config.l1_wm * l1_mean
+      losses['dyn'] = losses['dyn'] + self.config.l1_coeff * l1_mean
       metrics['l1/wm_enc_tokens'] = l1_enc.mean()
       metrics['l1/wm_deter'] = l1_deter.mean()
       metrics['l1/wm_stoch'] = l1_stoch.mean()
@@ -252,16 +252,13 @@ class Agent(embodied.jax.Agent):
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
     inp = self.feat2tensor(imgfeat)
-    if self.config.l1_policy:
+    if self.config.l1_coeff:
       pol_dist, pol_intermediates = self.pol(inp, 2, return_intermediates=True)
-    else:
-      pol_dist = self.pol(inp, 2)
-      pol_intermediates = {}
-    if self.config.l1_value:
       val_dist, val_intermediates = self.val(inp, 2, return_intermediates=True)
     else:
+      pol_dist = self.pol(inp, 2)
       val_dist = self.val(inp, 2)
-      val_intermediates = {}
+      pol_intermediates = val_intermediates = {}
     los, imgloss_out, mets = imag_loss(
         imgact,
         self.rew(inp, 2).pred(),
@@ -274,15 +271,15 @@ class Agent(embodied.jax.Agent):
         contdisc=self.config.contdisc,
         horizon=self.config.horizon,
         **self.config.imag_loss)
-    if self.config.l1_policy and pol_intermediates:
+    if self.config.l1_coeff and pol_intermediates:
       l1_vals = [jnp.abs(v).mean(axis=-1) for v in pol_intermediates.values()]
       l1_pol = sum(l1_vals) / len(l1_vals)
-      los['policy'] = los['policy'] + self.config.l1_policy * l1_pol[:, :-1]
+      los['policy'] = los['policy'] + self.config.l1_coeff * l1_pol[:, :-1]
       metrics['l1/policy'] = sum(v.mean() for v in l1_vals) / len(l1_vals)
-    if self.config.l1_value and val_intermediates:
+    if self.config.l1_coeff and val_intermediates:
       l1_vals = [jnp.abs(v).mean(axis=-1) for v in val_intermediates.values()]
       l1_val = sum(l1_vals) / len(l1_vals)
-      los['value'] = los['value'] + self.config.l1_value * l1_val[:, :-1]
+      los['value'] = los['value'] + self.config.l1_coeff * l1_val[:, :-1]
       metrics['l1/value'] = sum(v.mean() for v in l1_vals) / len(l1_vals)
     losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
     metrics.update(mets)
