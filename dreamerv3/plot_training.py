@@ -385,8 +385,8 @@ def main():
     if args.save:
         save_dir = pathlib.Path(args.save)
         save_dir.mkdir(parents=True, exist_ok=True)
-        out = save_dir / 'training_progress.png'
-        fig.savefig(out, dpi=150, bbox_inches='tight')
+        out = save_dir / 'training_progress.svg'
+        fig.savefig(out, bbox_inches='tight')
         print(f'Saved: {out}')
         log_run_info(save_dir, 'plot_training', vars(args))
     else:
