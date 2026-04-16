@@ -664,9 +664,9 @@ def plot_regression_summary(results, layer_name, save_dir, pos):
         ax.set_title(f'{best} → {label}  (R²={r2_dim:.3f})')
 
     fig.tight_layout()
-    fig.savefig(save_dir / f'regression_summary.png', dpi=150)
+    fig.savefig(save_dir / f'regression_summary.svg', bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved regression_summary.png")
+    print(f"  Saved regression_summary.svg")
 
 
 def plot_classification_summary(errors, shuffle, layer_name, save_dir):
@@ -682,9 +682,9 @@ def plot_classification_summary(errors, shuffle, layer_name, save_dir):
     ax.set_title(f'Classification decoder: {layer_name}')
     ax.legend()
     fig.tight_layout()
-    fig.savefig(save_dir / f'classification_{layer_name}.png', dpi=150)
+    fig.savefig(save_dir / f'classification_{layer_name}.svg', bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved classification_{layer_name}.png")
+    print(f"  Saved classification_{layer_name}.svg")
 
 
 def _compute_tile_stats(pos, pred, width, height):
@@ -956,8 +956,8 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
                        world_img, world_extent, repr_name, method)
 
     fig.tight_layout()
-    fname = f'occupancy_vs_error_{repr_name}.png'
-    fig.savefig(save_dir / fname, dpi=150, bbox_inches='tight')
+    fname = f'occupancy_vs_error_{repr_name}.svg'
+    fig.savefig(save_dir / fname, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {fname}")
 
@@ -1015,9 +1015,9 @@ def plot_decoder_probmap(proba_all, pos, groups, layer_name, save_dir,
     fig.suptitle(f'Decoder P(pos) — {layer_name}, episode {episode+1}',
                  fontsize=12)
     fig.tight_layout()
-    fig.savefig(save_dir / f'probmap_{layer_name}_ep{episode+1}.png', dpi=150)
+    fig.savefig(save_dir / f'probmap_{layer_name}_ep{episode+1}.svg', bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved probmap_{layer_name}_ep{episode+1}.png")
+    print(f"  Saved probmap_{layer_name}_ep{episode+1}.svg")
 
 
 def plot_probmap_on_world(proba_all, pos, groups, metadata, layer_name,
@@ -1132,8 +1132,8 @@ def plot_probmap_on_world(proba_all, pos, groups, metadata, layer_name,
         f'episode {episode + 1} (seed={env_seed})',
         fontsize=13, color='white')
     fig.tight_layout()
-    out = save_dir / f'probmap_world_{layer_name}_ep{episode + 1}.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='#1a1a1a')
+    out = save_dir / f'probmap_world_{layer_name}_ep{episode + 1}.svg'
+    fig.savefig(out, bbox_inches='tight', facecolor='#1a1a1a')
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -1156,9 +1156,9 @@ def plot_per_neuron(r2_deter, r2_stoch, save_dir):
             j = order[rank]
             ax.annotate(f'{j}', (r2_arr[j, 0], r2_arr[j, 1]), fontsize=7)
     fig.tight_layout()
-    fig.savefig(save_dir / 'per_neuron_r2.png', dpi=150)
+    fig.savefig(save_dir / 'per_neuron_r2.svg', bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved per_neuron_r2.png")
+    print(f"  Saved per_neuron_r2.svg")
 
 
 def plot_top_neurons(r2_arr, name, pos, X, groups, save_dir, top_n=6):
@@ -1198,9 +1198,9 @@ def plot_top_neurons(r2_arr, name, pos, X, groups, save_dir, top_n=6):
 
     fig.suptitle(f'Top-{n} spatially informative {name} neurons', fontsize=12)
     fig.tight_layout()
-    fig.savefig(save_dir / f'top_neurons_{name}.png', dpi=150)
+    fig.savefig(save_dir / f'top_neurons_{name}.svg', bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved top_neurons_{name}.png")
+    print(f"  Saved top_neurons_{name}.svg")
 
 
 # ---------------------------------------------------------------------------
@@ -1352,7 +1352,10 @@ def _layer_classification_holdout(layer_name, X_train, y_cls_train,
     pred_cls = clf.predict(X_test)
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
     manhattan_per_timestep = np.sum(np.abs(pred_xy - pos_int_test), axis=1).astype(np.float32)
-    return layer_name, manhattan_per_timestep, clf.loss_history
+    # Also get probability maps for visualization
+    proba_flat = clf.predict_proba(X_test)  # (N_test, width*height)
+    proba_maps = proba_flat.reshape(-1, width, height)
+    return layer_name, manhattan_per_timestep, clf.loss_history, pred_xy, proba_maps
 
 
 def decode_layers_classification_holdout(
@@ -1429,15 +1432,20 @@ def decode_layers_classification_holdout(
 
     # Run layers sequentially — each is fast on GPU, avoids CUDA subprocess
     # spawn overhead that dominates with Parallel(prefer='processes').
+    layer_pred_xy = {}
+    layer_proba = {}
     dev = device if not device.startswith('cuda') else device
     for i, ln in enumerate(todo):
         print(f"  [{i+1}/{len(todo)}] Training {ln}...")
-        ln_out, manhattan_arr, loss_hist = _layer_classification_holdout(
-            ln, layers_train[ln], y_cls_train, pos_int_train,
-            layers_test[ln], pos_int_test, width, height,
-            n_iters, _job_device(i), patience=patience)
+        ln_out, manhattan_arr, loss_hist, pred_xy, proba_maps = \
+            _layer_classification_holdout(
+                ln, layers_train[ln], y_cls_train, pos_int_train,
+                layers_test[ln], pos_int_test, width, height,
+                n_iters, _job_device(i), patience=patience)
         layer_values[ln] = manhattan_arr
         loss_histories[ln] = [loss_hist]
+        layer_pred_xy[ln] = pred_xy
+        layer_proba[ln] = proba_maps
         print(f"  {ln}: decode error={np.mean(manhattan_arr):.3f} tiles "
               f"({len(loss_hist)} iters)")
 
@@ -1447,7 +1455,7 @@ def decode_layers_classification_holdout(
             grid=(width, height), n_samples=len(pos_train),
             n_episodes=0, metric='manhattan')
 
-    return layer_values, ordered, loss_histories
+    return layer_values, ordered, loss_histories, layer_pred_xy, layer_proba
 
 
 def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
@@ -1836,6 +1844,213 @@ def decode_layers(layers, pos, groups, width, height, n_iters=500,
     return layer_fold_manhattan, ordered, layer_loss_histories
 
 
+def plot_layer_probmap_on_world(layer_proba, pos_test, groups_test, metadata,
+                                layer_name, save_dir, n_frames=12,
+                                step_stride=16, episode=None, tile_size=8):
+    """3x4 grid: decoded P(pos) heatmap on the real Crafter world for one layer.
+
+    Picks ``n_frames`` timesteps spaced ``step_stride`` apart from one test
+    episode. Each panel shows the world map background, semi-transparent
+    probability heatmap, trajectory up to that timestep, and true / argmax
+    decoded markers.
+
+    Args:
+        layer_proba: (N_test, width, height) probability maps for this layer.
+        pos_test:    (N_test, 2) true positions.
+        groups_test: (N_test,) episode IDs.
+        metadata:    dict with 'area' and env info (for world rendering).
+        layer_name:  e.g. 'dyn/deter'.
+        save_dir:    Path to save directory.
+        n_frames:    number of panels (default 12 → 3×4).
+        step_stride: timestep spacing between panels (default 16).
+        episode:     episode index to plot (None → first episode with enough steps).
+        tile_size:   pixels per tile in the rendered world image.
+    """
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from plot_trajectories import _render_crafter_world
+
+    world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
+    if world_img is None:
+        print("  Could not render world for layer probmap overlay — skipping")
+        return
+    img_h, img_w = world_img.shape[:2]
+
+    # Pick episode
+    unique_eps = np.unique(groups_test)
+    if episode is None:
+        for ep in unique_eps:
+            if (groups_test == ep).sum() >= n_frames * step_stride:
+                episode = ep
+                break
+        if episode is None:
+            episode = unique_eps[0]
+
+    ep_mask = groups_test == episode
+    ep_proba = layer_proba[ep_mask]
+    ep_pos = pos_test[ep_mask]
+    T = len(ep_proba)
+    if T == 0:
+        print(f"  No test data for episode {episode}, skipping layer probmap")
+        return
+
+    # Timestep indices: n_frames steps spaced step_stride apart
+    step_indices = np.arange(0, min(T, n_frames * step_stride), step_stride)
+    if len(step_indices) > n_frames:
+        step_indices = step_indices[:n_frames]
+    n_panels = len(step_indices)
+
+    def pos_to_px(p):
+        px = p[:, 0] * tile_size + tile_size // 2
+        py = img_h - (p[:, 1] * tile_size + tile_size // 2)
+        return px, py
+
+    # Zoom bounds from trajectory extent
+    all_px, all_py = pos_to_px(ep_pos)
+    pad = tile_size * 5
+    x_lo = max(0, all_px.min() - pad)
+    x_hi = min(img_w, all_px.max() + pad)
+    y_lo = max(0, all_py.min() - pad)
+    y_hi = min(img_h, all_py.max() + pad)
+
+    ncols = min(4, n_panels)
+    nrows = int(np.ceil(n_panels / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows),
+                             facecolor='#1a1a1a')
+    axes = np.atleast_2d(axes)
+    cmap = plt.cm.magma
+
+    for idx, ax in enumerate(axes.flat):
+        ax.set_facecolor('#1a1a1a')
+        if idx >= n_panels:
+            ax.axis('off')
+            continue
+        t = step_indices[idx]
+        p_grid = ep_proba[t]  # (width, height)
+
+        ax.imshow((world_img * 0.6).astype(np.uint8))
+
+        p_up = np.repeat(np.repeat(p_grid, tile_size, axis=0),
+                         tile_size, axis=1)
+        p_up = p_up.T[::-1]
+        p_max = p_up.max()
+        p_norm = p_up / p_max if p_max > 0 else p_up
+        overlay_rgba = cmap(p_norm)
+        overlay_rgba[..., 3] = p_norm * 0.85
+        ax.imshow(overlay_rgba)
+
+        # Trajectory up to this timestep
+        traj_px, traj_py = pos_to_px(ep_pos[:t + 1])
+        if len(traj_px) > 1:
+            ax.plot(traj_px, traj_py, '-', color='white', linewidth=1.5,
+                    alpha=0.6, zorder=3, label='trajectory' if idx == 0 else '')
+
+        # True position marker
+        tx, ty = pos_to_px(ep_pos[t:t + 1])
+        ax.plot(tx, ty, 'o', color='cyan', markersize=8,
+                markeredgecolor='white', markeredgewidth=1.2, zorder=5,
+                label='true' if idx == 0 else '')
+
+        # Argmax decoded position marker
+        dec_x, dec_y = np.unravel_index(p_grid.argmax(), p_grid.shape)
+        dec_pos = np.array([[dec_x, dec_y]], dtype=float)
+        dpx, dpy = pos_to_px(dec_pos)
+        ax.plot(dpx, dpy, '*', color='lime', markersize=11,
+                markeredgecolor='white', markeredgewidth=0.7, zorder=5,
+                label='decoded' if idx == 0 else '')
+
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_hi, y_lo)
+        ax.set_title(f't={t}', fontsize=9, fontweight='bold', color='white',
+                     bbox=dict(facecolor='black', alpha=0.6, pad=2))
+        ax.axis('off')
+        if idx == 0:
+            ax.legend(fontsize=7, loc='upper left', facecolor='black',
+                      edgecolor='grey', labelcolor='white')
+
+    fig.suptitle(
+        f'Decoder P(pos) on world — {layer_name}, '
+        f'episode {episode + 1} (seed={env_seed})',
+        fontsize=13, color='white')
+    fig.tight_layout()
+    out = save_dir / f'layer_probmap_world_{layer_name.replace("/", "_")}.svg'
+    fig.savefig(out, bbox_inches='tight', facecolor='#1a1a1a')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
+def plot_layer_error_histogram(layer_fold_values, save_dir,
+                               layers=None):
+    """Histogram of per-timestep Manhattan decoding error for selected layers.
+
+    Args:
+        layer_fold_values: {layer_name: np.ndarray of per-timestep errors}
+        save_dir: Path to save directory.
+        layers: list of layer names to plot. If None, picks dyn/deter,
+                dyn/stoch, first enc/cnn layer, and last pol layer.
+    """
+    if layers is None:
+        all_layers = list(layer_fold_values.keys())
+        pick = []
+        # dyn/deter
+        for ln in all_layers:
+            if ln == 'dyn/deter':
+                pick.append(ln)
+                break
+        # dyn/stoch
+        for ln in all_layers:
+            if ln == 'dyn/stoch':
+                pick.append(ln)
+                break
+        # first enc/cnn layer
+        enc_cnn = sorted([ln for ln in all_layers if ln.startswith('enc/cnn')])
+        if enc_cnn:
+            pick.append(enc_cnn[0])
+        # last pol layer
+        pol = sorted([ln for ln in all_layers if ln.startswith('pol/')])
+        if pol:
+            pick.append(pol[-1])
+        layers = pick
+
+    layers = [ln for ln in layers if ln in layer_fold_values]
+    if not layers:
+        print("  No matching layers for error histogram — skipping")
+        return
+
+    n = len(layers)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 3.5), squeeze=False)
+
+    colors = {'dyn/deter': '#ff5500', 'dyn/stoch': '#ff9900'}
+    default_colors = ['#0055cc', '#33aa00', '#996600', '#44ccff']
+
+    for i, ln in enumerate(layers):
+        ax = axes[0, i]
+        errs = layer_fold_values[ln]
+        color = colors.get(ln, default_colors[i % len(default_colors)])
+        ax.hist(errs, bins=40, color=color, alpha=0.75, edgecolor='white',
+                linewidth=0.5)
+        mean_err = np.mean(errs)
+        median_err = np.median(errs)
+        ax.axvline(mean_err, color='black', linestyle='--', linewidth=1.5,
+                   label=f'mean={mean_err:.2f}')
+        ax.axvline(median_err, color='grey', linestyle=':', linewidth=1.5,
+                   label=f'median={median_err:.2f}')
+        ax.set_title(ln, fontsize=10, fontweight='bold')
+        ax.set_xlabel('Manhattan error (tiles)')
+        if i == 0:
+            ax.set_ylabel('Count')
+        ax.legend(fontsize=7)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    fig.suptitle('Per-Timestep Decoding Error Distribution', fontsize=13)
+    fig.tight_layout()
+    out = save_dir / 'layer_error_histogram.svg'
+    fig.savefig(out, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
 def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss',
                           layer_sizes=None):
     """Horizontal boxplot: one box per layer, ordered early → late.
@@ -1903,8 +2118,8 @@ def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss'
         ax.text(mean_v, i, f' {mean_v:.3f}', va='center', fontsize=7, color='black')
 
     fig.tight_layout()
-    out = save_dir / 'layer_comparison.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    out = save_dir / 'layer_comparison.svg'
+    fig.savefig(out, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out}")
 
@@ -1948,8 +2163,8 @@ def plot_layer_loss_curves(loss_histories, ordered, save_dir):
 
     fig.suptitle('Decoder Training Loss Curves', fontsize=13)
     fig.tight_layout()
-    out = save_dir / 'layer_loss_curves.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    out = save_dir / 'layer_loss_curves.svg'
+    fig.savefig(out, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out}")
 
@@ -1960,7 +2175,7 @@ def plot_layer_loss_curves(loss_histories, ordered, save_dir):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Decode agent position from world model states')
-    parser.add_argument('--data', required=True, help='Path to trajectory pkl directory')
+    parser.add_argument('--data', default=None, help='Path to trajectory pkl directory')
     parser.add_argument('--save', default=None, help='Output directory for plots/results')
     parser.add_argument('--mode', default='standard', choices=['standard', 'layers'],
                         help='"standard": decode deter/stoch (existing). '
@@ -2048,11 +2263,38 @@ if __name__ == '__main__':
                              'Episodes where (max_x-min_x)*(max_y-min_y) < this '
                              'are excluded as "stuck". 0 = no filtering. '
                              '(default: 0)')
+    parser.add_argument('--from_results', default=None,
+                        help='Path to an existing layer_decode_results.pkl '
+                             '(or layer_decode_checkpoint.pkl). Regenerates '
+                             'plots (layer_comparison, error_histogram) from '
+                             'saved per-timestep errors without retraining. '
+                             'Requires --save for output directory.')
     args = parser.parse_args()
     # Resolve max_iters: if set, override n_iters
     if args.max_iters is not None:
         args.n_iters = args.max_iters
 
+    # ---- Plot-only from saved results ----
+    if args.from_results:
+        results_path = Path(args.from_results)
+        save_dir = Path(args.save) if args.save else results_path.parent
+        save_dir.mkdir(parents=True, exist_ok=True)
+        with open(results_path, 'rb') as f:
+            saved = pickle.load(f)
+        layer_fold_values = saved['layer_fold_values']
+        ordered = saved['ordered']
+        metric = saved.get('metric', 'manhattan')
+        print(f"Loaded {len(ordered)} layers from {results_path.name} "
+              f"(metric={metric})")
+        plot_layer_comparison(layer_fold_values, ordered, save_dir,
+                              metric=metric)
+        if metric == 'manhattan':
+            plot_layer_error_histogram(layer_fold_values, save_dir)
+        print("Done.")
+        raise SystemExit(0)
+
+    if not args.data:
+        parser.error("--data is required unless using --from_results")
     data_path = Path(args.data)
     save_dir = Path(args.save) if args.save else data_path.parent / 'decoder_results'
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -2159,6 +2401,10 @@ if __name__ == '__main__':
                     k[len('act/'):] for k in ep if k.startswith('act/'))
             common = all_layer_keys & test_layer_keys
             all_layer_keys = common
+            # Extract test pos/groups from first common layer
+            _first_test_ln = sorted(common)[0]
+            _, pos_test, groups_test = _prepare_single_layer(
+                test_episodes, _first_test_ln)
             has_test = True
         elif args.holdout_frac > 0:
             # Auto-split episodes into train/test by episode index
@@ -2174,6 +2420,7 @@ if __name__ == '__main__':
             print(f"  Auto holdout split: {n_train} train / {n_test} test episodes "
                   f"({train_mask.sum()} / {test_mask.sum()} timesteps)")
             pos_test = pos[test_mask]
+            groups_test = groups[test_mask]
             pos = pos[train_mask]
             has_test = True
 
@@ -2221,6 +2468,8 @@ if __name__ == '__main__':
                 max_dims=args.max_dims)
             layer_fold_values = {ln: [v['r2']] for ln, v in layer_results.items()}
             metric = 'r2'
+            layer_pred_xy = {}
+            layer_proba = {}
 
         elif has_test and not args.ridge_layers:
             if not HAS_TORCH:
@@ -2233,7 +2482,8 @@ if __name__ == '__main__':
             print(f"  Mode: Classification holdout. No CV.  "
                   f"max_iters={n_iters_layers}, patience={pat}, "
                   f"max_samples={ms}, device={args.device}")
-            layer_fold_values, ordered, loss_histories = \
+            layer_fold_values, ordered, loss_histories, \
+                layer_pred_xy, layer_proba = \
                 decode_layers_classification_holdout(
                     layers, pos, layers_test_dict, pos_test, width, height,
                     n_iters=n_iters_layers, n_jobs=args.n_jobs,
@@ -2277,11 +2527,25 @@ if __name__ == '__main__':
                 use_kfold=use_kf, n_cv_folds=args.n_cv_folds,
                 max_samples=ms)
             metric = 'manhattan'
+            layer_pred_xy = {}
+            layer_proba = {}
 
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
         plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric,
                               layer_sizes=layer_sizes)
-        print("\n>>> Plot saved. Decoding evaluation complete. <<<")
+        # Error histogram (classification holdout only)
+        if metric == 'manhattan' and layer_fold_values:
+            plot_layer_error_histogram(layer_fold_values, save_dir)
+        # Probmap-on-world for dyn/deter (classification holdout only)
+        if layer_proba and has_test and metadata:
+            probmap_layer = 'dyn/deter' if 'dyn/deter' in layer_proba else None
+            if probmap_layer is None and layer_proba:
+                probmap_layer = next(iter(layer_proba))
+            if probmap_layer:
+                plot_layer_probmap_on_world(
+                    layer_proba[probmap_layer], pos_test, groups_test,
+                    metadata, probmap_layer, save_dir)
+        print("\n>>> Plots saved. Decoding evaluation complete. <<<")
         if not args.ridge_layers and loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
 
