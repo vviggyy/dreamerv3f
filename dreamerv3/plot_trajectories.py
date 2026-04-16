@@ -815,10 +815,11 @@ def animate_worldview_agentview(
         ts = tile_size
 
         if egocentric_view > 0:
-            # Directional box: V-1 forward, V//2 each side, agent's own tile behind
+            # Directional box: account for inventory tiles replacing rear vision
             V = egocentric_view
-            fwd_t = V - 1    # tiles ahead
-            side_t = V // 2  # tiles each side
+            inv_tiles = 2  # inventory occupies bottom 2 tile-rows of observation
+            fwd_t = V - 1 - inv_tiles  # tiles ahead (reduced by inventory)
+            side_t = V // 2              # tiles each side
             fwd_ext = (fwd_t + 0.5) * ts   # forward from agent center
             bk_ext = 0.5 * ts              # just the agent's own tile behind
             side_ext = (side_t + 0.5) * ts  # each side
@@ -1021,10 +1022,14 @@ def main():
                         help='Milliseconds per timestep for worldview (default 200 = 5 steps/sec)')
     parser.add_argument('--mp4', action='store_true',
                         help='Save animations as MP4 instead of GIF (requires ffmpeg)')
+    parser.add_argument('--max_episodes', type=int, default=0,
+                        help='Limit number of episodes (0 = all)')
     args = parser.parse_args()
 
     print(f"Loading episodes from {args.data}")
     episodes, metadata = load_episodes(args.data)
+    if args.max_episodes > 0:
+        episodes = episodes[:args.max_episodes]
     print(f"Loaded {len(episodes)} episodes")
     if not episodes:
         print("ERROR: No episodes found. Check that --data points to a "
