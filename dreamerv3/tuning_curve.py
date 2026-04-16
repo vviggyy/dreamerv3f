@@ -41,6 +41,12 @@ import pynapple as nap
 from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter, label, maximum_filter
 from scipy.signal import correlate2d
+def _tc_cmap():
+    """Viridis colormap with white for NaN/masked (unvisited bins)."""
+    cmap = plt.get_cmap('viridis').copy()
+    cmap.set_bad('white')
+    return cmap
+
 
 # Reuse data loading from decode_position
 from run_info import log_run_info
@@ -85,7 +91,7 @@ def pf_autocorr(tuning_curves_array, peak_norm=True):
     """
     results = []
     for tc in tuning_curves_array:
-        ac = correlate2d(tc, tc, mode='full')
+        ac = correlate2d(np.nan_to_num(tc), np.nan_to_num(tc), mode='full')
         if peak_norm and ac.max() > 0:
             ac = ac / ac.max()
         results.append(ac)
@@ -160,7 +166,7 @@ def compute_ev_reliability(activations, positions, tuning_curves_array, area):
         tc = tuning_curves_array[d]
         if np.isnan(tc).all():
             continue
-        predicted[:, d] = tc[px, py]
+        predicted[:, d] = np.nan_to_num(tc[px, py])
     residual = activations - predicted
     var_real = np.var(activations, axis=0)
     var_residual = np.var(residual, axis=0)
@@ -333,12 +339,11 @@ def compute_tuning_curves_and_si(rates, position, epoch, area, smooth_sigma=0):
         place_fields, position, position.time_support, bitssec=False, minmax=minmax
     )
 
-    # Convert place_fields dict to array
+    # Convert place_fields dict to array (keep NaN for unvisited bins)
     n_neurons = rates.shape[1]
-    tc_array = np.zeros((n_neurons, area[0], area[1]))
+    tc_array = np.full((n_neurons, area[0], area[1]), np.nan)
     for neuron_idx in place_fields:
-        tc = place_fields[neuron_idx]
-        tc_array[neuron_idx] = np.nan_to_num(tc, nan=0.0)
+        tc_array[neuron_idx] = place_fields[neuron_idx]
 
     si_values = si_df['SI'].values
 
@@ -500,8 +505,12 @@ def _interactive_si_ev(metrics, layer_name, tc_array):
         # Draw tuning curve
         ax_tc.clear()
         tc = tc_array[ind]
-        im = ax_tc.imshow(tc.T, origin='lower', interpolation='nearest')
+        im = ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                          interpolation='nearest', cmap=_tc_cmap())
         ax_tc.set_title(f'Neuron {ind}  SI={si[ind]:.3f}  EV={ev[ind]:.3f}')
+        for spine in ax_tc.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(0.8)
         ax_tc.set_xlabel('x')
         ax_tc.set_ylabel('y')
         fig.canvas.draw_idle()
@@ -556,11 +565,16 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         r, c = idx // ncols, idx % ncols
         ax = axes[r, c]
         tc = tc_array[neuron_idx]
-        im = ax.imshow(tc.T, origin='lower', interpolation='nearest')
+        im = ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                       interpolation='nearest', cmap=_tc_cmap())
         val = metrics[metric_key][neuron_idx]
         ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
                      fontsize=7)
-        ax.axis('off')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_edgecolor('black')
+            spine.set_linewidth(0.8)
 
     # Hide unused axes
     for idx in range(n_show, nrows * ncols):
@@ -644,8 +658,9 @@ def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
             color = sample_colors[c_idx % len(sample_colors)]
             tc_ax = axes[row, 1 + c_idx]
             tc = tc_array[neuron_idx]
-            tc_ax.imshow(tc.T, origin='lower', interpolation='nearest',
-                         aspect='equal')
+            tc_ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                         interpolation='nearest', aspect='equal',
+                         cmap=_tc_cmap())
             tc_ax.set_title(
                 f'n{neuron_idx}\nSI={si[neuron_idx]:.2f} EV={ev[neuron_idx]:.2f}',
                 fontsize=6, color=color)
@@ -729,6 +744,87 @@ def plot_layer_si_ev(all_results, save_dir):
 
         ax.set_xlabel(metric_label, fontsize=11)
         ax.set_title(f'Per-Layer {metric_label}\n'
+                     f'orange line = median, black number = mean',
+                     fontsize=12)
+        ax.grid(True, axis='x', alpha=0.3)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='y', labelsize=8)
+
+        fig.tight_layout()
+        out = save_dir / fname
+        fig.savefig(out, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  Saved {out}")
+
+
+def plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=0.4):
+    """Like plot_layer_si_ev but only for neurons with EV > ev_thresh."""
+    layer_names = [r['layer_name'] for r in all_results]
+    ordered = get_sorted_layers(layer_names)
+    display_order = [ln for ln in ordered if ln in layer_names]
+    n = len(display_order)
+    if n == 0:
+        return
+
+    res_map = {r['layer_name']: r for r in all_results}
+
+    section_colors = {
+        'enc/cnn': '#0055cc',
+        'enc/mlp': '#0099ff',
+        'enc/tok': '#44ccff',
+        'dyn/sto': '#ff9900',
+        'dyn/det': '#ff5500',
+        'pol/mlp': '#33aa00',
+        'val/mlp': '#996600',
+    }
+
+    def _color(ln):
+        for prefix, c in section_colors.items():
+            if ln.startswith(prefix):
+                return c
+        return '#888888'
+
+    for metric_key, metric_label, fname in [
+        ('SI', 'Spatial Information (bits/spike)',
+         f'layer_si_ev_gt{ev_thresh}.png'),
+        ('EVs', 'Explained Variance',
+         f'layer_ev_ev_gt{ev_thresh}.png'),
+    ]:
+        fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
+
+        data = []
+        n_neurons = []
+        n_total = []
+        for ln in display_order:
+            m = res_map[ln]['metrics']
+            evs = m['EVs']
+            vals = m[metric_key]
+            mask = np.isfinite(evs) & (evs > ev_thresh) & np.isfinite(vals)
+            data.append(vals[mask])
+            n_neurons.append(int(mask.sum()))
+            n_total.append(len(vals))
+
+        labels = [
+            ln.replace('/', '/\n') + f' ({nn}/{nt})'
+            for ln, nn, nt in zip(display_order, n_neurons, n_total)
+        ]
+
+        bp = ax.boxplot(data, vert=False, patch_artist=True,
+                        labels=labels, widths=0.6, showfliers=False)
+
+        for patch, ln in zip(bp['boxes'], display_order):
+            patch.set_facecolor(_color(ln))
+            patch.set_alpha(0.7)
+
+        for i, (ln, d) in enumerate(zip(display_order, data), start=1):
+            if len(d) > 0:
+                mean_v = np.nanmean(d)
+                ax.text(mean_v, i, f' {mean_v:.3f}', va='center', fontsize=7,
+                        color='black')
+
+        ax.set_xlabel(metric_label, fontsize=11)
+        ax.set_title(f'Per-Layer {metric_label} (EV > {ev_thresh})\n'
                      f'orange line = median, black number = mean',
                      fontsize=12)
         ax.grid(True, axis='x', alpha=0.3)
@@ -855,6 +951,8 @@ def main():
     parser.add_argument('--HD_thresh', type=float, default=0.5)
     parser.add_argument('--smooth_sigma', type=float, default=0,
                         help='Gaussian smoothing sigma (bins) on tuning curves before SI (0=off)')
+    parser.add_argument('--ev_filter', type=float, default=0.4,
+                        help='EV cutoff for filtered SI/EV boxplots (default 0.4)')
     parser.add_argument('--min_bbox', type=float, default=0,
                         help='Min bounding-box area (tiles²) to keep an episode (0=no filter)')
     parser.add_argument('--interactive', action='store_true',
@@ -1067,6 +1165,7 @@ def main():
         if len(all_results) > 1:
             plot_layer_summary(all_results, save_dir / 'layer_summary.png')
             plot_layer_si_ev(all_results, save_dir)
+            plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=args.ev_filter)
             plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.png')
 
         print(f"Plots saved to {save_dir}")

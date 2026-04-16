@@ -815,10 +815,10 @@ def animate_worldview_agentview(
         ts = tile_size
 
         if egocentric_view > 0:
-            # Directional box: account for inventory tiles replacing rear vision
+            # Directional box: 9 wide × 7 tall (bottom 2 rows are inventory)
             V = egocentric_view
             inv_tiles = 2  # inventory occupies bottom 2 tile-rows of observation
-            fwd_t = V - 1 - inv_tiles  # tiles ahead (reduced by inventory)
+            fwd_t = V - 1 - inv_tiles  # visible tiles ahead of agent
             side_t = V // 2              # tiles each side
             fwd_ext = (fwd_t + 0.5) * ts   # forward from agent center
             bk_ext = 0.5 * ts              # just the agent's own tile behind

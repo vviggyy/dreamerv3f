@@ -11,7 +11,7 @@ class Crafter(embodied.Env):
 
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
-               egocentric_view=None, disable_mobs=False):
+               egocentric_view=None, disable_mobs=False, upright_sprites=False):
     assert task in ('reward', 'noreward')
     self._env = crafter.Env(
         area=area, size=size, reward=(task == 'reward'), seed=seed)
@@ -76,6 +76,7 @@ class Crafter(embodied.Env):
       # Actions: 1=move_left, 2=move_right, 3=move_up, 4=move_down
       # World directions: move_left=(-1,0), move_right=(1,0), move_up=(0,-1), move_down=(0,1)
       self._dir_to_action = {(-1, 0): 1, (1, 0): 2, (0, -1): 3, (0, 1): 4}
+    self._upright_sprites = upright_sprites
 
   @property
   def obs_space(self):
@@ -258,6 +259,20 @@ class Crafter(embodied.Env):
     # Since we rotate instead of transpose, the result is left-right mirrored.
     # A horizontal flip corrects this for all facing directions.
     result = np.fliplr(result)
+    # Counter-rotate each tile sprite back to upright orientation so that
+    # individual sprites always appear canonical regardless of facing direction.
+    if self._upright_sprites:
+      inv_k = (-k) % 4
+      rows, cols = result.shape[0] // upx, result.shape[1] // upx
+      for tr in range(rows):
+        for tc in range(cols):
+          r0, r1 = tr * upx, (tr + 1) * upx
+          c0, c1 = tc * upx, (tc + 1) * upx
+          tile = result[r0:r1, c0:c1]
+          tile = np.fliplr(tile)          # undo the global fliplr
+          if inv_k:
+            tile = np.rot90(tile, inv_k)  # undo the global rot90
+          result[r0:r1, c0:c1] = tile
     # Pad to pixel_size x pixel_size (crop may be smaller due to integer division)
     h, w = result.shape[:2]
     if h < self._pixel_size or w < self._pixel_size:
