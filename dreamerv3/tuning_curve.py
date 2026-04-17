@@ -473,7 +473,7 @@ def plot_si_ev_scatter(metrics, group_ids, layer_name, save_path,
     ax.set_ylabel('Explained Variance')
     ax.set_title(f'{layer_name}: SI vs EV')
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
+    fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -537,7 +537,7 @@ def plot_cell_types(group_ids, layer_name, save_path):
     ax.set_ylabel('Fraction')
     ax.set_title(f'{layer_name}: Cell Type Distribution')
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
+    fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -583,7 +583,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
 
     fig.suptitle(f'{layer_name}: Top Tuning Curves (by {sort_by})', fontsize=10)
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
+    fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -676,15 +676,15 @@ def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
 
     fig.suptitle(f'seed={seed}', fontsize=9, color='grey', y=1.0)
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {save_path} (seed={seed})")
 
 
 def plot_layer_si_ev(all_results, save_dir):
-    """Horizontal boxplots of SI and EV across layers (like layer_comparison.png).
+    """Horizontal boxplots of SI and EV across layers (like layer_comparison.svg).
 
-    Produces two figures: layer_si.png and layer_ev.png, each with one box per
+    Produces two figures: layer_si.svg and layer_ev.svg, each with one box per
     layer ordered early → late.
     """
     # Collect per-layer arrays
@@ -715,8 +715,8 @@ def plot_layer_si_ev(all_results, save_dir):
         return '#888888'
 
     for metric_key, metric_label, fname in [
-        ('SI', 'Spatial Information (bits/spike)', 'layer_si.png'),
-        ('EVs', 'Explained Variance', 'layer_ev.png'),
+        ('SI', 'Spatial Information (bits/spike)', 'layer_si.svg'),
+        ('EVs', 'Explained Variance', 'layer_ev.svg'),
     ]:
         fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
 
@@ -753,7 +753,7 @@ def plot_layer_si_ev(all_results, save_dir):
 
         fig.tight_layout()
         out = save_dir / fname
-        fig.savefig(out, dpi=150, bbox_inches='tight')
+        fig.savefig(out, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved {out}")
 
@@ -787,9 +787,9 @@ def plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=0.4):
 
     for metric_key, metric_label, fname in [
         ('SI', 'Spatial Information (bits/spike)',
-         f'layer_si_ev_gt{ev_thresh}.png'),
+         f'layer_si_ev_gt{ev_thresh}.svg'),
         ('EVs', 'Explained Variance',
-         f'layer_ev_ev_gt{ev_thresh}.png'),
+         f'layer_ev_ev_gt{ev_thresh}.svg'),
     ]:
         fig, ax = plt.subplots(figsize=(8, max(4, n * 0.5)))
 
@@ -834,7 +834,7 @@ def plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=0.4):
 
         fig.tight_layout()
         out = save_dir / fname
-        fig.savefig(out, dpi=150, bbox_inches='tight')
+        fig.savefig(out, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved {out}")
 
@@ -866,7 +866,7 @@ def plot_layer_summary(all_results, save_path):
     ax.set_title('Cell Type Distribution Across Layers')
     ax.legend(fontsize=7, loc='upper right', ncol=2)
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150)
+    fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -1143,30 +1143,30 @@ def main():
 
             plot_si_ev_scatter(
                 res['metrics'], res['group_ids'], ln,
-                layer_dir / 'si_ev_scatter.png',
+                layer_dir / 'si_ev_scatter.svg',
                 tc_array=res['tuning_curves'],
                 interactive=args.interactive,
             )
             plot_cell_types(
                 res['group_ids'], ln,
-                layer_dir / 'cell_types.png',
+                layer_dir / 'cell_types.svg',
             )
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
-                layer_dir / 'example_tuning_curves.png',
+                layer_dir / 'example_tuning_curves.svg',
                 area=area, sort_by='SI',
             )
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
-                layer_dir / 'example_tuning_curves_ev.png',
+                layer_dir / 'example_tuning_curves_ev.svg',
                 area=area, sort_by='EV',
             )
 
         if len(all_results) > 1:
-            plot_layer_summary(all_results, save_dir / 'layer_summary.png')
+            plot_layer_summary(all_results, save_dir / 'layer_summary.svg')
             plot_layer_si_ev(all_results, save_dir)
             plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=args.ev_filter)
-            plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.png')
+            plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.svg')
 
         print(f"Plots saved to {save_dir}")
 
