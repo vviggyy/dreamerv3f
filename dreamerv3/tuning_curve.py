@@ -583,7 +583,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
 
     fig.suptitle(f'{layer_name}: Top Tuning Curves (by {sort_by})', fontsize=10)
     fig.tight_layout()
-    fig.savefig(save_path, bbox_inches='tight')
+    fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 
@@ -1153,12 +1153,12 @@ def main():
             )
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
-                layer_dir / 'example_tuning_curves.svg',
+                layer_dir / 'example_tuning_curves.pdf',
                 area=area, sort_by='SI',
             )
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
-                layer_dir / 'example_tuning_curves_ev.svg',
+                layer_dir / 'example_tuning_curves_ev.pdf',
                 area=area, sort_by='EV',
             )
 

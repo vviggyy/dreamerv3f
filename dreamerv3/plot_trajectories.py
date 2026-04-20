@@ -346,7 +346,7 @@ def plot_world_only(metadata=None, tile_size=8, save_path=None):
     ax.axis('off')
 
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved world image to {save_path}")
 
     plt.show()
@@ -1070,7 +1070,7 @@ def main():
         plot_fullworld_overlay(episodes, metadata, save_path=save_path)
 
     if args.plot == 'world_only':
-        save_path = save_dir / 'world_only.png' if save_dir else None
+        save_path = save_dir / 'world_only.pdf' if save_dir else None
         plot_world_only(metadata, save_path=save_path)
 
     ext = '.mp4' if args.mp4 else '.gif'

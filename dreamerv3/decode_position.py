@@ -1352,10 +1352,13 @@ def _layer_classification_holdout(layer_name, X_train, y_cls_train,
     pred_cls = clf.predict(X_test)
     pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
     manhattan_per_timestep = np.sum(np.abs(pred_xy - pos_int_test), axis=1).astype(np.float32)
+    # Train predictions for occupancy plot
+    train_pred_cls = clf.predict(X_train)
+    train_pred_xy = np.stack(np.unravel_index(train_pred_cls, (width, height)), axis=1)
     # Also get probability maps for visualization
     proba_flat = clf.predict_proba(X_test)  # (N_test, width*height)
     proba_maps = proba_flat.reshape(-1, width, height)
-    return layer_name, manhattan_per_timestep, clf.loss_history, pred_xy, proba_maps
+    return layer_name, manhattan_per_timestep, clf.loss_history, pred_xy, proba_maps, train_pred_xy
 
 
 def decode_layers_classification_holdout(
@@ -1395,7 +1398,7 @@ def decode_layers_classification_holdout(
     todo = [ln for ln in ordered if ln not in layer_values]
     print(f"  Layers to process: {len(todo)} / {len(ordered)}")
     if not todo:
-        return layer_values, ordered, loss_histories
+        return layer_values, ordered, loss_histories, {}, {}, {}
 
     # Subsample training data if requested
     if max_samples > 0 and len(pos_train) > max_samples:
@@ -1433,11 +1436,12 @@ def decode_layers_classification_holdout(
     # Run layers sequentially — each is fast on GPU, avoids CUDA subprocess
     # spawn overhead that dominates with Parallel(prefer='processes').
     layer_pred_xy = {}
+    layer_train_pred_xy = {}
     layer_proba = {}
     dev = device if not device.startswith('cuda') else device
     for i, ln in enumerate(todo):
         print(f"  [{i+1}/{len(todo)}] Training {ln}...")
-        ln_out, manhattan_arr, loss_hist, pred_xy, proba_maps = \
+        ln_out, manhattan_arr, loss_hist, pred_xy, proba_maps, train_pred_xy = \
             _layer_classification_holdout(
                 ln, layers_train[ln], y_cls_train, pos_int_train,
                 layers_test[ln], pos_int_test, width, height,
@@ -1445,6 +1449,7 @@ def decode_layers_classification_holdout(
         layer_values[ln] = manhattan_arr
         loss_histories[ln] = [loss_hist]
         layer_pred_xy[ln] = pred_xy
+        layer_train_pred_xy[ln] = train_pred_xy
         layer_proba[ln] = proba_maps
         print(f"  {ln}: decode error={np.mean(manhattan_arr):.3f} tiles "
               f"({len(loss_hist)} iters)")
@@ -1455,7 +1460,7 @@ def decode_layers_classification_holdout(
             grid=(width, height), n_samples=len(pos_train),
             n_episodes=0, metric='manhattan')
 
-    return layer_values, ordered, loss_histories, layer_pred_xy, layer_proba
+    return layer_values, ordered, loss_histories, layer_pred_xy, layer_proba, layer_train_pred_xy
 
 
 def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
@@ -1559,13 +1564,14 @@ def _pca_layers(layers, max_dims, n_jobs=1, seed=42):
 
 
 def _layer_ridge_holdout_one(ln, X_train, pos_train, X_test, pos_test):
-    """Fit Ridge on train, evaluate R² on test. Returns (ln, r2, mae)."""
+    """Fit Ridge on train, evaluate R² on test. Returns (ln, r2, mae, pred_test, pred_train)."""
     model = RidgeCV(alphas=np.logspace(-2, 4, 20))
     model.fit(X_train, pos_train)
     pred = model.predict(X_test)
+    pred_train = model.predict(X_train)
     r2 = r2_score(pos_test, pred, multioutput='uniform_average')
     mae = mean_absolute_error(pos_test, pred)
-    return ln, r2, mae
+    return ln, r2, mae, pred, pred_train
 
 
 def decode_layers_ridge_holdout(layers_train, pos_train,
@@ -1614,11 +1620,15 @@ def decode_layers_ridge_holdout(layers_train, pos_train,
     )
 
     results = {}
-    for ln, r2, mae in raw:
+    layer_pred_xy = {}
+    layer_train_pred_xy = {}
+    for ln, r2, mae, pred_test, pred_train in raw:
         results[ln] = {'r2': r2, 'mae': mae}
+        layer_pred_xy[ln] = pred_test
+        layer_train_pred_xy[ln] = pred_train
         print(f"  {ln}: R²={r2:.4f}  MAE={mae:.3f}")
 
-    return results, ordered
+    return results, ordered, layer_pred_xy, layer_train_pred_xy
 
 
 def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
@@ -2461,14 +2471,14 @@ if __name__ == '__main__':
 
         if has_test and args.ridge_layers:
             print(f"  Mode: Ridge holdout. No CV.  max_dims={args.max_dims}")
-            layer_results, ordered = decode_layers_ridge_holdout(
-                layers, pos, layers_test_dict, pos_test,
-                n_jobs=args.n_jobs,
-                max_samples=args.max_samples,
-                max_dims=args.max_dims)
+            layer_results, ordered, layer_pred_xy, layer_train_pred_xy = \
+                decode_layers_ridge_holdout(
+                    layers, pos, layers_test_dict, pos_test,
+                    n_jobs=args.n_jobs,
+                    max_samples=args.max_samples,
+                    max_dims=args.max_dims)
             layer_fold_values = {ln: [v['r2']] for ln, v in layer_results.items()}
             metric = 'r2'
-            layer_pred_xy = {}
             layer_proba = {}
 
         elif has_test and not args.ridge_layers:
@@ -2483,7 +2493,7 @@ if __name__ == '__main__':
                   f"max_iters={n_iters_layers}, patience={pat}, "
                   f"max_samples={ms}, device={args.device}")
             layer_fold_values, ordered, loss_histories, \
-                layer_pred_xy, layer_proba = \
+                layer_pred_xy, layer_proba, layer_train_pred_xy = \
                 decode_layers_classification_holdout(
                     layers, pos, layers_test_dict, pos_test, width, height,
                     n_iters=n_iters_layers, n_jobs=args.n_jobs,
@@ -2503,6 +2513,8 @@ if __name__ == '__main__':
                 max_dims=args.max_dims,
                 n_cv_folds=args.n_cv_folds)
             metric = 'r2'
+            layer_pred_xy = {}
+            layer_train_pred_xy = {}
         else:
             if not HAS_TORCH:
                 print("Error: torch required for classifier layer decoding. "
@@ -2528,6 +2540,7 @@ if __name__ == '__main__':
                 max_samples=ms)
             metric = 'manhattan'
             layer_pred_xy = {}
+            layer_train_pred_xy = {}
             layer_proba = {}
 
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
@@ -2545,6 +2558,18 @@ if __name__ == '__main__':
                 plot_layer_probmap_on_world(
                     layer_proba[probmap_layer], pos_test, groups_test,
                     metadata, probmap_layer, save_dir)
+        # Occupancy vs error for dyn/deter (holdout modes only)
+        if has_test and layer_pred_xy:
+            occ_layer = 'dyn/deter' if 'dyn/deter' in layer_pred_xy else None
+            if occ_layer:
+                method = 'ridge' if args.ridge_layers else 'classification'
+                train_pos_ln = pos if occ_layer in layer_train_pred_xy else None
+                train_pred_ln = layer_train_pred_xy.get(occ_layer, None)
+                plot_occupancy_vs_error(
+                    pos_test, layer_pred_xy[occ_layer], width, height,
+                    save_dir, repr_name=occ_layer.replace('/', '_'),
+                    method=method, metadata=metadata,
+                    train_pos=train_pos_ln, train_pred=train_pred_ln)
         print("\n>>> Plots saved. Decoding evaluation complete. <<<")
         if not args.ridge_layers and loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
