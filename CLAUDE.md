@@ -10,6 +10,7 @@
 - `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories. Config: `--dream_decode.decoder_type {ridge,classifier}`
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
+- `dreamerv3/tuning_cluster.py` — dimensionality reduction clustering of tuning curves: PCA/t-SNE/UMAP on spatial autocorrelation maps + HDBSCAN clustering. Loads `tuning_results.pkl`, produces scree plots, 2D scatter plots colored by cluster/cell-type/SI, and example tuning curve grids per cluster. Requires `umap-learn` and `hdbscan` for full pipeline (graceful fallback to PCA+t-SNE if missing)
 - `dreamerv3/compare_conditions.py` — cross-condition comparison: loads layer_decode_results.pkl and tuning_results.pkl from N runs, produces heatmaps, line plots, cell type composition charts, and summary CSV
 - `dreamerv3/plot_training.py` — reads `scores.jsonl` + `metrics.jsonl`, produces training_progress.png with episode score, cumulative reward, Crafter score, per-achievement unlock rates, and optionally loss/reward/value panels
 - `dreamerv3/run_info.py` — lightweight run provenance logger. `log_run_info(save_dir, stage, args, outputs, extra)` appends a JSON entry to `<save_dir>/run_info.json` with timestamp, git SHA, command line, SLURM job ID, and all args. Integrated into decode_position, plot_trajectories, plot_training, and tuning_curve
@@ -191,6 +192,16 @@ MPLBACKEND=Agg python dreamerv3/compare_conditions.py \
 Loads `layer_decode_results.pkl` and `tuning_results.pkl` from N conditions and produces comparison plots. Key args: `--decode_subdir NAME` (default `layer_decoder_results`), `--tuning_subdir NAME` (default `tuning_results`), `--layers dyn/deter dyn/stoch` (optional filter), `--no_decode` / `--no_tuning` (skip one analysis type).
 
 Outputs: `decode_heatmap.png` (conditions × layers heatmap), `decode_lineplot.png` (line plot with IQR bands), `tuning_si_heatmap.png`, `tuning_ev_heatmap.png`, `tuning_celltypes.png` (grouped stacked bar), `summary.csv`.
+
+### tuning curve clustering
+```
+MPLBACKEND=Agg python dreamerv3/tuning_cluster.py \
+  --from_pkl ./logdir/my_run/tuning_results/tuning_results.pkl \
+  --save ./logdir/my_run/tuning_results/cluster_plots
+```
+Runs PCA/t-SNE/UMAP on spatial autocorrelation maps of tuning curves + HDBSCAN clustering on UMAP embedding. Loads precomputed `tuning_results.pkl`. Key args: `--layers dyn/deter dyn/stoch` (optional filter), `--n_components 50` (PCA dims), `--perplexity 30` (t-SNE), `--umap_neighbors 15`, `--min_cluster_size 20` (HDBSCAN), `--no_normalize` (skip z-score). Requires `umap-learn` + `hdbscan` for full pipeline; falls back to PCA + t-SNE if missing.
+
+Outputs per layer: `{layer}_scree.svg`, `{layer}_pca.svg`, `{layer}_tsne.svg`, `{layer}_umap.svg` (scatter plots colored by HDBSCAN cluster, cell type, and SI), `{layer}_cluster_examples.svg` (top-SI tuning curves per cluster), `cluster_results.pkl`.
 
 ### interactive tuning viewer (from precomputed pkl)
 ```
