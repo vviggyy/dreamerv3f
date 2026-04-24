@@ -957,6 +957,8 @@ def main():
                         help='Min bounding-box area (tiles²) to keep an episode (0=no filter)')
     parser.add_argument('--interactive', action='store_true',
                         help='Show interactive SI vs EV scatter (click to see tuning curves)')
+    parser.add_argument('--max_episodes', type=int, default=0,
+                        help='Max episodes to use (0=all)')
     parser.add_argument('--from_pkl', default=None,
                         help='Load precomputed tuning_results.pkl and show interactive viewer (no recomputation)')
     args = parser.parse_args()
@@ -995,6 +997,8 @@ def main():
     # Load episodes
     print(f"Loading episodes from {args.data}")
     episodes, metadata = load_episodes(args.data)
+    if args.max_episodes > 0:
+        episodes = episodes[:args.max_episodes]
     print(f"  {len(episodes)} episodes loaded")
 
     if args.min_bbox > 0:

@@ -27,6 +27,7 @@
 - `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, ridge/classification, holdout, resume
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
+- `run_Clustering.sh` — tuning curve clustering via PCA/t-SNE/UMAP + HDBSCAN (CPU, day partition). Settings: FROM_PKL, n_components, perplexity, umap_neighbors, min_cluster_size
 
 ## run provenance
 Every analysis script appends to `<save_dir>/run_info.json` via `dreamerv3/run_info.py`:
