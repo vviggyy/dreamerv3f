@@ -959,6 +959,10 @@ def main():
                         help='Show interactive SI vs EV scatter (click to see tuning curves)')
     parser.add_argument('--max_episodes', type=int, default=0,
                         help='Max episodes to use (0=all)')
+    parser.add_argument('--area', type=int, nargs=2, default=None,
+                        help='World area as W H (e.g. --area 32 32). '
+                             'Overrides metadata. If not set, read from '
+                             'metadata or inferred from positions.')
     parser.add_argument('--from_pkl', default=None,
                         help='Load precomputed tuning_results.pkl and show interactive viewer (no recomputation)')
     args = parser.parse_args()
@@ -996,9 +1000,7 @@ def main():
 
     # Load episodes
     print(f"Loading episodes from {args.data}")
-    episodes, metadata = load_episodes(args.data)
-    if args.max_episodes > 0:
-        episodes = episodes[:args.max_episodes]
+    episodes, metadata = load_episodes(args.data, max_episodes=args.max_episodes)
     print(f"  {len(episodes)} episodes loaded")
 
     if args.min_bbox > 0:
@@ -1007,9 +1009,14 @@ def main():
         print(f"  {n_before} → {len(episodes)} episodes after bbox filter "
               f"(min_bbox={args.min_bbox})")
 
-    area = metadata.get('area', (64, 64)) if metadata else (64, 64)
-    if isinstance(area, (list, tuple)):
-        area = tuple(area)
+    if args.area:
+        area = tuple(args.area)
+    elif metadata and 'area' in metadata:
+        area = tuple(metadata['area'])
+    else:
+        all_pos = np.concatenate([ep['player_pos'] for ep in episodes])
+        area = (int(all_pos[:, 0].max()) + 1, int(all_pos[:, 1].max()) + 1)
+        print(f"  (area inferred from position data)")
     print(f"  Area: {area}")
 
     # Drop image data to free memory (not needed for tuning analysis)

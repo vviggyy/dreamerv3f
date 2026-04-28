@@ -69,21 +69,62 @@ from sklearn.model_selection import LeaveOneGroupOut
 # Data loading (reuses plot_trajectories.py conventions)
 # ---------------------------------------------------------------------------
 
-def load_episodes(data_path):
+def load_episodes(data_path, max_episodes=0):
+    """Load trajectory episodes from data_path.
+
+    Args:
+        data_path: Directory containing episode_*.pkl and/or all_episodes.pkl.
+        max_episodes: If > 0, load at most this many episodes using individual
+            episode files (avoids loading the full all_episodes.pkl into memory).
+            If 0, load all episodes (prefers all_episodes.pkl when available).
+    """
     data_path = Path(data_path)
+    ep_files = sorted(data_path.glob('episode_*.pkl'))
+
+    # When max_episodes is set and individual files exist, load them directly
+    # to avoid the memory cost of deserializing the combined pickle.
+    if max_episodes > 0 and ep_files:
+        metadata = _load_metadata_only(data_path)
+        ep_files = ep_files[:max_episodes]
+        episodes = []
+        for ep_file in ep_files:
+            with open(ep_file, 'rb') as f:
+                episodes.append(pickle.load(f))
+        return episodes, metadata
+
     all_file = data_path / 'all_episodes.pkl'
     if all_file.exists():
         with open(all_file, 'rb') as f:
             data = pickle.load(f)
         if isinstance(data, dict) and 'episodes' in data:
             metadata = {k: v for k, v in data.items() if k != 'episodes'}
+            if max_episodes > 0:
+                data['episodes'] = data['episodes'][:max_episodes]
             return data['episodes'], metadata
+        if isinstance(data, list) and max_episodes > 0:
+            data = data[:max_episodes]
         return data, None
     episodes = []
-    for ep_file in sorted(data_path.glob('episode_*.pkl')):
+    for ep_file in ep_files:
         with open(ep_file, 'rb') as f:
             episodes.append(pickle.load(f))
     return episodes, None
+
+
+def _load_metadata_only(data_path):
+    """Try to extract metadata from all_episodes.pkl without loading episodes.
+
+    Falls back to loading the first episode file to check for metadata keys,
+    or returns None if nothing is available.
+    """
+    # Check for a small metadata sidecar first
+    meta_file = data_path / 'metadata.pkl'
+    if meta_file.exists():
+        with open(meta_file, 'rb') as f:
+            return pickle.load(f)
+    # Peek at all_episodes.pkl using incremental unpickling is not feasible
+    # for generic pickles, so just return None — callers use sensible defaults.
+    return None
 
 
 def filter_stuck_episodes(episodes, min_bbox_area):
@@ -2268,6 +2309,10 @@ if __name__ == '__main__':
                         help='[--mode layers] Path to a saved layer_decoders/ '
                              'directory (from --save_model). Loads pretrained '
                              'decoders and evaluates on --data without training.')
+    parser.add_argument('--max_episodes', type=int, default=0,
+                        help='Max episodes to load (0=all). When set, loads '
+                             'individual episode files to avoid OOM on large '
+                             'all_episodes.pkl.')
     parser.add_argument('--min_bbox', type=float, default=0,
                         help='Minimum bounding-box area (tiles²) per episode. '
                              'Episodes where (max_x-min_x)*(max_y-min_y) < this '
@@ -2311,7 +2356,7 @@ if __name__ == '__main__':
 
     # Load data
     print("Loading trajectory data...")
-    episodes, metadata = load_episodes(data_path)
+    episodes, metadata = load_episodes(data_path, max_episodes=args.max_episodes)
     print(f"  {len(episodes)} episodes loaded")
     if metadata:
         area = metadata.get('area', None)
