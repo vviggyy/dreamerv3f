@@ -52,6 +52,7 @@ Fast cluster command (completes in minutes):
 """
 
 import argparse
+import gc
 import pickle
 from pathlib import Path
 
@@ -125,6 +126,45 @@ def _load_metadata_only(data_path):
     # Peek at all_episodes.pkl using incremental unpickling is not feasible
     # for generic pickles, so just return None — callers use sensible defaults.
     return None
+
+
+def reload_layer_from_files(episode_indices, layer_name):
+    """Reload a single layer's activations from individual episode files.
+
+    Produces the same output as _prepare_single_layer(episodes, layer_name)
+    but reads from disk instead of from episode dicts in memory, so only one
+    layer's worth of data is resident at a time.
+
+    Args:
+        episode_indices: List of (episode_index, episode_file) tuples.
+        layer_name: Layer name (e.g. 'enc/cnn0') — reads act/{layer_name}.
+
+    Returns:
+        X, pos, groups — same as _prepare_single_layer.
+    """
+    act_key = f'act/{layer_name}'
+    all_x, all_pos, all_groups = [], [], []
+    for i, ep_file in episode_indices:
+        with open(ep_file, 'rb') as f:
+            ep = pickle.load(f)
+        arr = ep.get(act_key)
+        p = ep.get('player_pos')
+        if arr is None or p is None or len(arr) == 0:
+            continue
+        p = np.array(p, dtype=np.float32)
+        a = np.array(arr, dtype=np.float32)
+        T = min(len(p), len(a))
+        if a.ndim > 2:
+            a = a[:T].reshape(T, -1)
+        else:
+            a = a[:T]
+        all_pos.append(p[:T])
+        all_x.append(a)
+        all_groups.append(np.full(T, i))
+        del ep
+    if not all_pos:
+        raise ValueError(f"No valid episodes for layer {layer_name}")
+    return np.concatenate(all_x), np.concatenate(all_pos), np.concatenate(all_groups)
 
 
 def filter_stuck_episodes(episodes, min_bbox_area):
@@ -2354,42 +2394,56 @@ if __name__ == '__main__':
     save_dir = Path(args.save) if args.save else data_path.parent / 'decoder_results'
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load data
+    # Load data — lightweight approach for layer mode to avoid OOM.
+    # For layer mode: load episode files list, discover layers from first file,
+    # then reload one layer at a time from individual files.
+    # For standard mode: load episodes fully (only needs deter/stoch).
     print("Loading trajectory data...")
-    episodes, metadata = load_episodes(data_path, max_episodes=args.max_episodes)
-    print(f"  {len(episodes)} episodes loaded")
-    if metadata:
-        area = metadata.get('area', None)
-        print(f"  Metadata: {metadata}")
 
-    if args.min_bbox > 0:
-        n_before = len(episodes)
-        episodes = filter_stuck_episodes(episodes, args.min_bbox)
-        print(f"  Bbox filter: {n_before} → {len(episodes)} episodes "
-              f"(min_bbox={args.min_bbox})")
+    # Build episode file list and lightweight metadata
+    ep_files = sorted(data_path.glob('episode_*.pkl'))
+    if args.max_episodes > 0:
+        ep_files = ep_files[:args.max_episodes]
 
-    # ---- Layer-wise decoding mode ----
-    if args.mode == 'layers':
-        print("\n=== Per-Layer Position Decoding ===")
+    if args.mode == 'layers' and ep_files:
+        # --- Lightweight loading for layer mode ---
+        # Discover layers from first file
+        with open(ep_files[0], 'rb') as f:
+            first_ep = pickle.load(f)
+        all_layer_keys = set(
+            k[len('act/'):] for k in first_ep if k.startswith('act/'))
+        del first_ep
 
-        # Strip image data to save memory (not needed for decoding)
-        for ep in episodes:
-            for k in ['image', 'images']:
-                if k in ep:
-                    del ep[k]
+        # Load only pos/metadata from each file
+        lightweight_eps = []
+        for ep_file in ep_files:
+            with open(ep_file, 'rb') as f:
+                ep = pickle.load(f)
+            light = {k: ep[k] for k in ['player_pos'] if k in ep}
+            light['_source_file'] = ep_file
+            lightweight_eps.append(light)
+            del ep
+        gc.collect()
+        print(f"  {len(lightweight_eps)} episodes loaded (lightweight)")
 
-        # Discover layer names without loading all activations
-        all_layer_keys = set()
-        for ep in episodes:
-            all_layer_keys.update(
-                k[len('act/'):] for k in ep if k.startswith('act/'))
+        metadata = _load_metadata_only(data_path)
+
+        if args.min_bbox > 0:
+            n_before = len(lightweight_eps)
+            lightweight_eps = filter_stuck_episodes(lightweight_eps, args.min_bbox)
+            print(f"  Bbox filter: {n_before} → {len(lightweight_eps)} episodes "
+                  f"(min_bbox={args.min_bbox})")
+
+        # Build file index from surviving episodes
+        ep_file_index = [(i, ep['_source_file'])
+                         for i, ep in enumerate(lightweight_eps)]
+
+        # Get pos/groups from first layer via file reload
         if not all_layer_keys:
             raise ValueError("No 'act/*' keys in episodes.")
         print(f"  Layers found: {sorted(all_layer_keys)}")
-
-        # Get pos/groups from a lightweight single-layer load
         _first_ln = sorted(all_layer_keys)[0]
-        _, pos, groups = _prepare_single_layer(episodes, _first_ln)
+        _, pos, groups = reload_layer_from_files(ep_file_index, _first_ln)
         print(f"  pos: {pos.shape}  groups: {groups.shape}")
         if metadata and 'area' in metadata:
             width, height = metadata['area']
@@ -2397,15 +2451,32 @@ if __name__ == '__main__':
             width = int(pos[:, 0].max()) + 1
             height = int(pos[:, 1].max()) + 1
         print(f"  Grid: {width}x{height}")
-        del _  # free the activation array from the probe load
+
+        episodes = None  # not used in layer mode
+
+    else:
+        # --- Standard mode: full load (only needs deter/stoch) ---
+        episodes, metadata = load_episodes(data_path, max_episodes=args.max_episodes)
+        print(f"  {len(episodes)} episodes loaded")
+        if metadata:
+            print(f"  Metadata: {metadata}")
+        if args.min_bbox > 0:
+            n_before = len(episodes)
+            episodes = filter_stuck_episodes(episodes, args.min_bbox)
+            print(f"  Bbox filter: {n_before} → {len(episodes)} episodes "
+                  f"(min_bbox={args.min_bbox})")
+        ep_file_index = None  # not used in standard mode
+
+    # ---- Layer-wise decoding mode ----
+    if args.mode == 'layers':
+        print("\n=== Per-Layer Position Decoding ===")
 
         # --- Eval-only from saved decoders ---
         if args.from_model:
             print(f"\n  Loading pretrained decoders from {args.from_model}")
-            # from_model needs all layers loaded — load one at a time
             layers = {}
             for ln in sorted(all_layer_keys):
-                X_ln, _, _ = _prepare_single_layer(episodes, ln)
+                X_ln, _, _ = reload_layer_from_files(ep_file_index, ln)
                 layers[ln] = X_ln
             layer_fold_values, ordered, metric = eval_layer_decoders(
                 args.from_model, layers, pos, width, height)
@@ -2438,31 +2509,29 @@ if __name__ == '__main__':
         loss_histories = {}
 
         # --- Determine train/test split ---
-        # Load layers lazily (one at a time) to avoid OOM
         has_test = False
-        test_episodes = None
+        test_ep_file_index = None
         if args.test_data:
             print("Loading held-out test trajectories...")
-            test_episodes, _ = load_episodes(Path(args.test_data))
-            print(f"  {len(test_episodes)} test episodes loaded")
-            for ep in test_episodes:
-                for k in ['image', 'images']:
-                    if k in ep:
-                        del ep[k]
-            # Discover common layers
-            test_layer_keys = set()
-            for ep in test_episodes:
-                test_layer_keys.update(
-                    k[len('act/'):] for k in ep if k.startswith('act/'))
+            test_data_path = Path(args.test_data)
+            test_ep_files = sorted(test_data_path.glob('episode_*.pkl'))
+            # Discover common layers from first test file
+            with open(test_ep_files[0], 'rb') as f:
+                first_test = pickle.load(f)
+            test_layer_keys = set(
+                k[len('act/'):] for k in first_test if k.startswith('act/'))
+            del first_test
             common = all_layer_keys & test_layer_keys
             all_layer_keys = common
-            # Extract test pos/groups from first common layer
+            # Build test file index (lightweight — just file paths)
+            test_ep_file_index = [(i, f) for i, f in enumerate(test_ep_files)]
+            print(f"  {len(test_ep_files)} test episodes found")
+            # Get test pos/groups from first common layer
             _first_test_ln = sorted(common)[0]
-            _, pos_test, groups_test = _prepare_single_layer(
-                test_episodes, _first_test_ln)
+            _, pos_test, groups_test = reload_layer_from_files(
+                test_ep_file_index, _first_test_ln)
             has_test = True
         elif args.holdout_frac > 0:
-            # Auto-split episodes into train/test by episode index
             ep_ids = np.unique(groups)
             n_eps = len(ep_ids)
             n_test = max(1, int(round(n_eps * args.holdout_frac)))
@@ -2481,21 +2550,21 @@ if __name__ == '__main__':
 
         # Helper: load one layer, apply train/test split
         def _load_layer(ln):
-            """Load a single layer's activations, return (X_train, X_test) or (X, None)."""
+            """Load a single layer's activations from files, return (X_train, X_test) or (X, None)."""
             import gc as _gc
-            if args.test_data and test_episodes is not None:
-                X_train, _, _ = _prepare_single_layer(episodes, ln)
-                X_test, _, _ = _prepare_single_layer(test_episodes, ln)
+            if args.test_data and test_ep_file_index is not None:
+                X_train, _, _ = reload_layer_from_files(ep_file_index, ln)
+                X_test, _, _ = reload_layer_from_files(test_ep_file_index, ln)
                 return X_train, X_test
             elif args.holdout_frac > 0 and has_test:
-                X_full, _, _ = _prepare_single_layer(episodes, ln)
+                X_full, _, _ = reload_layer_from_files(ep_file_index, ln)
                 X_train = X_full[train_mask]
                 X_test = X_full[test_mask]
                 del X_full
                 _gc.collect()
                 return X_train, X_test
             else:
-                X_full, _, _ = _prepare_single_layer(episodes, ln)
+                X_full, _, _ = reload_layer_from_files(ep_file_index, ln)
                 return X_full, None
 
         # Build layers dicts lazily for the decode functions.

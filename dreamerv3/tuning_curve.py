@@ -75,6 +75,67 @@ def _strip_heavy_keys(episodes):
             if k in ep:
                 del ep[k]
 
+
+def _strip_activation_keys(episodes):
+    """Drop all act/* keys from episodes in-place to free memory.
+
+    This allows layer-by-layer reloading from individual episode files,
+    keeping only lightweight keys (player_pos, reward, action, etc.) in RAM.
+    """
+    for ep in episodes:
+        act_keys = [k for k in ep if k.startswith('act/')]
+        for k in act_keys:
+            del ep[k]
+        # Also drop deter/stoch top-level keys (duplicated in act/dyn/*)
+        for k in ['deter', 'stoch']:
+            if k in ep:
+                del ep[k]
+
+
+def _reload_layer_from_files(episode_indices, layer_name, return_facing=False):
+    """Reload a single layer's activations from individual episode files.
+
+    Args:
+        episode_indices: List of (episode_index, episode_file) tuples to load.
+        layer_name: Layer name (e.g. 'enc/cnn0') — reads act/{layer_name}.
+        return_facing: If True, also return aligned facing directions.
+
+    Returns:
+        X, pos, groups as concatenated arrays.
+        If return_facing=True: X, pos, groups, facing (or None if no facing data).
+    """
+    act_key = f'act/{layer_name}'
+    all_x, all_pos, all_groups, all_facing = [], [], [], []
+    for i, ep_file in episode_indices:
+        with open(ep_file, 'rb') as f:
+            ep = pickle.load(f)
+        arr = ep.get(act_key)
+        p = ep.get('player_pos')
+        if arr is None or p is None or len(arr) == 0:
+            continue
+        p = np.array(p, dtype=np.float32)
+        a = np.array(arr, dtype=np.float32)
+        T = min(len(p), len(a))
+        if a.ndim > 2:
+            a = a[:T].reshape(T, -1)
+        else:
+            a = a[:T]
+        all_pos.append(p[:T])
+        all_x.append(a)
+        all_groups.append(np.full(T, i))
+        if return_facing:
+            f_arr = ep.get('player_facing')
+            if f_arr is not None and len(f_arr) > 0:
+                all_facing.append(np.array(f_arr, dtype=np.float32)[:T])
+        del ep  # free immediately
+    if not all_pos:
+        raise ValueError(f"No valid episodes for layer {layer_name}")
+    result = (np.concatenate(all_x), np.concatenate(all_pos), np.concatenate(all_groups))
+    if return_facing:
+        facing = np.concatenate(all_facing) if all_facing else None
+        return result + (facing,)
+    return result
+
 # ---------------------------------------------------------------------------
 # Autocorrelation metrics (from pRNN TuningCurveAnalysis.py)
 # ---------------------------------------------------------------------------
@@ -998,46 +1059,24 @@ def main():
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load episodes
-    print(f"Loading episodes from {args.data}")
-    episodes, metadata = load_episodes(args.data, max_episodes=args.max_episodes)
-    print(f"  {len(episodes)} episodes loaded")
+    # Load episodes — lightweight approach to avoid OOM.
+    # 1) Identify episode files and discover layers from first file only
+    # 2) Load lightweight data (pos, facing) from all episodes
+    # 3) Per-layer analysis reloads activations one layer at a time from files
+    data_path = Path(args.data)
+    ep_files = sorted(data_path.glob('episode_*.pkl'))
+    if args.max_episodes > 0:
+        ep_files = ep_files[:args.max_episodes]
+    if not ep_files:
+        raise ValueError(f"No episode_*.pkl files found in {data_path}")
+    print(f"Found {len(ep_files)} episode files in {data_path}")
 
-    if args.min_bbox > 0:
-        n_before = len(episodes)
-        episodes = filter_stuck_episodes(episodes, args.min_bbox)
-        print(f"  {n_before} → {len(episodes)} episodes after bbox filter "
-              f"(min_bbox={args.min_bbox})")
-
-    if args.area:
-        area = tuple(args.area)
-    elif metadata and 'area' in metadata:
-        area = tuple(metadata['area'])
-    else:
-        all_pos = np.concatenate([ep['player_pos'] for ep in episodes])
-        area = (int(all_pos[:, 0].max()) + 1, int(all_pos[:, 1].max()) + 1)
-        print(f"  (area inferred from position data)")
-    print(f"  Area: {area}")
-
-    # Drop image data to free memory (not needed for tuning analysis)
-    _strip_heavy_keys(episodes)
-
-    # Load test data if provided
-    test_episodes = None
-    if args.test_data:
-        print(f"Loading test episodes from {args.test_data}")
-        test_episodes, _ = load_episodes(args.test_data)
-        print(f"  {len(test_episodes)} test episodes loaded")
-        if args.min_bbox > 0:
-            n_before = len(test_episodes)
-            test_episodes = filter_stuck_episodes(test_episodes, args.min_bbox)
-            print(f"  {n_before} → {len(test_episodes)} test episodes after bbox filter")
-        _strip_heavy_keys(test_episodes)
-
-    # Discover layer names and determine order
-    layer_names = _discover_layer_names(episodes)
+    # Discover layer names from first episode only
+    with open(ep_files[0], 'rb') as f:
+        first_ep = pickle.load(f)
+    layer_names = [k[len('act/'):] for k in first_ep if k.startswith('act/')]
+    del first_ep
     if not layer_names:
-        # Fallback: deter/stoch only
         print("  No act/* layers found, falling back to deter/stoch only")
         layer_names = ['dyn/deter', 'dyn/stoch']
     ordered = get_sorted_layers(layer_names)
@@ -1045,32 +1084,89 @@ def main():
         ordered = [ln for ln in ordered if ln in args.layers]
     print(f"  Layers to analyze: {ordered}")
 
-    # Extract facing direction (once, small — just 2 floats per timestep)
-    # Use a dummy single-layer load to get aligned groups for facing extraction
-    _, _tmp_pos, _tmp_groups = _prepare_single_layer(episodes, ordered[0])
-    facing = extract_facing_aligned(episodes, _tmp_groups) if not args.no_hd else None
-    del _tmp_pos, _tmp_groups
+    # Load lightweight data only (pos, facing, achievements — no activations)
+    print(f"Loading lightweight episode data...")
+    lightweight_eps = []
+    for ep_file in ep_files:
+        with open(ep_file, 'rb') as f:
+            ep = pickle.load(f)
+        light = {k: ep[k] for k in ['player_pos', 'player_facing', 'reward',
+                                      'action', 'achievements']
+                 if k in ep}
+        light['_source_file'] = ep_file
+        lightweight_eps.append(light)
+        del ep
+    gc.collect()
+    print(f"  {len(lightweight_eps)} episodes loaded (lightweight)")
 
-    test_facing = None
-    if test_episodes and not args.no_hd:
-        _, _tp, _tg = _prepare_single_layer(test_episodes, ordered[0])
-        test_facing = extract_facing_aligned(test_episodes, _tg)
-        del _tp, _tg
+    if args.min_bbox > 0:
+        n_before = len(lightweight_eps)
+        lightweight_eps = filter_stuck_episodes(lightweight_eps, args.min_bbox)
+        print(f"  {n_before} → {len(lightweight_eps)} episodes after bbox filter "
+              f"(min_bbox={args.min_bbox})")
 
-    # Analyze each layer sequentially — load one at a time to keep memory low
+    if args.area:
+        area = tuple(args.area)
+    else:
+        all_pos = np.concatenate([ep['player_pos'] for ep in lightweight_eps])
+        area = (int(all_pos[:, 0].max()) + 1, int(all_pos[:, 1].max()) + 1)
+        print(f"  (area inferred from position data)")
+    print(f"  Area: {area}")
+
+    # Build episode file index from surviving (post-filter) episodes
+    ep_file_index = [(i, ep['_source_file']) for i, ep in enumerate(lightweight_eps)]
+
+    # Load test data if provided — same lightweight approach
+    test_ep_file_index = None
+    if args.test_data:
+        test_data_path = Path(args.test_data)
+        test_ep_files = sorted(test_data_path.glob('episode_*.pkl'))
+        print(f"Found {len(test_ep_files)} test episode files in {test_data_path}")
+        test_light = []
+        for ep_file in test_ep_files:
+            with open(ep_file, 'rb') as f:
+                ep = pickle.load(f)
+            light = {k: ep[k] for k in ['player_pos', 'player_facing', 'reward',
+                                          'action', 'achievements']
+                     if k in ep}
+            light['_source_file'] = ep_file
+            test_light.append(light)
+            del ep
+        gc.collect()
+        if args.min_bbox > 0:
+            n_before = len(test_light)
+            test_light = filter_stuck_episodes(test_light, args.min_bbox)
+            print(f"  {n_before} → {len(test_light)} test episodes after bbox filter")
+        test_ep_file_index = [(i, ep['_source_file']) for i, ep in enumerate(test_light)]
+        del test_light
+        gc.collect()
+
+    # Analyze each layer — reload activations from individual episode files
     all_results = []
+    facing = None  # extracted from first layer load
+    test_facing = None
 
-    for ln in ordered:
+    for li, ln in enumerate(ordered):
         print(f"\n--- Loading layer: {ln} ---")
-        X, pos, groups = _prepare_single_layer(episodes, ln)
+        need_facing = (li == 0 and not args.no_hd)
+        if need_facing:
+            X, pos, groups, facing = _reload_layer_from_files(
+                ep_file_index, ln, return_facing=True)
+        else:
+            X, pos, groups = _reload_layer_from_files(ep_file_index, ln)
         if args.max_neurons > 0 and X.shape[1] > args.max_neurons:
             X = X[:, :args.max_neurons]
         mem_mb = X.nbytes / 1e6
         print(f"  {ln}: {X.shape} ({mem_mb:.0f} MB)")
 
         test_X, test_pos, test_groups = None, None, None
-        if test_episodes is not None:
-            test_X, test_pos, test_groups = _prepare_single_layer(test_episodes, ln)
+        if test_ep_file_index is not None:
+            if need_facing:
+                test_X, test_pos, test_groups, test_facing = _reload_layer_from_files(
+                    test_ep_file_index, ln, return_facing=True)
+            else:
+                test_X, test_pos, test_groups = _reload_layer_from_files(
+                    test_ep_file_index, ln)
             if args.max_neurons > 0 and test_X.shape[1] > args.max_neurons:
                 test_X = test_X[:, :args.max_neurons]
 
@@ -1105,8 +1201,8 @@ def main():
             'data_path': str(args.data),
             'test_data_path': str(args.test_data) if args.test_data else None,
             'area': area,
-            'n_episodes': len(episodes),
-            'n_test_episodes': len(test_episodes) if test_episodes else 0,
+            'n_episodes': len(ep_file_index),
+            'n_test_episodes': len(test_ep_file_index) if test_ep_file_index else 0,
             'group_names': GROUP_NAMES,
             'thresholds': {
                 'SI_thresh': args.SI_thresh,
