@@ -34,18 +34,25 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   logdir.mkdir()
   print('Logdir', logdir)
 
-  # Resolve checkpoint: explicit path or auto-detect latest from logdir
-  from_checkpoint = args.from_checkpoint
-  if not from_checkpoint:
-    latest_file = logdir / 'ckpt' / 'latest'
-    assert latest_file.exists(), (
-        f"No --run.from_checkpoint given and no ckpt/latest found in {logdir}")
-    latest_name = latest_file.read_text().strip()
-    from_checkpoint = str(logdir / 'ckpt' / latest_name)
-    print(f'Auto-detected checkpoint: {from_checkpoint}')
-
   # Trajectory storage
   et_config = args.eval_trajectory
+
+  # Resolve checkpoint: explicit path or auto-detect latest from logdir
+  load_checkpoint = et_config.load_checkpoint
+  from_checkpoint = args.from_checkpoint
+  if load_checkpoint:
+    if not from_checkpoint:
+      latest_file = logdir / 'ckpt' / 'latest'
+      assert latest_file.exists(), (
+          f"No --run.from_checkpoint given and no ckpt/latest found in {logdir}. "
+          f"Set --eval_trajectory.load_checkpoint False for untrained agent.")
+      latest_name = latest_file.read_text().strip()
+      from_checkpoint = str(logdir / 'ckpt' / latest_name)
+      print(f'Auto-detected checkpoint: {from_checkpoint}')
+  else:
+    from_checkpoint = None
+    print('Using UNTRAINED (random) weights')
+
   save_path = elements.Path(et_config.save_path or str(logdir / 'trajectories'))
   save_path.mkdir()
   num_episodes = et_config.num_episodes
@@ -175,11 +182,12 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
 
   # Load checkpoint — use regex to skip opt/ state so mismatched optimizer
   # configs (e.g. different wd setting) don't cause a shape mismatch error.
-  import pathlib as _pl
-  _ckpt_file = _pl.Path(from_checkpoint) / 'agent.pkl'
-  with open(_ckpt_file, 'rb') as _f:
-    _ckpt_data = pickle.load(_f)
-  agent.load(_ckpt_data, regex=r'^(?!opt/)')
+  if from_checkpoint:
+    import pathlib as _pl
+    _ckpt_file = _pl.Path(from_checkpoint) / 'agent.pkl'
+    with open(_ckpt_file, 'rb') as _f:
+      _ckpt_data = pickle.load(_f)
+    agent.load(_ckpt_data, regex=r'^(?!opt/)')
 
   def _save_results(tag=''):
     """Save all completed episodes to disk. Called on success, crash, or signal."""

@@ -49,6 +49,7 @@ defaults:
   eval_trajectory:
     num_episodes: 100
     save_path: ''
+    load_checkpoint: True
 
   dream_decode:
     num_batches: 5

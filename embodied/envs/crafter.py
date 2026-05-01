@@ -68,8 +68,8 @@ class Crafter(embodied.Env):
       self._ego_inv_tiles = int(np.ceil(self._ego_inv_rows / int(self._ego_unit[0])))
       # Precompute canonical player sprite (RGBA) — always "player-down" so the
       # ego view never leaks facing direction through the character sprite.
-      self._ego_sprite = self._env._textures.get(
-          'player-down', self._ego_unit).copy()  # (upx, upx, 4)
+      self._ego_sprite = np.rot90(self._env._textures.get(
+          'player-down', self._ego_unit), 3).copy()  # (upx, upx, 4), rotated 90° CW
       # Egocentric action remapping: agent issues ego-relative movement
       # (left/right/forward/backward) which we translate to world-relative
       # crafter actions based on current facing direction.
@@ -280,10 +280,17 @@ class Crafter(embodied.Env):
       result = padded
     # Stamp canonical sprite over the player tile so facing direction
     # is never leaked through the character sprite appearance.
+    # First replace the player tile with its terrain (LocalView draws the
+    # player object on top of terrain, causing double-layer artifacts).
     upx = int(self._ego_unit[0])
     inv_tiles = self._ego_inv_tiles
     pr = (V - 1 - inv_tiles) * upx   # player row start (just above inventory)
     pc = (V // 2) * upx              # player col start (center)
+    player_pos = self._env._player.pos
+    terrain = self._env._textures.get(
+        self._env._world[player_pos][0], self._ego_unit)
+    result[pr:pr+upx, pc:pc+upx] = terrain[:, :, :3]
+    # Now alpha-blend the canonical player sprite onto clean terrain
     sprite = self._ego_sprite         # (upx, upx, 4) RGBA
     alpha = sprite[:, :, 3:4].astype(np.float32) / 255.0
     region = result[pr:pr+upx, pc:pc+upx].astype(np.float32)
