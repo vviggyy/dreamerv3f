@@ -262,7 +262,7 @@ class Crafter(embodied.Env):
     # Counter-rotate each tile sprite back to upright orientation so that
     # individual sprites always appear canonical regardless of facing direction.
     if self._upright_sprites:
-      inv_k = (-k) % 4
+      inv_k = (-k + 3) % 4   # undo global rot90 + canvas→image correction
       rows, cols = result.shape[0] // upx, result.shape[1] // upx
       for tr in range(rows):
         for tc in range(cols):
@@ -270,8 +270,7 @@ class Crafter(embodied.Env):
           c0, c1 = tc * upx, (tc + 1) * upx
           tile = result[r0:r1, c0:c1]
           tile = np.fliplr(tile)          # undo the global fliplr
-          if inv_k:
-            tile = np.rot90(tile, inv_k)  # undo the global rot90
+          tile = np.rot90(tile, inv_k)    # undo global rot90 + canvas→image
           result[r0:r1, c0:c1] = tile
     # Pad to pixel_size x pixel_size (crop may be smaller due to integer division)
     h, w = result.shape[:2]

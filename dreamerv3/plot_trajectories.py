@@ -31,15 +31,54 @@ from run_info import log_run_info
 
 def _save_animation(anim, save_path, fps, dpi=100):
     """Save animation as GIF or MP4 depending on file extension."""
+    import shutil
     save_path = Path(save_path)
     if save_path.suffix == '.mp4':
-        writer = animation.FFMpegWriter(
-            fps=fps, codec='libx264',
-            extra_args=['-pix_fmt', 'yuv420p'])
+        if shutil.which('ffmpeg'):
+            writer = animation.FFMpegWriter(
+                fps=fps, codec='libx264',
+                extra_args=['-pix_fmt', 'yuv420p'])
+            anim.save(str(save_path), writer=writer, dpi=dpi)
+        else:
+            _save_animation_pyav(anim, save_path, fps, dpi)
     else:
         writer = animation.PillowWriter(fps=fps)
-    anim.save(str(save_path), writer=writer, dpi=dpi)
+        anim.save(str(save_path), writer=writer, dpi=dpi)
     print(f"Saved animation to {save_path}")
+
+
+def _save_animation_pyav(anim, save_path, fps, dpi=100):
+    """Save animation as MP4 using PyAV (when ffmpeg binary is unavailable)."""
+    import av
+    import io
+    fig = anim._fig
+    container = av.open(str(save_path), mode='w')
+    # Init + draw first frame to get dimensions
+    if anim._init_func:
+        anim._init_func()
+    anim._func(0)
+    fig.canvas.draw()
+    canvas_w, canvas_h = fig.canvas.get_width_height()
+    # Ensure even dimensions for H.264
+    w, h = canvas_w - canvas_w % 2, canvas_h - canvas_h % 2
+    stream = container.add_stream('libx264', rate=fps)
+    stream.width = w
+    stream.height = h
+    stream.pix_fmt = 'yuv420p'
+    n_frames = anim._save_count
+    for i in range(n_frames):
+        anim._func(i)
+        fig.canvas.draw()
+        raw = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        img = raw.reshape(canvas_h, canvas_w, 4)[:h, :w, :3].copy()
+        frame = av.VideoFrame.from_ndarray(img, format='rgb24')
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        if i % 500 == 0:
+            print(f"  Frame {i}/{n_frames}")
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()
 
 
 def load_episodes(data_path):
