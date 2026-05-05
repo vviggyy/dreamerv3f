@@ -84,19 +84,17 @@ Animation/worldview options: `--egocentric_view N`, `--view_half N`, `--window_t
 
 ### Decode Position (Standard)
 
-Trains linear decoders (Ridge regression and/or pRNN-style classification) to predict (x,y) from latent representations using cross-validation.
+Trains pRNN-style linear classification decoders to predict (x,y) from latent representations using cross-validation.
 
 ```sh
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./logdir/my_run/trajectories \
   --save ./logdir/my_run/decoder_results \
-  --method both --n_jobs -1
+  --n_jobs -1
 ```
 
 Key options:
-- `--method {regression,classification,both}` — decoder type
 - `--repr {deter,stoch,combined,all}` — which representation to decode
-- `--per_neuron / --no_per_neuron` — per-neuron R² analysis (regression only)
 - `--save_model` — save fitted decoders (needed for dream decode)
 - `--n_jobs N` — parallel workers (`-1` = all CPUs)
 - `--device {cpu,cuda}` — torch device for classification
@@ -104,7 +102,7 @@ Key options:
 - `--patience N` — early stopping patience (default 500, 0 = disable)
 - `--min_bbox N` — filter episodes with bounding-box area < N tiles² (0 = no filter)
 
-Outputs: `regression_summary.png`, `classification_*.png`, `probmap_*.png`, `per_neuron_r2.png`, `occupancy_vs_error_*.png`, `decode_results.pkl`.
+Outputs: `classification_*.png`, `probmap_*.png`, `occupancy_vs_error_*.png`, `decode_results.pkl`.
 
 ### Layer-wise Decoding
 
@@ -115,22 +113,17 @@ Scans every recorded layer (encoder, dynamics, policy, value) and produces a per
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories_train --test_data ./trajectories_test \
   --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1
+  --mode layers --device cuda --n_jobs -1
 
 # CV mode (single trajectory set, 5-fold KFold):
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1 --holdout_frac 0
-
-# Classification instead of Ridge (slower, uses Manhattan distance):
-MPLBACKEND=Agg python dreamerv3/decode_position.py \
-  --data ./trajectories --save ./decoder_results \
-  --mode layers --device cuda --n_jobs 8
+  --mode layers --device cuda --n_jobs -1 --holdout_frac 0
 
 # Save trained decoders for reuse:
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1 --save_model
+  --mode layers --device cuda --n_jobs -1 --save_model
 
 # Eval saved decoders on new data (no training):
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
@@ -139,9 +132,7 @@ MPLBACKEND=Agg python dreamerv3/decode_position.py \
 ```
 
 Layer-specific options:
-- `--ridge_layers` — use Ridge R² (fast) instead of classification Manhattan
 - `--max_samples N` — subsample timesteps (default 10000)
-- `--max_dims D` — truncated PCA before Ridge (default 256, critical for 4096-dim deter)
 - `--n_cv_folds N` — KFold folds (default 5)
 - `--holdout_frac F` — auto train/test split fraction (default 0.2, use 0 for CV mode)
 - `--test_data PATH` — separate held-out trajectory dir (overrides holdout_frac)
@@ -152,14 +143,14 @@ Outputs: `layer_comparison.png`, `layer_decode_results.pkl`, `layer_decode_check
 
 ### Dream Decode
 
-Applies a pretrained position decoder to imagined (dream) rollouts to test spatial coherence.
+Applies a pretrained classification position decoder to imagined (dream) rollouts to test spatial coherence.
 
 ```sh
 # Step 1: Save decoder model (if not done already)
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./logdir/my_run/trajectories \
   --save ./logdir/my_run/decoder_results \
-  --method both --save_model
+  --save_model
 
 # Step 2: Run dream decode
 python dreamerv3/main.py \
@@ -167,13 +158,13 @@ python dreamerv3/main.py \
   --logdir ./logdir/my_run \
   --script dream_decode \
   --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
-  --dream_decode.decoder_model ./logdir/my_run/decoder_results/ridge_deter.pkl \
+  --dream_decode.decoder_model ./logdir/my_run/decoder_results/classifier_deter.pkl \
   --dream_decode.save_path ./logdir/my_run/dream_results
 ```
 
-Options: `--dream_decode.num_batches N`, `--dream_decode.decoder_type {ridge,classifier}`, `--dream_decode.num_episodes N`.
+Options: `--dream_decode.num_batches N`, `--dream_decode.num_episodes N`.
 
-Outputs: `dream_trajectories_world.png`, `dream_probmap_*.png` (classifier only), `dream_vs_real.png`, `dream_results.pkl`.
+Outputs: `dream_trajectories_world.png`, `dream_probmap_*.png`, `dream_vs_real.png`, `dream_results.pkl`.
 
 ### Plot Training Progress
 

@@ -54,7 +54,6 @@ defaults:
   dream_decode:
     num_batches: 5
     decoder_model: ''
-    decoder_type: ridge
     save_path: ''
     num_episodes: 3
 

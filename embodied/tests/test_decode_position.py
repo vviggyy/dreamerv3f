@@ -5,8 +5,6 @@ trained models. Covers:
   - prepare_data: shapes, stoch flattening, grouping, skipping, alignment
   - LinearClassifier: shapes, softmax normalization, overfitting
   - classification_decode: shapes, proba normalization, beats shuffle
-  - ridge_decode_cv: shapes, keys, R² on linear data
-  - per_neuron_r2: shape
   - plot_probmap_on_world: smoke test (no crafter needed — tests graceful skip)
 """
 
@@ -19,12 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from dreamerv3.decode_position import (
     prepare_data,
-    ridge_decode_cv,
-    per_neuron_r2,
     plot_probmap_on_world,
-    train_full_ridge,
-    save_decoder_model,
-    load_decoder_model,
 )
 
 # Classification decoder and LinearClassifier require torch
@@ -282,79 +275,6 @@ def test_classification_decode_pred_within_grid():
 
 
 # ---------------------------------------------------------------------------
-# Ridge regression tests
-# ---------------------------------------------------------------------------
-
-def test_ridge_decode_cv_output_keys():
-    """ridge_decode_cv returns dict with expected keys."""
-    episodes = _make_episodes(n_eps=3, T=40, deter_dim=32)
-    deter, _, pos, groups = prepare_data(episodes)
-    result = ridge_decode_cv(deter, pos, groups)
-    expected_keys = {'fold_r2', 'fold_mae', 'overall_r2', 'overall_mae',
-                     'r2_x', 'r2_y', 'pred'}
-    assert set(result.keys()) == expected_keys, (
-        f"Missing keys: {expected_keys - set(result.keys())}")
-
-
-def test_ridge_decode_cv_pred_shape():
-    """Predicted positions have same shape as input positions."""
-    episodes = _make_episodes(n_eps=3, T=40, deter_dim=32)
-    deter, _, pos, groups = prepare_data(episodes)
-    result = ridge_decode_cv(deter, pos, groups)
-    assert result['pred'].shape == pos.shape, (
-        f"pred shape {result['pred'].shape} != pos shape {pos.shape}")
-
-
-def test_ridge_decode_cv_high_r2_on_linear_data():
-    """Ridge should achieve high R² on linearly-decodable positions."""
-    episodes = _make_episodes(n_eps=5, T=100, deter_dim=64)
-    deter, _, pos, groups = prepare_data(episodes)
-    result = ridge_decode_cv(deter, pos, groups)
-    assert result['overall_r2'] > 0.7, (
-        f"R²={result['overall_r2']:.3f} too low on linearly-decodable data")
-
-
-def test_ridge_decode_cv_fold_count():
-    """Number of folds equals number of episodes."""
-    n_eps = 4
-    episodes = _make_episodes(n_eps=n_eps, T=40, deter_dim=32)
-    deter, _, pos, groups = prepare_data(episodes)
-    result = ridge_decode_cv(deter, pos, groups)
-    assert len(result['fold_r2']) == n_eps, (
-        f"Expected {n_eps} folds, got {len(result['fold_r2'])}")
-    assert len(result['fold_mae']) == n_eps
-
-
-def test_ridge_decode_cv_r2_components():
-    """r2_x and r2_y should be between -inf and 1, overall should be their average."""
-    episodes = _make_episodes(n_eps=3, T=50, deter_dim=32)
-    deter, _, pos, groups = prepare_data(episodes)
-    result = ridge_decode_cv(deter, pos, groups)
-    assert result['r2_x'] <= 1.0, f"r2_x={result['r2_x']} > 1"
-    assert result['r2_y'] <= 1.0, f"r2_y={result['r2_y']} > 1"
-
-
-# ---------------------------------------------------------------------------
-# per_neuron_r2 tests
-# ---------------------------------------------------------------------------
-
-def test_per_neuron_r2_shape():
-    """per_neuron_r2 returns (n_features, 2) array."""
-    episodes = _make_episodes(n_eps=3, T=40, deter_dim=16)
-    deter, _, pos, groups = prepare_data(episodes)
-    r2 = per_neuron_r2(deter, pos, groups)
-    assert r2.shape == (16, 2), f"per_neuron_r2 shape: {r2.shape}"
-
-
-def test_per_neuron_r2_values_bounded():
-    """Per-neuron R² values should be <= 1.0."""
-    episodes = _make_episodes(n_eps=3, T=40, deter_dim=8)
-    deter, _, pos, groups = prepare_data(episodes)
-    r2 = per_neuron_r2(deter, pos, groups)
-    assert (r2 <= 1.0 + 1e-6).all(), f"R² > 1 found: max={r2.max():.4f}"
-
-
-# ---------------------------------------------------------------------------
 # plot_probmap_on_world smoke test
 # ---------------------------------------------------------------------------
 
@@ -414,28 +334,6 @@ def test_roundtrip_prepare_classify():
 # Decoder model save/load tests
 # ---------------------------------------------------------------------------
 
-def test_save_load_ridge_decoder():
-    """Train Ridge on synthetic data, save, reload, verify predictions match."""
-    import tempfile
-    from pathlib import Path
-    episodes = _make_episodes(n_eps=3, T=50, deter_dim=32)
-    deter, _, pos, _ = prepare_data(episodes)
-    model = train_full_ridge(deter, pos)
-    pred_before = model.predict(deter[:10])
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / 'ridge_test.pkl'
-        meta = {'grid': (32, 32), 'repr_name': 'deter', 'n_features': 32}
-        save_decoder_model(model, meta, path)
-        loaded_model, loaded_meta = load_decoder_model(path)
-
-    pred_after = loaded_model.predict(deter[:10])
-    np.testing.assert_allclose(pred_before, pred_after, atol=1e-6,
-                               err_msg="Ridge predictions differ after save/load")
-    assert loaded_meta['repr_name'] == 'deter'
-    assert loaded_meta['n_features'] == 32
-
-
 def test_save_load_classification_decoder():
     """Train classifier, save state_dict, reload, verify predictions match."""
     if not HAS_TORCH:
@@ -463,72 +361,9 @@ def test_save_load_classification_decoder():
     assert loaded_meta['n_units'] == n_units
 
 
-def test_saved_decoder_metadata():
-    """Verify saved pkl contains expected metadata keys."""
-    import tempfile
-    from pathlib import Path
-    episodes = _make_episodes(n_eps=2, T=30, deter_dim=16)
-    deter, _, pos, _ = prepare_data(episodes)
-    model = train_full_ridge(deter, pos)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        path = Path(tmpdir) / 'ridge_meta.pkl'
-        meta = {'grid': (32, 32), 'repr_name': 'deter',
-                'n_features': 16, 'type': 'ridge'}
-        save_decoder_model(model, meta, path)
-        _, loaded_meta = load_decoder_model(path)
-
-    for key in ('grid', 'repr_name', 'n_features'):
-        assert key in loaded_meta, f"Missing metadata key: {key}"
-
-
 # ---------------------------------------------------------------------------
 # Dream decode pipeline tests (synthetic, no JAX agent needed)
 # ---------------------------------------------------------------------------
-
-def test_decode_dream_deter_shapes():
-    """Synthetic dream deter decoded via Ridge → correct output shape."""
-    import tempfile
-    from pathlib import Path
-    deter_dim = 32
-    episodes = _make_episodes(n_eps=3, T=50, deter_dim=deter_dim)
-    deter, _, pos, _ = prepare_data(episodes)
-    model = train_full_ridge(deter, pos)
-
-    # Simulate dream deter: (N, H, D)
-    N, H = 10, 15
-    dream_deter = np.random.randn(N, H, deter_dim).astype(np.float32)
-    flat = dream_deter.reshape(-1, deter_dim)
-    decoded = model.predict(flat).reshape(N, H, 2)
-    assert decoded.shape == (N, H, 2), f"Decoded shape: {decoded.shape}"
-
-
-def test_decode_dream_positions_in_grid():
-    """Decoded dream positions from Ridge should be roughly within grid bounds."""
-    import tempfile
-    from pathlib import Path
-    deter_dim = 32
-    grid_w, grid_h = 32, 32
-    episodes = _make_episodes(n_eps=5, T=100, deter_dim=deter_dim,
-                               grid_w=grid_w, grid_h=grid_h)
-    deter, _, pos, _ = prepare_data(episodes)
-    model = train_full_ridge(deter, pos)
-
-    # Dream deter in a similar range to training data
-    N, H = 8, 15
-    rng = np.random.RandomState(42)
-    # Use positions near the grid and encode them
-    fake_pos = rng.uniform(2, grid_w - 2, (N * H, 2)).astype(np.float32)
-    W = rng.randn(2, deter_dim).astype(np.float32) * 0.5
-    dream_deter = (fake_pos @ W + rng.randn(N * H, deter_dim).astype(np.float32) * 0.1)
-    decoded = model.predict(dream_deter).reshape(N, H, 2)
-
-    # Should be roughly in grid range (allow some margin for extrapolation)
-    assert decoded[:, :, 0].min() > -10, f"x min too low: {decoded[:,:,0].min()}"
-    assert decoded[:, :, 0].max() < grid_w + 10, f"x max too high: {decoded[:,:,0].max()}"
-    assert decoded[:, :, 1].min() > -10, f"y min too low: {decoded[:,:,1].min()}"
-    assert decoded[:, :, 1].max() < grid_h + 10, f"y max too high: {decoded[:,:,1].max()}"
-
 
 def test_decode_dream_classification_proba():
     """Classifier on dream deter → proba shape (N, H, W, H_grid), sums to 1."""
@@ -556,33 +391,6 @@ def test_decode_dream_classification_proba():
                                err_msg="Dream proba grids don't sum to 1")
 
 
-def test_dream_trajectory_continuity():
-    """On smooth dream deter, decoded positions should be spatially continuous."""
-    deter_dim = 32
-    episodes = _make_episodes(n_eps=5, T=100, deter_dim=deter_dim,
-                               grid_w=32, grid_h=32)
-    deter, _, pos, _ = prepare_data(episodes)
-    model = train_full_ridge(deter, pos)
-
-    # Create smooth dream deter via linear interpolation
-    rng = np.random.RandomState(123)
-    W = rng.randn(2, deter_dim).astype(np.float32) * 0.5
-    H = 15
-    # Smooth trajectory: walk from one position to another
-    start_pos = np.array([10.0, 10.0])
-    end_pos = np.array([15.0, 15.0])
-    t = np.linspace(0, 1, H).reshape(-1, 1)
-    smooth_pos = start_pos + t * (end_pos - start_pos)
-    smooth_deter = smooth_pos @ W + rng.randn(H, deter_dim).astype(np.float32) * 0.05
-
-    decoded = model.predict(smooth_deter)  # (H, 2)
-    # Check step sizes are small (spatially continuous)
-    steps = np.sqrt(np.sum(np.diff(decoded, axis=0) ** 2, axis=1))
-    max_step = steps.max()
-    assert max_step < 5.0, (
-        f"Max step {max_step:.2f} too large for smooth dream trajectory")
-
-
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -606,28 +414,14 @@ if __name__ == '__main__':
         test_classification_decode_errors_nonnegative,
         test_classification_decode_beats_shuffle,
         test_classification_decode_pred_within_grid,
-        # ridge regression
-        test_ridge_decode_cv_output_keys,
-        test_ridge_decode_cv_pred_shape,
-        test_ridge_decode_cv_high_r2_on_linear_data,
-        test_ridge_decode_cv_fold_count,
-        test_ridge_decode_cv_r2_components,
-        # per_neuron_r2
-        test_per_neuron_r2_shape,
-        test_per_neuron_r2_values_bounded,
         # plotting
         test_probmap_on_world_no_crafter_graceful,
         # integration
         test_roundtrip_prepare_classify,
         # decoder model save/load
-        test_save_load_ridge_decoder,
         test_save_load_classification_decoder,
-        test_saved_decoder_metadata,
         # dream decode pipeline
-        test_decode_dream_deter_shapes,
-        test_decode_dream_positions_in_grid,
         test_decode_dream_classification_proba,
-        test_dream_trajectory_continuity,
     ]
 
     passed = failed = errors = 0

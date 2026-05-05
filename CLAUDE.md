@@ -6,8 +6,8 @@
 - `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size{1m,12m,25m,50m,100m,200m,400m}`, `debug`, `atari`, `atari100k`, `procgen`, `minecraft`, `dmlab`, `dmc_proprio`, `dmc_vision`, `bsuite`, `loconav`, `multicpu`
 - `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl. Auto-detects checkpoint from `logdir/ckpt/latest` if `--run.from_checkpoint` is empty. Inherits env settings from training run's saved `config.yaml`
 - `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, worldview, world_only, animations (GIF/MP4)
-- `dreamerv3/decode_position.py` — linear decoders (Ridge + classification) to predict (x,y) from deter/stoch. Two modes: `standard` (single-repr decoding with CV) and `layers` (per-layer comparison boxplot). Includes `plot_probmap_on_world` (P(pos) heatmap on world map) and `plot_occupancy_vs_error` (occupancy hotspots + Manhattan error scatter). `--save_model` saves fitted decoders for dream_decode. Layer metrics: `--ridge_layers` → R²; classification → mean Manhattan distance (tiles)
-- `dreamerv3/dream_decode.py` — applies pretrained position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories. Config: `--dream_decode.decoder_type {ridge,classifier}`
+- `dreamerv3/decode_position.py` — linear classification decoders to predict (x,y) from deter/stoch. Two modes: `standard` (single-repr decoding with CV) and `layers` (per-layer comparison boxplot). Includes `plot_probmap_on_world` (P(pos) heatmap on world map) and `plot_occupancy_vs_error` (occupancy hotspots + Manhattan error scatter). `--save_model` saves fitted decoders for dream_decode. Metric: mean Manhattan distance (tiles)
+- `dreamerv3/dream_decode.py` — applies pretrained classification position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
 - `dreamerv3/tuning_cluster.py` — dimensionality reduction clustering of tuning curves: PCA/t-SNE/UMAP on spatial autocorrelation maps + HDBSCAN clustering. Loads `tuning_results.pkl`, produces scree plots, 2D scatter plots colored by cluster/cell-type/SI, and example tuning curve grids per cluster. Requires `umap-learn` and `hdbscan` for full pipeline (graceful fallback to PCA+t-SNE if missing)
@@ -23,8 +23,8 @@
 - `run_Crafter.sh` — train model (H100, parametrized env/size/activation/wd). Saves `hyperparams.txt` to logdir
 - `run_Trajectory.sh` — eval trajectories (CPU, matches training hyperparams). Auto-resolves checkpoint from `$LOGDIR/ckpt/latest`
 - `run_Loop.sh` — full pipeline: train → eval trajectory → plot → layer decoding → tuning (A100). Saves `hyperparams.txt`
-- `run_Decoding.sh` — standard position decoding (GPU). Settings: method, repr, device, n_jobs
-- `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, ridge/classification, holdout, resume
+- `run_Decoding.sh` — standard position decoding (GPU). Settings: repr, device, n_jobs
+- `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, holdout, resume
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
 - `run_Clustering.sh` — tuning curve clustering via PCA/t-SNE/UMAP + HDBSCAN (CPU, day partition). Settings: FROM_PKL, n_components, perplexity, umap_neighbors, min_cluster_size
@@ -43,8 +43,8 @@ Training runs also produce:
 - **crafter area**: `crafter_small` uses `area=[32,32]` not default 64x64. plot_trajectories.py reads area from metadata
 - **seed flow**: `--seed` sets `config.seed` (default 0). `make_env` computes `env_seed = hash((config.seed, env_index))`. Crafter world seed = `hash((env_seed, episode_number))`. `fixed_seed=True` resets episode_number to 0 each reset → same world. `fixed_seed=False` increments naturally → different world each episode. Different `--seed` → different world even with `fixed_seed=True`
 - **egocentric_view**: must be an odd integer (e.g. 7). `egocentric_view=0` disables it (default). Set in configs.yaml under `env.crafter.egocentric_view` or pass `--env.crafter.egocentric_view 7`
-- **layer decode checkpoint**: checkpoint files record which metric was used (`r2`, `manhattan`, `ce_loss`). Mismatched metric triggers a warning and checkpoint is ignored — delete stale checkpoint if switching modes
-- **layer decode metric**: `--ridge_layers` → R²; classification (no flag) → mean Manhattan distance in tiles (joint x,y, lower = better)
+- **layer decode checkpoint**: checkpoint files record which metric was used (`manhattan`, `ce_loss`). Mismatched metric triggers a warning and checkpoint is ignored — delete stale checkpoint if switching modes
+- **layer decode metric**: mean Manhattan distance in tiles (joint x,y, lower = better)
 - **layer decode holdout default**: `--holdout_frac` defaults to 0.2 (auto 80/20 episode split, no CV). Use `--holdout_frac 0` for CV mode. Classification uses Manhattan-based early stopping on a validation split (not CE loss)
 
 ## commands
@@ -80,9 +80,9 @@ Drop MPLBACKEND=Agg if running with display. Plot types: trajectories, heatmap, 
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./logdir/my_run/trajectories \
   --save ./logdir/my_run/decoder_results \
-  --method both --n_jobs -1
+  --n_jobs -1
 ```
-Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Key args: `--repr {deter,stoch,combined,all}`, `--no_per_neuron`, `--save_model`, `--n_jobs N`, `--device cuda`, `--n_iters N` (default 5000), `--patience N` (default 500), `--min_bbox N`.
+Uses pRNN-style classification (linear layer + CrossEntropyLoss over grid cells). Key args: `--repr {deter,stoch,combined,all}`, `--save_model`, `--n_jobs N`, `--device cuda`, `--n_iters N` (default 5000), `--patience N` (default 500), `--min_bbox N`.
 
 ### layer-wise decoding
 
@@ -91,15 +91,15 @@ Methods: regression (Ridge), classification (pRNN-style cross-entropy), both. Ke
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories_train --test_data ./trajectories_test \
   --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1
+  --mode layers --n_jobs -1 --device cuda
 ```
-Trains Ridge on `--data`, evaluates on `--test_data`. No folds at all. Completes in seconds.
+Trains classifier on `--data`, evaluates on `--test_data`. No folds at all.
 
 **Save trained decoders for reuse:**
 ```
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1 --save_model
+  --mode layers --n_jobs -1 --device cuda --save_model
 ```
 After decoding, retrains each layer on full data and saves to `<save>/layer_decoders/` (per-layer `.pkl` files + `manifest.pkl`).
 
@@ -115,10 +115,10 @@ Loads pretrained decoders, evaluates on `--data`, produces `layer_comparison.png
 ```
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./trajectories --save ./decoder_results \
-  --mode layers --ridge_layers --n_jobs -1 --holdout_frac 0
+  --mode layers --n_jobs -1 --device cuda --holdout_frac 0
 ```
 Uses 5-fold KFold (NOT LOGO — LOGO creates O(N_eps × N_layers) jobs, crushingly slow with randspawn).
-Key args: `--max_samples 10000`, `--max_dims 256` (truncated PCA, critical for 4096-dim deter), `--n_cv_folds 5`.
+Key args: `--max_samples 10000`, `--n_cv_folds 5`.
 
 ### dream decode
 ```
@@ -126,7 +126,7 @@ Key args: `--max_samples 10000`, `--max_dims 256` (truncated PCA, critical for 4
 MPLBACKEND=Agg python dreamerv3/decode_position.py \
   --data ./logdir/my_run/trajectories \
   --save ./logdir/my_run/decoder_results \
-  --method both --save_model
+  --save_model
 
 # Step 2: Run dream decode
 python dreamerv3/main.py \
@@ -134,11 +134,11 @@ python dreamerv3/main.py \
   --logdir ./logdir/my_run \
   --script dream_decode \
   --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
-  --dream_decode.decoder_model ./logdir/my_run/decoder_results/ridge_deter.pkl \
+  --dream_decode.decoder_model ./logdir/my_run/decoder_results/classifier_deter.pkl \
   --dream_decode.save_path ./logdir/my_run/dream_results
 ```
-Outputs: dream_trajectories_world.png, dream_probmap_*.png (classifier only), dream_vs_real.png, dream_results.pkl
-Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.decoder_type {ridge,classifier}`, `--dream_decode.num_episodes N`.
+Outputs: dream_trajectories_world.png, dream_probmap_*.png, dream_vs_real.png, dream_results.pkl
+Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.num_episodes N`.
 
 ### replay activations (untrained control)
 ```

@@ -1,27 +1,20 @@
 """
 Position decoder for DreamerV3 world model representations.
 
-Trains linear decoders to predict agent (x, y) position from world model
-latent states (deter, stoch, or both), following the approach in the pRNN
-repo (LinearDecoder.py). Supports both classification (cross-entropy over
-grid cells, as in pRNN) and Ridge regression.
+Trains linear classification decoders to predict agent (x, y) position from
+world model latent states (deter, stoch, or both), following the approach in
+the pRNN repo (LinearDecoder.py). Uses cross-entropy over grid cells.
 
 Usage:
   python dreamerv3/decode_position.py \
     --data ./logdir/crafter_small_1m/trajectories \
-    --save ./logdir/crafter_small_1m/decoder_results \
-    --method both
+    --save ./logdir/crafter_small_1m/decoder_results
 
   # Parallel on a GPU cluster (8 CPU workers, classification on CUDA):
   python dreamerv3/decode_position.py \
     --data ./logdir/crafter_small_1m/trajectories \
     --save ./logdir/crafter_small_1m/decoder_results \
-    --method both --n_jobs 8 --device cuda
-
-Methods:
-  classification  - pRNN-style: linear layer, CrossEntropyLoss over grid cells
-  regression      - Ridge regression (sklearn), predicts continuous (x, y)
-  both            - Run both methods
+    --n_jobs 8 --device cuda
 
 Parallelism:
   --n_jobs N      - Parallel workers. All (layer, fold) pairs are submitted as
@@ -32,23 +25,12 @@ Parallelism:
                     distributed across all available GPUs. (default: cpu)
 
 Layer-wise decoding (--mode layers):
-  --ridge_layers  - Use Ridge regression (closed-form, no GPU) instead of the
-                    PyTorch classifier. ~100x faster; metric becomes R² instead
-                    of CE loss. Recommended for initial/cluster runs.
   --resume PATH   - Resume from a partial checkpoint. Already-finished layers
                     are skipped. Auto-checkpoint is always saved to
                     <save>/layer_decode_checkpoint.pkl.
 
   --max_samples N - Subsample to N timesteps before fitting (eliminates O(N)
                     scaling). Default 10000. Set 0 to use all data.
-  --max_dims D    - Truncated PCA to D dims before Ridge (eliminates O(D²)
-                    scaling). Default 256. Set 0 to disable.
-
-Fast cluster command (completes in minutes):
-  python dreamerv3/decode_position.py \\
-    --data ./trajectories --save ./decoder_results \\
-    --mode layers --ridge_layers --n_jobs -1 \\
-    --max_samples 10000 --max_dims 256
 """
 
 import argparse
@@ -62,8 +44,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from joblib import Parallel, delayed
-from sklearn.linear_model import RidgeCV
-from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.model_selection import LeaveOneGroupOut
 
 # ---------------------------------------------------------------------------
@@ -399,32 +379,6 @@ def classification_decode(X, pos, groups, width, height, n_iters=5000,
 # Decoder model save/load (for dream_decode.py)
 # ---------------------------------------------------------------------------
 
-def train_full_ridge(X, pos):
-    """Train RidgeCV on ALL data (no CV split). Returns fitted model."""
-    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
-    model.fit(X, pos)
-    return model
-
-
-def save_decoder_model(model, metadata, path):
-    """Save a fitted decoder model + metadata to a pickle file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'wb') as f:
-        pickle.dump({'model': model, 'metadata': metadata}, f)
-    print(f"  Saved decoder model to {path}")
-
-
-def load_decoder_model(path):
-    """Load a decoder model + metadata from a pickle file.
-
-    Returns (model, metadata) dict.
-    """
-    with open(path, 'rb') as f:
-        data = pickle.load(f)
-    return data['model'], data['metadata']
-
-
 def save_classifier_model(clf, metadata, path):
     """Save a LinearClassifier's state_dict + metadata."""
     if not HAS_TORCH:
@@ -461,18 +415,19 @@ def load_classifier_model(path):
 
 def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
                         n_iters=50000, device='cpu', n_jobs=1, patience=500,
-                        ridge=False, max_dims=256, ep_file_index=None):
-    """Retrain one decoder per layer on ALL data and save to disk.
+                        ep_file_index=None, train_mask=None):
+    """Retrain one classifier decoder per layer on ALL data and save to disk.
 
     Saves:
       <save_dir>/layer_decoders/<layer_safe_name>.pkl  (one per layer)
       <save_dir>/layer_decoders/manifest.pkl           (metadata)
 
     Args:
-        ridge: If True, save Ridge models. If False, save classifiers.
         ep_file_index: If provided, reload layers one-at-a-time from files
             to avoid OOM. ``layers`` may be empty/None in this case but
             must still provide layer_sizes via a prior pass.
+        train_mask: Boolean mask to select training samples when reloading
+            from ep_file_index (needed when holdout split was applied).
     """
     import gc as _gc
     out_dir = Path(save_dir) / 'layer_decoders'
@@ -496,75 +451,43 @@ def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
             return layers[ln]
         if ep_file_index is not None:
             X, _, _ = reload_layer_from_files(ep_file_index, ln)
+            if train_mask is not None:
+                X = X[train_mask]
             return X
         raise KeyError(f"Layer {ln} not in layers dict and no ep_file_index")
 
     layer_files = {}
-    svds = {}
 
-    if ridge:
-        # PCA reduction — needs all layers in memory for SVD
-        if not layers:
-            # Reload all for PCA (unavoidable)
-            layers = {ln: _get_layer(ln) for ln in ordered}
-        layers_pca, svds = _pca_layers(layers, max_dims, n_jobs=n_jobs)
-        for ln in ordered:
-            safe = ln.replace('/', '_')
-            X = layers_pca[ln]
-            if ln not in layer_sizes:
-                layer_sizes[ln] = layers[ln].shape[1]
-            model = RidgeCV(alphas=np.logspace(-2, 4, 20))
-            model.fit(X, pos)
-            fname = f'{safe}.pkl'
-            path = out_dir / fname
-            meta = {
-                'layer_name': ln, 'n_units': X.shape[1],
-                'type': 'ridge', 'grid': (width, height),
-            }
-            save_decoder_model(model, meta, path)
-            layer_files[ln] = fname
-            print(f"  Saved Ridge decoder: {ln} → {path}")
-    else:
-        if not HAS_TORCH:
-            raise RuntimeError("torch required to save classifier layer decoders")
-        for i, ln in enumerate(ordered):
-            safe = ln.replace('/', '_')
-            X = _get_layer(ln)
-            if ln not in layer_sizes:
-                layer_sizes[ln] = X.shape[1]
-            clf = LinearClassifier(X.shape[1], width * height, device=device)
-            print(f"  [{i+1}/{len(ordered)}] Training full classifier on "
-                  f"{ln} ({X.shape[1]} dims)...")
-            clf.fit(X, y_cls, n_iters=n_iters, verbose=False, patience=patience)
-            fname = f'{safe}.pkl'
-            path = out_dir / fname
-            meta = {
-                'layer_name': ln, 'n_units': X.shape[1],
-                'n_classes': width * height, 'width': width, 'height': height,
-                'type': 'classifier', 'grid': (width, height),
-            }
-            save_classifier_model(clf, meta, path)
-            layer_files[ln] = fname
-            print(f"  Saved classifier decoder: {ln} → {path}")
-            del X, clf
-            _gc.collect()
-
-    # Save PCA transforms if any
-    svd_files = {}
-    for ln, svd in svds.items():
+    if not HAS_TORCH:
+        raise RuntimeError("torch required to save classifier layer decoders")
+    for i, ln in enumerate(ordered):
         safe = ln.replace('/', '_')
-        svd_fname = f'{safe}_pca.pkl'
-        with open(out_dir / svd_fname, 'wb') as f:
-            pickle.dump(svd, f)
-        svd_files[ln] = svd_fname
+        X = _get_layer(ln)
+        if ln not in layer_sizes:
+            layer_sizes[ln] = X.shape[1]
+        clf = LinearClassifier(X.shape[1], width * height, device=device)
+        print(f"  [{i+1}/{len(ordered)}] Training full classifier on "
+              f"{ln} ({X.shape[1]} dims)...")
+        clf.fit(X, y_cls, n_iters=n_iters, verbose=False, patience=patience)
+        fname = f'{safe}.pkl'
+        path = out_dir / fname
+        meta = {
+            'layer_name': ln, 'n_units': X.shape[1],
+            'n_classes': width * height, 'width': width, 'height': height,
+            'type': 'classifier', 'grid': (width, height),
+        }
+        save_classifier_model(clf, meta, path)
+        layer_files[ln] = fname
+        print(f"  Saved classifier decoder: {ln} → {path}")
+        del X, clf
+        _gc.collect()
 
     manifest = {
         'ordered': ordered,
         'grid': (width, height),
-        'metric': 'r2' if ridge else 'manhattan',
-        'decoder_type': 'ridge' if ridge else 'classifier',
+        'metric': 'manhattan',
+        'decoder_type': 'classifier',
         'layer_files': layer_files,
-        'svd_files': svd_files,
         'layer_sizes': layer_sizes,
         'n_train_samples': len(pos),
     }
@@ -586,7 +509,7 @@ def eval_layer_decoders(from_model_dir, layers, pos, width, height):
     Returns:
         layer_values: dict {layer_name: [metric_value]}
         ordered: list of layer names
-        metric: 'r2' or 'manhattan'
+        metric: 'manhattan'
     """
     from_dir = Path(from_model_dir)
     manifest_path = from_dir / 'manifest.pkl'
@@ -596,10 +519,8 @@ def eval_layer_decoders(from_model_dir, layers, pos, width, height):
         manifest = pickle.load(f)
 
     ordered = manifest['ordered']
-    decoder_type = manifest['decoder_type']
     metric = manifest['metric']
     layer_files = manifest['layer_files']
-    svd_files = manifest.get('svd_files', {})
     train_grid = manifest['grid']
 
     if train_grid != (width, height):
@@ -617,168 +538,26 @@ def eval_layer_decoders(from_model_dir, layers, pos, width, height):
     pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
 
     layer_values = {}
-    print(f"  Evaluating {len(available)} layers ({decoder_type})...")
+    print(f"  Evaluating {len(available)} layers (classifier)...")
 
     for ln in available:
         fpath = from_dir / layer_files[ln]
         X = layers[ln]
-
-        if decoder_type == 'ridge':
-            # Apply saved PCA if exists
-            if ln in svd_files:
-                svd_path = from_dir / svd_files[ln]
-                with open(svd_path, 'rb') as f:
-                    svd = pickle.load(f)
-                X = svd.transform(X).astype(np.float32)
-            model, meta = load_decoder_model(fpath)
-            pred = model.predict(X)
-            r2 = r2_score(pos, pred, multioutput='uniform_average')
-            layer_values[ln] = [r2]
-            print(f"  {ln}: R²={r2:.4f}")
-        else:
-            clf, meta = load_classifier_model(fpath)
-            clf.model.eval()
-            pred_cls = clf.predict(X)
-            w, h = meta['width'], meta['height']
-            pred_xy = np.stack(np.unravel_index(pred_cls, (w, h)), axis=1)
-            manhattan = np.sum(np.abs(pred_xy - pos_int), axis=1).mean()
-            layer_values[ln] = [float(manhattan)]
-            print(f"  {ln}: decode error={manhattan:.3f} tiles")
+        clf, meta = load_classifier_model(fpath)
+        clf.model.eval()
+        pred_cls = clf.predict(X)
+        w, h = meta['width'], meta['height']
+        pred_xy = np.stack(np.unravel_index(pred_cls, (w, h)), axis=1)
+        manhattan = np.sum(np.abs(pred_xy - pos_int), axis=1).mean()
+        layer_values[ln] = [float(manhattan)]
+        print(f"  {ln}: decode error={manhattan:.3f} tiles")
 
     return layer_values, available, metric
 
 
 # ---------------------------------------------------------------------------
-# Ridge regression decoder
-# ---------------------------------------------------------------------------
-
-def _ridge_fold(fold, train_idx, test_idx, X, pos):
-    """Run a single Ridge CV fold. Returns (fold, test_idx, train_idx, pred, train_pred, r2, mae)."""
-    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
-    model.fit(X[train_idx], pos[train_idx])
-    pred = model.predict(X[test_idx])
-    train_pred = model.predict(X[train_idx])
-    r2 = r2_score(pos[test_idx], pred, multioutput='uniform_average')
-    mae = mean_absolute_error(pos[test_idx], pred)
-    print(f"  Fold {fold+1}: R²={r2:.4f}  MAE={mae:.3f}")
-    return fold, test_idx, train_idx, pred, train_pred, r2, mae
-
-
-def ridge_decode_cv(X, pos, groups, n_jobs=1):
-    """Leave-one-episode-out Ridge regression.  Returns R², MAE per fold
-    and overall, plus per-neuron R² (univariate decoding per feature).
-
-    Args:
-        n_jobs: Number of parallel fold workers. Use -1 for all CPUs.
-    """
-    logo = LeaveOneGroupOut()
-    splits = list(logo.split(X, pos, groups))
-
-    results = Parallel(n_jobs=n_jobs, prefer='processes')(
-        delayed(_ridge_fold)(fold, train_idx, test_idx, X, pos)
-        for fold, (train_idx, test_idx) in enumerate(splits)
-    )
-
-    pred_all = np.zeros_like(pos)
-    # For train predictions, average across folds where each sample was in train set
-    train_pred_sum = np.zeros_like(pos)
-    train_pred_count = np.zeros(len(pos))
-    fold_r2, fold_mae = [], []
-    for fold, test_idx, train_idx, pred, train_pred, r2, mae in sorted(results, key=lambda x: x[0]):
-        pred_all[test_idx] = pred
-        train_pred_sum[train_idx] += train_pred
-        train_pred_count[train_idx] += 1
-        fold_r2.append(r2)
-        fold_mae.append(mae)
-
-    # Average train predictions (each sample appears in N-1 folds as train)
-    train_pred_all = train_pred_sum / np.maximum(train_pred_count, 1)[:, None]
-
-    overall_r2 = r2_score(pos, pred_all, multioutput='uniform_average')
-    overall_mae = mean_absolute_error(pos, pred_all)
-    r2_x = r2_score(pos[:, 0], pred_all[:, 0])
-    r2_y = r2_score(pos[:, 1], pred_all[:, 1])
-    return {
-        'fold_r2': fold_r2, 'fold_mae': fold_mae,
-        'overall_r2': overall_r2, 'overall_mae': overall_mae,
-        'r2_x': r2_x, 'r2_y': r2_y,
-        'pred': pred_all,
-        'train_pred': train_pred_all,
-    }
-
-
-def _per_neuron_one(j, X_col, pos, groups):
-    """Decode (x,y) from a single neuron. Returns (j, r2_x, r2_y)."""
-    logo = LeaveOneGroupOut()
-    xj = X_col.reshape(-1, 1)
-    pred = np.zeros_like(pos)
-    for train_idx, test_idx in logo.split(xj, pos, groups):
-        model = RidgeCV(alphas=np.logspace(-2, 4, 10))
-        model.fit(xj[train_idx], pos[train_idx])
-        pred[test_idx] = model.predict(xj[test_idx])
-    r2_x = r2_score(pos[:, 0], pred[:, 0])
-    r2_y = r2_score(pos[:, 1], pred[:, 1])
-    return j, r2_x, r2_y
-
-
-def per_neuron_r2(X, pos, groups, n_jobs=1):
-    """Decode (x,y) from each individual neuron.  Returns (n_features, 2)
-    array of R² values [r2_x, r2_y] per neuron.
-
-    Args:
-        n_jobs: Number of parallel workers. Use -1 for all CPUs.
-            Each neuron is an independent job, so this parallelizes well.
-    """
-    n_feat = X.shape[1]
-    results = Parallel(n_jobs=n_jobs, prefer='processes')(
-        delayed(_per_neuron_one)(j, X[:, j], pos, groups)
-        for j in range(n_feat)
-    )
-    r2 = np.full((n_feat, 2), np.nan)
-    for j, r2_x, r2_y in results:
-        r2[j] = [r2_x, r2_y]
-    return r2
-
-
-# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
-
-def plot_regression_summary(results, layer_name, save_dir, pos):
-    """Bar chart of R² per representation + decoded vs true scatter."""
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-
-    # R² bars
-    ax = axes[0]
-    names = list(results.keys())
-    r2s = [results[n]['overall_r2'] for n in names]
-    colors = ['#2196F3', '#4CAF50', '#FF9800'][:len(names)]
-    ax.bar(names, r2s, color=colors)
-    ax.set_ylabel('R² (cross-validated)')
-    ax.set_title(f'Position decoding: {layer_name}')
-    ax.set_ylim(0, max(1, max(r2s) * 1.15))
-    for i, v in enumerate(r2s):
-        ax.text(i, v + 0.01, f'{v:.3f}', ha='center', fontsize=9)
-
-    # Decoded vs true (best model)
-    best = max(results, key=lambda k: results[k]['overall_r2'])
-    pred = results[best]['pred']
-    for dim, label in enumerate(['x', 'y']):
-        ax = axes[dim + 1]
-        ax.scatter(pos[:, dim], pred[:, dim], s=4, alpha=0.5)
-        lo = min(pos[:, dim].min(), pred[:, dim].min()) - 1
-        hi = max(pos[:, dim].max(), pred[:, dim].max()) + 1
-        ax.plot([lo, hi], [lo, hi], 'k--', lw=0.8)
-        r2_dim = r2_score(pos[:, dim], pred[:, dim])
-        ax.set_xlabel(f'True {label}')
-        ax.set_ylabel(f'Decoded {label}')
-        ax.set_title(f'{best} → {label}  (R²={r2_dim:.3f})')
-
-    fig.tight_layout()
-    fig.savefig(save_dir / f'regression_summary.svg', bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved regression_summary.svg")
-
 
 def plot_classification_summary(errors, shuffle, layer_name, save_dir):
     """Histogram of Manhattan decoding error vs shuffle."""
@@ -1035,7 +814,7 @@ def _plot_diff_row(axes, test_stats, train_stats, width, height,
 
 
 def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
-                            repr_name='deter', method='ridge',
+                            repr_name='deter', method='classification',
                             metadata=None,
                             train_pos=None, train_pred=None):
     """Occupancy-vs-error figure.
@@ -1247,71 +1026,6 @@ def plot_probmap_on_world(proba_all, pos, groups, metadata, layer_name,
     fig.savefig(out, bbox_inches='tight', facecolor='#1a1a1a')
     plt.close(fig)
     print(f"  Saved {out.name}")
-
-
-def plot_per_neuron(r2_deter, r2_stoch, save_dir):
-    """Scatter of per-neuron R² for x and y, for deter and stoch."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    for ax, r2_arr, name in [(axes[0], r2_deter, 'deter'),
-                              (axes[1], r2_stoch, 'stoch')]:
-        r2_mean = r2_arr.mean(axis=1)  # average of r2_x, r2_y
-        order = np.argsort(r2_mean)[::-1]
-        ax.scatter(r2_arr[:, 0], r2_arr[:, 1], s=8, alpha=0.6)
-        ax.set_xlabel('R² (x)')
-        ax.set_ylabel('R² (y)')
-        ax.set_title(f'Per-neuron decoding: {name} (n={len(r2_arr)})')
-        ax.axhline(0, color='grey', lw=0.5)
-        ax.axvline(0, color='grey', lw=0.5)
-        # Annotate top 5
-        for rank in range(min(5, len(order))):
-            j = order[rank]
-            ax.annotate(f'{j}', (r2_arr[j, 0], r2_arr[j, 1]), fontsize=7)
-    fig.tight_layout()
-    fig.savefig(save_dir / 'per_neuron_r2.svg', bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved per_neuron_r2.svg")
-
-
-def plot_top_neurons(r2_arr, name, pos, X, groups, save_dir, top_n=6):
-    """Plot spatial tuning maps for the top-N decoded neurons."""
-    r2_mean = r2_arr.mean(axis=1)
-    order = np.argsort(r2_mean)[::-1]
-    n = min(top_n, len(order))
-    fig, axes = plt.subplots(2, n, figsize=(3.5 * n, 7))
-    if n == 1:
-        axes = axes.reshape(2, 1)
-    for col in range(n):
-        j = order[col]
-        # Top row: activation heatmap (mean activation per position bin)
-        ax = axes[0, col]
-        xbins = np.arange(int(pos[:, 0].min()), int(pos[:, 0].max()) + 2)
-        ybins = np.arange(int(pos[:, 1].min()), int(pos[:, 1].max()) + 2)
-        from scipy.stats import binned_statistic_2d
-        stat = binned_statistic_2d(
-            pos[:, 0], pos[:, 1], X[:, j],
-            statistic='mean', bins=[xbins, ybins])
-        im = ax.imshow(stat.statistic.T, origin='lower', aspect='equal',
-                       cmap='viridis')
-        ax.set_title(f'{name}[{j}]\nR²={r2_mean[j]:.3f}', fontsize=9)
-        plt.colorbar(im, ax=ax, fraction=0.046)
-
-        # Bottom row: activation timeseries colored by episode
-        ax = axes[1, col]
-        unique_groups = np.unique(groups)
-        for g in unique_groups:
-            mask = groups == g
-            ax.plot(np.where(mask)[0], X[mask, j], lw=0.5, alpha=0.7,
-                    label=f'ep{int(g)+1}')
-        ax.set_xlabel('Timestep')
-        ax.set_ylabel('Activation')
-        if col == 0:
-            ax.legend(fontsize=6)
-
-    fig.suptitle(f'Top-{n} spatially informative {name} neurons', fontsize=12)
-    fig.tight_layout()
-    fig.savefig(save_dir / f'top_neurons_{name}.svg', bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved top_neurons_{name}.svg")
 
 
 # ---------------------------------------------------------------------------
@@ -1574,15 +1288,6 @@ def decode_layers_classification_holdout(
     return layer_values, ordered, loss_histories, layer_pred_xy, layer_proba, layer_train_pred_xy
 
 
-def _layer_ridge_fold(layer_name, fold, train_idx, test_idx, X, pos):
-    """Run one Ridge fold for a single layer. Returns (layer_name, fold, r2)."""
-    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
-    model.fit(X[train_idx], pos[train_idx])
-    pred = model.predict(X[test_idx])
-    r2 = r2_score(pos[test_idx], pred, multioutput='uniform_average')
-    return layer_name, fold, r2
-
-
 def _ordered_layers(layers):
     ordered = [ln for ln in LAYER_ORDER if ln in layers]
     ordered += sorted(k for k in layers if k not in LAYER_ORDER)
@@ -1630,222 +1335,6 @@ def _subsample_layers(layers, pos, groups, max_samples, seed=42):
           f"(~{per_g} per episode, {len(unique_g)} episodes)")
     layers = {ln: arr[keep] for ln, arr in layers.items()}
     return layers, pos[keep], groups[keep]
-
-
-def _pca_one_layer(ln, arr, max_dims, seed=42):
-    """Fit randomized truncated SVD on one layer.
-
-    Returns (ln, reduced_arr, fitted_svd) so the SVD can be reused to
-    transform a held-out test set.
-    """
-    from sklearn.decomposition import TruncatedSVD
-    svd = TruncatedSVD(n_components=max_dims, random_state=seed, n_iter=4)
-    reduced = svd.fit_transform(arr).astype(np.float32)
-    return ln, reduced, svd
-
-
-def _pca_layers(layers, max_dims, n_jobs=1, seed=42):
-    """Reduce each layer to at most max_dims via randomized truncated SVD.
-
-    Runs all layers in parallel (each SVD is independent).
-    Returns (reduced_layers dict, svd_dict) where svd_dict maps layer name
-    to fitted TruncatedSVD (for transforming a held-out test set).
-    PCA is fit on training data only; call svd.transform(test_X) for test.
-    """
-    if max_dims <= 0:
-        return layers, {}
-    to_reduce = {ln: arr for ln, arr in layers.items()
-                 if arr.shape[1] > max_dims}
-    if not to_reduce:
-        return layers, {}
-
-    print(f"  PCA: reducing {len(to_reduce)} layers to {max_dims} dims "
-          f"(parallel, n_jobs={n_jobs})")
-    results = Parallel(n_jobs=n_jobs, prefer='threads')(
-        delayed(_pca_one_layer)(ln, arr, max_dims, seed)
-        for ln, arr in to_reduce.items()
-    )
-    out = dict(layers)
-    svds = {}
-    for ln, reduced, svd in results:
-        out[ln] = reduced
-        svds[ln] = svd
-        print(f"    {ln}: {layers[ln].shape[1]} → {max_dims} dims")
-    return out, svds
-
-
-def _layer_ridge_holdout_one(ln, X_train, pos_train, X_test, pos_test):
-    """Fit Ridge on train, evaluate R² on test. Returns (ln, r2, mae, pred_test, pred_train)."""
-    model = RidgeCV(alphas=np.logspace(-2, 4, 20))
-    model.fit(X_train, pos_train)
-    pred = model.predict(X_test)
-    pred_train = model.predict(X_train)
-    r2 = r2_score(pos_test, pred, multioutput='uniform_average')
-    mae = mean_absolute_error(pos_test, pred)
-    return ln, r2, mae, pred, pred_train
-
-
-def decode_layers_ridge_holdout(layers_train, pos_train,
-                                layers_test, pos_test,
-                                n_jobs=1, max_samples=0, max_dims=256):
-    """Fit Ridge on train trajectories, evaluate on held-out test trajectories.
-
-    No cross-validation. Faster and simpler than CV when you have two
-    separate trajectory sets. PCA is fit on train, applied to test.
-
-    Args:
-        max_samples: Subsample train set to at most this many timesteps.
-            Set to 0 to use all. (default: 0, use all for held-out mode)
-        max_dims: Truncated PCA before Ridge. (default: 256)
-
-    Returns:
-        results: dict {layer_name: {'r2': float, 'mae': float}}
-        ordered: list of layer names in display order
-    """
-    ordered = _ordered_layers(layers_train)
-    # Only keep layers present in both sets
-    ordered = [ln for ln in ordered
-               if ln in layers_train and ln in layers_test]
-
-    dummy_groups = np.zeros(len(pos_train))
-    layers_tr, pos_tr, _ = _subsample_layers(
-        layers_train, pos_train, dummy_groups, max_samples)
-
-    layers_tr, svds = _pca_layers(layers_tr, max_dims, n_jobs=n_jobs)
-
-    # Apply same PCA to test set
-    layers_te = {}
-    for ln in ordered:
-        arr = layers_test[ln]
-        if ln in svds:
-            arr = svds[ln].transform(arr).astype(np.float32)
-        layers_te[ln] = arr
-
-    print(f"  Train: {len(pos_tr)} steps  Test: {len(pos_test)} steps")
-    print(f"  Fitting {len(ordered)} layers in parallel (n_jobs={n_jobs})")
-
-    raw = Parallel(n_jobs=n_jobs, prefer='threads')(
-        delayed(_layer_ridge_holdout_one)(
-            ln, layers_tr[ln], pos_tr, layers_te[ln], pos_test)
-        for ln in ordered
-    )
-
-    results = {}
-    layer_pred_xy = {}
-    layer_train_pred_xy = {}
-    for ln, r2, mae, pred_test, pred_train in raw:
-        results[ln] = {'r2': r2, 'mae': mae}
-        layer_pred_xy[ln] = pred_test
-        layer_train_pred_xy[ln] = pred_train
-        print(f"  {ln}: R²={r2:.4f}  MAE={mae:.3f}")
-
-    return results, ordered, layer_pred_xy, layer_train_pred_xy
-
-
-def decode_layers_ridge(layers, pos, groups, n_jobs=1, checkpoint_path=None,
-                        max_samples=10000, max_dims=256, n_cv_folds=5):
-    """Fast layer scan using Ridge regression (closed-form, no GPU needed).
-
-    Applies subsampling (max_samples) and truncated PCA (max_dims) before
-    fitting so that runtime is independent of raw layer dimensionality.
-    For deter (4096 dims) with max_dims=256 and max_samples=10000, each
-    Ridge fold completes in ~1 second; total run in minutes on any CPU.
-
-    All (layer, fold) pairs run as one flat parallel pool with threads
-    (Ridge/BLAS releases the GIL; threads avoid subprocess pickling overhead).
-
-    Args:
-        max_samples: Subsample to at most this many timesteps before fitting.
-            Set to 0 to disable. Default 10000.
-        max_dims: Reduce features to this many dims via truncated PCA.
-            Set to 0 to disable. Default 256.
-        n_cv_folds: Number of cross-validation folds. Default 5. LOGO
-            (leave-one-episode-out) is NOT used because with many episodes
-            it creates O(N_episodes) folds which dominates runtime.
-        checkpoint_path: Auto-save partial results here; load on startup to
-            skip already-finished layers.
-
-    Returns:
-        layer_fold_r2: dict {layer_name: [fold_r2, ...]}
-        ordered: list of layer names in display order
-    """
-    ordered = _ordered_layers(layers)
-
-    # Resume: load partial results and skip already-finished layers
-    layer_fold_r2 = {}
-    if checkpoint_path and Path(checkpoint_path).exists():
-        with open(checkpoint_path, 'rb') as f:
-            prev = pickle.load(f)
-        saved_metric = prev.get('metric', 'r2')
-        if saved_metric != 'r2':
-            print(f"  WARNING: checkpoint has metric='{saved_metric}', expected 'r2'. "
-                  f"Ignoring checkpoint to avoid mixing metrics.")
-        else:
-            layer_fold_r2 = prev.get('layer_fold_values', {})
-            print(f"  Resumed from checkpoint: {len(layer_fold_r2)} layers done")
-
-    todo = [ln for ln in ordered if ln not in layer_fold_r2]
-    print(f"  Layers to process: {len(todo)} / {len(ordered)}")
-    if not todo:
-        return layer_fold_r2, ordered
-
-    # Subsample timesteps (same indices across all layers)
-    layers_todo = {ln: layers[ln] for ln in todo}
-    layers_todo, pos_s, groups_s = _subsample_layers(
-        layers_todo, pos, groups, max_samples)
-
-    # Per-layer PCA reduction (parallel across layers)
-    layers_todo, _svds = _pca_layers(layers_todo, max_dims, n_jobs=n_jobs)
-
-    # K-fold CV — NOT leave-one-episode-out: with many episodes LOGO creates
-    # O(N_episodes) folds which dominates runtime regardless of per-fold speed.
-    from sklearn.model_selection import KFold
-    n_episodes = len(np.unique(groups_s))
-    n_folds = min(n_cv_folds, n_episodes)
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-    splits = list(kf.split(pos_s))
-    print(f"  CV: {n_folds}-fold KFold  "
-          f"(n_episodes={n_episodes}, n_cv_folds arg={n_cv_folds})")
-
-    # Flat job list — use threads: Ridge (BLAS) releases GIL, no pickling
-    jobs = [
-        (ln, fold, train_idx, test_idx, layers_todo[ln], pos_s)
-        for ln in todo
-        for fold, (train_idx, test_idx) in enumerate(splits)
-    ]
-    import os
-    from joblib import cpu_count as _jcpu
-    effective_jobs = _jcpu() if n_jobs == -1 else n_jobs
-    slurm_cpus = os.environ.get('SLURM_CPUS_PER_TASK',
-                  os.environ.get('SLURM_JOB_CPUS_PER_NODE', 'not set'))
-    print(f"  Total jobs: {len(jobs)}  n_jobs={n_jobs} "
-          f"→ effective={effective_jobs} threads  "
-          f"(SLURM_CPUS_PER_TASK={slurm_cpus})")
-
-    raw = Parallel(n_jobs=n_jobs, prefer='threads')(
-        delayed(_layer_ridge_fold)(ln, fold, train_idx, test_idx, X, p)
-        for ln, fold, train_idx, test_idx, X, p in jobs
-    )
-
-    # Reassemble per-layer
-    from collections import defaultdict
-    fold_map = defaultdict(dict)
-    for ln, fold, r2 in raw:
-        fold_map[ln][fold] = r2
-
-    for ln in todo:
-        fold_r2 = [fold_map[ln][f] for f in range(n_folds)]
-        mean_r2 = np.mean(fold_r2)
-        print(f"  {ln}: mean R²={mean_r2:.4f}  "
-              f"(folds: {[f'{r:.3f}' for r in fold_r2]})")
-        layer_fold_r2[ln] = fold_r2
-
-    _save_layer_checkpoint(
-        checkpoint_path, layer_fold_r2, ordered,
-        grid=None, n_samples=len(pos_s),
-        n_episodes=len(np.unique(groups_s)), metric='r2')
-
-    return layer_fold_r2, ordered
 
 
 def decode_layers(layers, pos, groups, width, height, n_iters=500,
@@ -2302,15 +1791,11 @@ if __name__ == '__main__':
                         help='"standard": decode deter/stoch (existing). '
                              '"layers": decode from every model layer and produce '
                              'a comparison boxplot. (default: standard)')
-    parser.add_argument('--method', default='both', choices=['classification', 'regression', 'both'])
     parser.add_argument('--n_iters', type=int, default=5000,
                         help='Training iterations for classification decoder')
     parser.add_argument('--repr', default='all',
                         choices=['deter', 'stoch', 'combined', 'all'],
                         help='Which representation to decode (default: all three)')
-    parser.add_argument('--per_neuron', action='store_true', default=True,
-                        help='Run per-neuron R² analysis (regression only)')
-    parser.add_argument('--no_per_neuron', dest='per_neuron', action='store_false')
     parser.add_argument('--save_model', action='store_true', default=False,
                         help='Save trained decoder models (for dream_decode.py)')
     parser.add_argument('--n_jobs', type=int, default=1,
@@ -2326,23 +1811,12 @@ if __name__ == '__main__':
                              '(leave-one-episode-out) for classification. '
                              'With 100 episodes LOGO creates 100 folds; KFold '
                              'uses --n_cv_folds (default 5). (default: False)')
-    parser.add_argument('--ridge_layers', action='store_true', default=False,
-                        help='[--mode layers] Use Ridge regression (closed-form, '
-                             'no GPU, fast) instead of the PyTorch classifier. '
-                             'Metric becomes R² instead of cross-entropy loss. '
-                             'Recommended for all runs. (default: False)')
     parser.add_argument('--max_samples', type=int, default=10000,
                         help='[--mode layers] Subsample training timesteps to '
-                             'at most this many before fitting. Used by Ridge '
-                             '(stratified by episode) and classification holdout '
-                             '(random). Set to 0 to use all data. (default: 10000)')
-    parser.add_argument('--max_dims', type=int, default=256,
-                        help='[--mode layers --ridge_layers] Reduce layer features '
-                             'to this many dims via truncated PCA before Ridge. '
-                             'Eliminates the O(D²) cost scaling. '
-                             'Set to 0 to disable. (default: 256)')
+                             'at most this many before fitting (random). '
+                             'Set to 0 to use all data. (default: 10000)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
-                        help='[--mode layers --ridge_layers] Number of CV folds. '
+                        help='[--mode layers] Number of CV folds. '
                              'Uses KFold, NOT leave-one-episode-out — LOGO with '
                              'many episodes creates O(N_eps × N_layers) jobs '
                              'which dominates runtime. (default: 5)')
@@ -2350,7 +1824,7 @@ if __name__ == '__main__':
                         help='[--mode layers] Path to a held-out trajectory '
                              'directory. Decoder is trained on --data and '
                              'evaluated on --test_data with no CV. Works with '
-                             'both --ridge_layers and classification. '
+                             'classification. '
                              'Fastest option; requires a second trajectory set.')
     parser.add_argument('--holdout_frac', type=float, default=0.2,
                         help='[--mode layers] Fraction of episodes to hold out '
@@ -2541,6 +2015,7 @@ if __name__ == '__main__':
         # --- Determine train/test split ---
         has_test = False
         test_ep_file_index = None
+        train_mask = None
         if args.test_data:
             print("Loading held-out test trajectories...")
             test_data_path = Path(args.test_data)
@@ -2613,22 +2088,9 @@ if __name__ == '__main__':
             if X_te is not None:
                 layers_test_dict[ln] = X_te
 
-        if has_test and args.ridge_layers:
-            print(f"  Mode: Ridge holdout. No CV.  max_dims={args.max_dims}")
-            layer_results, ordered, layer_pred_xy, layer_train_pred_xy = \
-                decode_layers_ridge_holdout(
-                    layers, pos, layers_test_dict, pos_test,
-                    n_jobs=args.n_jobs,
-                    max_samples=args.max_samples,
-                    max_dims=args.max_dims)
-            layer_fold_values = {ln: [v['r2']] for ln, v in layer_results.items()}
-            metric = 'r2'
-            layer_proba = {}
-
-        elif has_test and not args.ridge_layers:
+        if has_test:
             if not HAS_TORCH:
-                print("Error: torch required for classifier layer decoding. "
-                      "Add --ridge_layers to use Ridge regression instead.")
+                print("Error: torch required for classifier layer decoding.")
                 raise SystemExit(1)
             n_iters_layers = args.n_iters
             pat = args.patience
@@ -2644,25 +2106,9 @@ if __name__ == '__main__':
                     device=args.device, patience=pat,
                     max_samples=ms, checkpoint_path=checkpoint_path)
             metric = 'manhattan'
-
-        elif args.ridge_layers:
-            print(f"  Mode: Ridge {args.n_cv_folds}-fold CV. "
-                  f"max_samples={args.max_samples}  max_dims={args.max_dims}\n"
-                  f"  Tip: add --test_data <path> to skip CV entirely.")
-            layer_fold_values, ordered = decode_layers_ridge(
-                layers, pos, groups,
-                n_jobs=args.n_jobs,
-                checkpoint_path=checkpoint_path,
-                max_samples=args.max_samples,
-                max_dims=args.max_dims,
-                n_cv_folds=args.n_cv_folds)
-            metric = 'r2'
-            layer_pred_xy = {}
-            layer_train_pred_xy = {}
         else:
             if not HAS_TORCH:
-                print("Error: torch required for classifier layer decoding. "
-                      "Add --ridge_layers to use Ridge regression instead.")
+                print("Error: torch required for classifier layer decoding.")
                 raise SystemExit(1)
             n_iters_layers = args.n_iters
             pat = args.patience
@@ -2675,7 +2121,7 @@ if __name__ == '__main__':
                   f"max_samples={ms}, device={args.device}). "
                   f"CV: {cv_desc}. "
                   f"Metric: mean Manhattan decode error (tiles, lower = better).\n"
-                  f"  Tip: add --ridge_layers for faster runs, or use default --holdout_frac 0.2.")
+                  f"  Tip: use default --holdout_frac 0.2 for faster runs.")
             layer_fold_values, ordered, loss_histories = decode_layers(
                 layers, pos, groups, width, height,
                 n_iters=n_iters_layers, n_jobs=args.n_jobs, device=args.device,
@@ -2706,7 +2152,6 @@ if __name__ == '__main__':
         if has_test and layer_pred_xy:
             occ_layer = 'dyn/deter' if 'dyn/deter' in layer_pred_xy else None
             if occ_layer:
-                method = 'ridge' if args.ridge_layers else 'classification'
                 train_pred_ln = layer_train_pred_xy.get(occ_layer, None)
                 # pos may be larger than train_pred if subsampling was used
                 train_pos_ln = None
@@ -2719,10 +2164,10 @@ if __name__ == '__main__':
                 plot_occupancy_vs_error(
                     pos_test, layer_pred_xy[occ_layer], width, height,
                     save_dir, repr_name=occ_layer.replace('/', '_'),
-                    method=method, metadata=metadata,
+                    method='classification', metadata=metadata,
                     train_pos=train_pos_ln, train_pred=train_pred_ln)
         print("\n>>> Plots saved. Decoding evaluation complete. <<<")
-        if not args.ridge_layers and loss_histories:
+        if loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
 
         # Save reusable per-layer decoders if requested
@@ -2744,9 +2189,8 @@ if __name__ == '__main__':
                          else max(args.n_iters, 50000)),
                 device=args.device, n_jobs=args.n_jobs,
                 patience=args.patience,
-                ridge=args.ridge_layers,
-                max_dims=args.max_dims,
-                ep_file_index=ep_file_index)
+                ep_file_index=ep_file_index,
+                train_mask=train_mask)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {
@@ -2757,8 +2201,6 @@ if __name__ == '__main__':
             'n_episodes': len(np.unique(groups)),
             'metric': metric,
         }
-        if args.ridge_layers and args.test_data:
-            save_payload['holdout_results'] = layer_results
         with open(results_file, 'wb') as f:
             pickle.dump(save_payload, f)
         print(f"\nResults saved to {results_file}")
@@ -2791,144 +2233,95 @@ if __name__ == '__main__':
     print(f"  Representations: {list(representations.keys())}")
     print(f"  Parallelism: n_jobs={args.n_jobs}  device={args.device}")
 
-    # ---- Ridge regression ----
-    if args.method in ('regression', 'both'):
-        print("\n=== Ridge Regression Decoding ===")
-        reg_results = {}
-        for name, X in representations.items():
-            print(f"\n--- {name} ({X.shape[1]} dims) ---")
-            res = ridge_decode_cv(X, pos, groups, n_jobs=args.n_jobs)
-            reg_results[name] = res
-            print(f"  Overall R²={res['overall_r2']:.4f}  "
-                  f"R²_x={res['r2_x']:.4f}  R²_y={res['r2_y']:.4f}  "
-                  f"MAE={res['overall_mae']:.3f}")
-
-        plot_regression_summary(reg_results, 'all', save_dir, pos)
-
-        # Occupancy vs decoder error
-        for name, res in reg_results.items():
-            plot_occupancy_vs_error(pos, res['pred'], width, height,
-                                   save_dir, repr_name=name, method='ridge',
-                                   metadata=metadata,
-                                   train_pos=pos, train_pred=res['train_pred'])
-
-        # Per-neuron analysis
-        if args.per_neuron:
-            r2_deter = r2_stoch = None
-            if 'deter' in representations:
-                print("\n--- Per-neuron R² (deter) ---")
-                r2_deter = per_neuron_r2(deter, pos, groups, n_jobs=args.n_jobs)
-                r2_mean_d = r2_deter.mean(axis=1)
-                top5_d = np.argsort(r2_mean_d)[::-1][:5]
-                for j in top5_d:
-                    print(f"  deter[{j}]: R²_x={r2_deter[j,0]:.4f}  "
-                          f"R²_y={r2_deter[j,1]:.4f}  mean={r2_mean_d[j]:.4f}")
-
-            if 'stoch' in representations:
-                print("\n--- Per-neuron R² (stoch) ---")
-                r2_stoch = per_neuron_r2(stoch, pos, groups, n_jobs=args.n_jobs)
-                r2_mean_s = r2_stoch.mean(axis=1)
-                top5_s = np.argsort(r2_mean_s)[::-1][:5]
-                for j in top5_s:
-                    print(f"  stoch[{j}]: R²_x={r2_stoch[j,0]:.4f}  "
-                          f"R²_y={r2_stoch[j,1]:.4f}  mean={r2_mean_s[j]:.4f}")
-
-            if r2_deter is not None and r2_stoch is not None:
-                plot_per_neuron(r2_deter, r2_stoch, save_dir)
-            if r2_deter is not None:
-                plot_top_neurons(r2_deter, 'deter', pos, deter, groups, save_dir)
-            if r2_stoch is not None:
-                plot_top_neurons(r2_stoch, 'stoch', pos, stoch, groups, save_dir)
-
     # ---- Classification (pRNN-style) ----
-    if args.method in ('classification', 'both'):
-        if not HAS_TORCH:
-            print("\nSkipping classification decoder: torch not installed")
+    if not HAS_TORCH:
+        print("\nError: torch required for classification decoder")
+        raise SystemExit(1)
+
+    print("\n=== Classification Decoding (pRNN-style) ===")
+    for name, X in representations.items():
+        print(f"\n--- {name} ({X.shape[1]} dims) ---")
+        if args.holdout_frac > 0:
+            # Single train/test split (fast, no CV folds)
+            unique_eps = np.unique(groups)
+            rng = np.random.RandomState(42)
+            rng.shuffle(unique_eps)
+            n_test = max(1, int(args.holdout_frac * len(unique_eps)))
+            test_eps = set(unique_eps[:n_test])
+            train_mask = np.array([g not in test_eps for g in groups])
+            test_mask = ~train_mask
+            print(f"  Holdout split: {train_mask.sum()} train, "
+                  f"{test_mask.sum()} test "
+                  f"({n_test}/{len(unique_eps)} episodes)")
+
+            pos_int = pos.astype(int)
+            pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
+            pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
+            y_cls = np.ravel_multi_index(
+                (pos_int[:, 0], pos_int[:, 1]), (width, height))
+
+            # Train with internal 90/10 val for Manhattan early stopping
+            X_tr, y_tr, pi_tr = (X[train_mask], y_cls[train_mask],
+                                 pos_int[train_mask])
+            rng2 = np.random.RandomState(42)
+            n_val = max(1, int(0.1 * train_mask.sum()))
+            perm = rng2.permutation(train_mask.sum())
+            val_idx, tr_idx = perm[:n_val], perm[n_val:]
+
+            clf = LinearClassifier(X.shape[1], width * height,
+                                   device=args.device)
+            clf.fit(X_tr[tr_idx], y_tr[tr_idx], n_iters=args.n_iters,
+                    verbose=False,
+                    X_val=X_tr[val_idx], y_cls_val=y_tr[val_idx],
+                    pos_int_val=pi_tr[val_idx],
+                    width=width, height=height,
+                    manhattan_patience=args.patience)
+
+            pred_cls = clf.predict(X[test_mask])
+            pred_xy = np.stack(
+                np.unravel_index(pred_cls, (width, height)), axis=1)
+            true_xy = pos_int[test_mask]
+            errors = np.sum(np.abs(pred_xy - true_xy), axis=1)
+            shuffle = np.sum(np.abs(
+                np.column_stack([
+                    np.random.randint(0, width, len(true_xy)),
+                    np.random.randint(0, height, len(true_xy))
+                ]) - true_xy), axis=1)
+            test_pos = pos[test_mask]
+
+            # Train predictions for occupancy plot
+            train_pred_cls = clf.predict(X[train_mask])
+            train_pred_xy = np.stack(
+                np.unravel_index(train_pred_cls, (width, height)), axis=1)
+            train_pos_cls = pos[train_mask]
         else:
-            print("\n=== Classification Decoding (pRNN-style) ===")
-            for name, X in representations.items():
-                print(f"\n--- {name} ({X.shape[1]} dims) ---")
-                if args.holdout_frac > 0:
-                    # Single train/test split (fast, no CV folds)
-                    unique_eps = np.unique(groups)
-                    rng = np.random.RandomState(42)
-                    rng.shuffle(unique_eps)
-                    n_test = max(1, int(args.holdout_frac * len(unique_eps)))
-                    test_eps = set(unique_eps[:n_test])
-                    train_mask = np.array([g not in test_eps for g in groups])
-                    test_mask = ~train_mask
-                    print(f"  Holdout split: {train_mask.sum()} train, "
-                          f"{test_mask.sum()} test "
-                          f"({n_test}/{len(unique_eps)} episodes)")
+            errors, shuffle, pred_xy, true_xy, proba = classification_decode(
+                X, pos, groups, width, height, n_iters=args.n_iters,
+                n_jobs=args.n_jobs, device=args.device,
+                patience=args.patience)
+            test_pos = pos
+            train_pos_cls = None
+            train_pred_xy = None
 
-                    pos_int = pos.astype(int)
-                    pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
-                    pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
-                    y_cls = np.ravel_multi_index(
-                        (pos_int[:, 0], pos_int[:, 1]), (width, height))
-
-                    # Train with internal 90/10 val for Manhattan early stopping
-                    X_tr, y_tr, pi_tr = (X[train_mask], y_cls[train_mask],
-                                         pos_int[train_mask])
-                    rng2 = np.random.RandomState(42)
-                    n_val = max(1, int(0.1 * train_mask.sum()))
-                    perm = rng2.permutation(train_mask.sum())
-                    val_idx, tr_idx = perm[:n_val], perm[n_val:]
-
-                    clf = LinearClassifier(X.shape[1], width * height,
-                                           device=args.device)
-                    clf.fit(X_tr[tr_idx], y_tr[tr_idx], n_iters=args.n_iters,
-                            verbose=False,
-                            X_val=X_tr[val_idx], y_cls_val=y_tr[val_idx],
-                            pos_int_val=pi_tr[val_idx],
-                            width=width, height=height,
-                            manhattan_patience=args.patience)
-
-                    pred_cls = clf.predict(X[test_mask])
-                    pred_xy = np.stack(
-                        np.unravel_index(pred_cls, (width, height)), axis=1)
-                    true_xy = pos_int[test_mask]
-                    errors = np.sum(np.abs(pred_xy - true_xy), axis=1)
-                    shuffle = np.sum(np.abs(
-                        np.column_stack([
-                            np.random.randint(0, width, len(true_xy)),
-                            np.random.randint(0, height, len(true_xy))
-                        ]) - true_xy), axis=1)
-                    test_pos = pos[test_mask]
-
-                    # Train predictions for occupancy plot
-                    train_pred_cls = clf.predict(X[train_mask])
-                    train_pred_xy = np.stack(
-                        np.unravel_index(train_pred_cls, (width, height)), axis=1)
-                    train_pos_cls = pos[train_mask]
-                else:
-                    errors, shuffle, pred_xy, true_xy, proba = classification_decode(
-                        X, pos, groups, width, height, n_iters=args.n_iters,
-                        n_jobs=args.n_jobs, device=args.device,
-                        patience=args.patience)
-                    test_pos = pos
-                    train_pos_cls = None
-                    train_pred_xy = None
-
-                print(f"  Mean Manhattan error: {errors.mean():.3f} "
-                      f"(shuffle: {shuffle.mean():.3f})")
-                plot_classification_summary(errors, shuffle, name, save_dir)
-                plot_occupancy_vs_error(test_pos, pred_xy, width, height,
-                                       save_dir, repr_name=name,
-                                       method='classification',
-                                       metadata=metadata,
-                                       train_pos=train_pos_cls,
-                                       train_pred=train_pred_xy)
-                # Probability heatmap for each episode (deter only, LOGO only)
-                if name == 'deter' and args.holdout_frac <= 0:
-                    for ep_idx in range(len(np.unique(groups))):
-                        plot_decoder_probmap(
-                            proba, pos, groups, name, save_dir,
-                            n_steps=12, episode=ep_idx)
-                        # Probability field overlaid on rendered world map
-                        plot_probmap_on_world(
-                            proba, pos, groups, metadata, name,
-                            save_dir, n_steps=12, episode=ep_idx)
+        print(f"  Mean Manhattan error: {errors.mean():.3f} "
+              f"(shuffle: {shuffle.mean():.3f})")
+        plot_classification_summary(errors, shuffle, name, save_dir)
+        plot_occupancy_vs_error(test_pos, pred_xy, width, height,
+                               save_dir, repr_name=name,
+                               method='classification',
+                               metadata=metadata,
+                               train_pos=train_pos_cls,
+                               train_pred=train_pred_xy)
+        # Probability heatmap for each episode (deter only, LOGO only)
+        if name == 'deter' and args.holdout_frac <= 0:
+            for ep_idx in range(len(np.unique(groups))):
+                plot_decoder_probmap(
+                    proba, pos, groups, name, save_dir,
+                    n_steps=12, episode=ep_idx)
+                # Probability field overlaid on rendered world map
+                plot_probmap_on_world(
+                    proba, pos, groups, metadata, name,
+                    save_dir, n_steps=12, episode=ep_idx)
 
     # Save trained decoder models (for use by dream_decode.py)
     if args.save_model:
@@ -2939,29 +2332,21 @@ if __name__ == '__main__':
             'n_episodes': len(np.unique(groups)),
         }
 
-        if args.method in ('regression', 'both'):
-            for name, X in representations.items():
-                meta = {**model_meta_base, 'repr_name': name,
-                        'n_features': X.shape[1], 'type': 'ridge'}
-                model = train_full_ridge(X, pos)
-                save_decoder_model(model, meta, save_dir / f'ridge_{name}.pkl')
-
-        if args.method in ('classification', 'both') and HAS_TORCH:
-            for name, X in representations.items():
-                meta = {**model_meta_base, 'repr_name': name,
-                        'n_features': X.shape[1], 'n_units': X.shape[1],
-                        'n_classes': width * height, 'width': width,
-                        'height': height, 'type': 'classifier'}
-                clf = LinearClassifier(X.shape[1], width * height)
-                print(f"  Training full classifier on {name}...")
-                clf.fit(X,
-                        np.ravel_multi_index(
-                            (pos.astype(int).clip(0, [width-1, height-1])[:, 0],
-                             pos.astype(int).clip(0, [width-1, height-1])[:, 1]),
-                            (width, height)),
-                        n_iters=args.n_iters, verbose=False,
-                        patience=args.patience)
-                save_classifier_model(clf, meta, save_dir / f'classifier_{name}.pkl')
+        for name, X in representations.items():
+            meta = {**model_meta_base, 'repr_name': name,
+                    'n_features': X.shape[1], 'n_units': X.shape[1],
+                    'n_classes': width * height, 'width': width,
+                    'height': height, 'type': 'classifier'}
+            clf = LinearClassifier(X.shape[1], width * height)
+            print(f"  Training full classifier on {name}...")
+            clf.fit(X,
+                    np.ravel_multi_index(
+                        (pos.astype(int).clip(0, [width-1, height-1])[:, 0],
+                         pos.astype(int).clip(0, [width-1, height-1])[:, 1]),
+                        (width, height)),
+                    n_iters=args.n_iters, verbose=False,
+                    patience=args.patience)
+            save_classifier_model(clf, meta, save_dir / f'classifier_{name}.pkl')
 
     # Save numerical results
     results_file = save_dir / 'decode_results.pkl'
@@ -2971,16 +2356,6 @@ if __name__ == '__main__':
         'n_episodes': len(np.unique(groups)),
         'grid': (width, height),
     }
-    if args.method in ('regression', 'both'):
-        save_data['regression'] = {
-            name: {k: v for k, v in res.items() if k != 'pred'}
-            for name, res in reg_results.items()
-        }
-        if args.per_neuron:
-            if r2_deter is not None:
-                save_data['per_neuron_r2_deter'] = r2_deter
-            if r2_stoch is not None:
-                save_data['per_neuron_r2_stoch'] = r2_stoch
     with open(results_file, 'wb') as f:
         pickle.dump(save_data, f)
     print(f"\nResults saved to {results_file}")

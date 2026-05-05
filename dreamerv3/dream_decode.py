@@ -1,7 +1,7 @@
 """
 Dream Decode: Position decoding from imagined (dream) rollouts.
 
-Loads a trained position decoder (Ridge or classifier) and applies it to
+Loads a trained classification position decoder and applies it to
 the world model's policy-based imagination outputs. This tests whether
 the world model maintains spatial coherence during dreaming.
 
@@ -11,7 +11,7 @@ Usage:
     --logdir ./logdir/crafter_small_1m \
     --script dream_decode \
     --run.from_checkpoint ./logdir/crafter_small_1m/ckpt/TIMESTAMP_DIR \
-    --dream_decode.decoder_model ./logdir/crafter_small_1m/decoder_results/ridge_deter.pkl \
+    --dream_decode.decoder_model ./logdir/crafter_small_1m/decoder_results/classifier_deter.pkl \
     --dream_decode.save_path ./logdir/crafter_small_1m/dream_results \
     --jax.platform cpu
 """
@@ -422,45 +422,25 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
     # 4. Load decoder and decode positions
     print(f"\nLoading decoder from {dd_config.decoder_model}...")
     decoder_path = Path(dd_config.decoder_model)
-    decoder_type = dd_config.decoder_type
 
-    if decoder_type == 'ridge':
-        from .decode_position import load_decoder_model
-        decoder, dec_meta = load_decoder_model(decoder_path)
-        print(f"  Ridge decoder: {dec_meta.get('repr_name', '?')}, "
-              f"features={dec_meta.get('n_features', '?')}")
+    from .decode_position import load_classifier_model
+    clf, dec_meta = load_classifier_model(decoder_path)
+    width = dec_meta['width']
+    height = dec_meta['height']
+    print(f"  Classifier decoder: {dec_meta.get('repr_name', '?')}, "
+          f"grid={width}x{height}")
 
-        # Decode: reshape (N, H, D) -> (N*H, D), predict, reshape back
-        flat_deter = dream_deter.reshape(-1, D)
-        decoded_flat = decoder.predict(flat_deter)
-        decoded_pos = decoded_flat.reshape(N, H, 2)
-        print(f"  Decoded positions range: "
-              f"x=[{decoded_pos[:,:,0].min():.1f}, {decoded_pos[:,:,0].max():.1f}], "
-              f"y=[{decoded_pos[:,:,1].min():.1f}, {decoded_pos[:,:,1].max():.1f}]")
+    flat_deter = dream_deter.reshape(-1, D)
+    proba = clf.predict_proba(flat_deter)  # (N*H, W*H_grid)
+    dream_proba = proba.reshape(N, H, width, height)
 
-        dream_proba = None  # No probability maps for ridge
-
-    elif decoder_type == 'classifier':
-        from .decode_position import load_classifier_model
-        clf, dec_meta = load_classifier_model(decoder_path)
-        width = dec_meta['width']
-        height = dec_meta['height']
-        print(f"  Classifier decoder: {dec_meta.get('repr_name', '?')}, "
-              f"grid={width}x{height}")
-
-        flat_deter = dream_deter.reshape(-1, D)
-        proba = clf.predict_proba(flat_deter)  # (N*H, W*H_grid)
-        dream_proba = proba.reshape(N, H, width, height)
-
-        # Argmax positions
-        pred_cls = proba.argmax(axis=1)
-        pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
-        decoded_pos = pred_xy.reshape(N, H, 2).astype(float)
-        print(f"  Decoded grid positions range: "
-              f"x=[{decoded_pos[:,:,0].min():.0f}, {decoded_pos[:,:,0].max():.0f}], "
-              f"y=[{decoded_pos[:,:,1].min():.0f}, {decoded_pos[:,:,1].max():.0f}]")
-    else:
-        raise ValueError(f"Unknown decoder_type: {decoder_type}")
+    # Argmax positions
+    pred_cls = proba.argmax(axis=1)
+    pred_xy = np.stack(np.unravel_index(pred_cls, (width, height)), axis=1)
+    decoded_pos = pred_xy.reshape(N, H, 2).astype(float)
+    print(f"  Decoded grid positions range: "
+          f"x=[{decoded_pos[:,:,0].min():.0f}, {decoded_pos[:,:,0].max():.0f}], "
+          f"y=[{decoded_pos[:,:,1].min():.0f}, {decoded_pos[:,:,1].max():.0f}]")
 
     # 5. Plot
     print("\nGenerating plots...")
@@ -486,7 +466,6 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
         'start_pos': start_pos,
         'obs_pos': obs_pos,
         'decoder_path': str(decoder_path),
-        'decoder_type': decoder_type,
         'decoder_metadata': dec_meta,
         'metadata': metadata,
         'num_batches': num_batches,
