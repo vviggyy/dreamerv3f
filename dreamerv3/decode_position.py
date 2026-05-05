@@ -461,7 +461,7 @@ def load_classifier_model(path):
 
 def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
                         n_iters=50000, device='cpu', n_jobs=1, patience=500,
-                        ridge=False, max_dims=256):
+                        ridge=False, max_dims=256, ep_file_index=None):
     """Retrain one decoder per layer on ALL data and save to disk.
 
     Saves:
@@ -470,7 +470,11 @@ def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
 
     Args:
         ridge: If True, save Ridge models. If False, save classifiers.
+        ep_file_index: If provided, reload layers one-at-a-time from files
+            to avoid OOM. ``layers`` may be empty/None in this case but
+            must still provide layer_sizes via a prior pass.
     """
+    import gc as _gc
     out_dir = Path(save_dir) / 'layer_decoders'
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -480,15 +484,35 @@ def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
     y_cls = np.ravel_multi_index(
         (pos_int[:, 0], pos_int[:, 1]), (width, height))
 
+    # Record layer sizes before we potentially discard layers dict
+    layer_sizes = {}
+    if layers:
+        layer_sizes = {ln: layers[ln].shape[1] for ln in ordered
+                       if ln in layers}
+
+    def _get_layer(ln):
+        """Get layer data, reloading from files if needed."""
+        if layers and ln in layers:
+            return layers[ln]
+        if ep_file_index is not None:
+            X, _, _ = reload_layer_from_files(ep_file_index, ln)
+            return X
+        raise KeyError(f"Layer {ln} not in layers dict and no ep_file_index")
+
     layer_files = {}
     svds = {}
 
     if ridge:
-        # PCA reduction
+        # PCA reduction — needs all layers in memory for SVD
+        if not layers:
+            # Reload all for PCA (unavoidable)
+            layers = {ln: _get_layer(ln) for ln in ordered}
         layers_pca, svds = _pca_layers(layers, max_dims, n_jobs=n_jobs)
         for ln in ordered:
             safe = ln.replace('/', '_')
             X = layers_pca[ln]
+            if ln not in layer_sizes:
+                layer_sizes[ln] = layers[ln].shape[1]
             model = RidgeCV(alphas=np.logspace(-2, 4, 20))
             model.fit(X, pos)
             fname = f'{safe}.pkl'
@@ -505,9 +529,12 @@ def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
             raise RuntimeError("torch required to save classifier layer decoders")
         for i, ln in enumerate(ordered):
             safe = ln.replace('/', '_')
-            X = layers[ln]
+            X = _get_layer(ln)
+            if ln not in layer_sizes:
+                layer_sizes[ln] = X.shape[1]
             clf = LinearClassifier(X.shape[1], width * height, device=device)
-            print(f"  Training full classifier on {ln} ({X.shape[1]} dims)...")
+            print(f"  [{i+1}/{len(ordered)}] Training full classifier on "
+                  f"{ln} ({X.shape[1]} dims)...")
             clf.fit(X, y_cls, n_iters=n_iters, verbose=False, patience=patience)
             fname = f'{safe}.pkl'
             path = out_dir / fname
@@ -518,6 +545,9 @@ def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
             }
             save_classifier_model(clf, meta, path)
             layer_files[ln] = fname
+            print(f"  Saved classifier decoder: {ln} → {path}")
+            del X, clf
+            _gc.collect()
 
     # Save PCA transforms if any
     svd_files = {}
@@ -535,7 +565,7 @@ def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
         'decoder_type': 'ridge' if ridge else 'classifier',
         'layer_files': layer_files,
         'svd_files': svd_files,
-        'layer_sizes': {ln: layers[ln].shape[1] for ln in ordered},
+        'layer_sizes': layer_sizes,
         'n_train_samples': len(pos),
     }
     manifest_path = out_dir / 'manifest.pkl'
@@ -2677,8 +2707,15 @@ if __name__ == '__main__':
             occ_layer = 'dyn/deter' if 'dyn/deter' in layer_pred_xy else None
             if occ_layer:
                 method = 'ridge' if args.ridge_layers else 'classification'
-                train_pos_ln = pos if occ_layer in layer_train_pred_xy else None
                 train_pred_ln = layer_train_pred_xy.get(occ_layer, None)
+                # pos may be larger than train_pred if subsampling was used
+                train_pos_ln = None
+                if train_pred_ln is not None:
+                    if len(pos) == len(train_pred_ln):
+                        train_pos_ln = pos
+                    else:
+                        # Subsampled: skip train overlay (shapes don't match)
+                        train_pred_ln = None
                 plot_occupancy_vs_error(
                     pos_test, layer_pred_xy[occ_layer], width, height,
                     save_dir, repr_name=occ_layer.replace('/', '_'),
@@ -2691,16 +2728,25 @@ if __name__ == '__main__':
         # Save reusable per-layer decoders if requested
         if args.save_model:
             print("\n=== Saving Layer Decoders (retrain on full data) ===")
-            print("  This retrains each layer on ALL data — may take a while...")
-            # Use all training data (layers/pos at this point)
+            print("  Freeing decode results to save memory...")
+            # Free the large layers dict — save_layer_decoders will reload
+            # one layer at a time from files via ep_file_index
+            layers = None
+            layers_test_dict = None
+            layer_pred_xy = None
+            layer_train_pred_xy = None
+            layer_proba = None
+            loss_histories = None
+            gc.collect()
             save_layer_decoders(
-                layers, pos, width, height, ordered, save_dir,
+                None, pos, width, height, ordered, save_dir,
                 n_iters=(args.n_iters if args.max_iters is not None
                          else max(args.n_iters, 50000)),
                 device=args.device, n_jobs=args.n_jobs,
                 patience=args.patience,
                 ridge=args.ridge_layers,
-                max_dims=args.max_dims)
+                max_dims=args.max_dims,
+                ep_file_index=ep_file_index)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {
