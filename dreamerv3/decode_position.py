@@ -1183,7 +1183,7 @@ def _layer_classification_holdout(layer_name, X_train, y_cls_train,
     # Also get probability maps for visualization
     proba_flat = clf.predict_proba(X_test)  # (N_test, width*height)
     proba_maps = proba_flat.reshape(-1, width, height)
-    return layer_name, manhattan_per_timestep, clf.loss_history, pred_xy, proba_maps, train_pred_xy
+    return layer_name, manhattan_per_timestep, clf.loss_history, pred_xy, proba_maps, train_pred_xy, clf
 
 
 def decode_layers_classification_holdout(
@@ -1263,10 +1263,10 @@ def decode_layers_classification_holdout(
     layer_pred_xy = {}
     layer_train_pred_xy = {}
     layer_proba = {}
-    dev = device if not device.startswith('cuda') else device
+    layer_clfs = {}
     for i, ln in enumerate(todo):
         print(f"  [{i+1}/{len(todo)}] Training {ln}...")
-        ln_out, manhattan_arr, loss_hist, pred_xy, proba_maps, train_pred_xy = \
+        ln_out, manhattan_arr, loss_hist, pred_xy, proba_maps, train_pred_xy, clf = \
             _layer_classification_holdout(
                 ln, layers_train[ln], y_cls_train, pos_int_train,
                 layers_test[ln], pos_int_test, width, height,
@@ -1276,6 +1276,7 @@ def decode_layers_classification_holdout(
         layer_pred_xy[ln] = pred_xy
         layer_train_pred_xy[ln] = train_pred_xy
         layer_proba[ln] = proba_maps
+        layer_clfs[ln] = clf
         print(f"  {ln}: decode error={np.mean(manhattan_arr):.3f} tiles "
               f"({len(loss_hist)} iters)")
 
@@ -1285,7 +1286,7 @@ def decode_layers_classification_holdout(
             grid=(width, height), n_samples=len(pos_train),
             n_episodes=0, metric='manhattan')
 
-    return layer_values, ordered, loss_histories, layer_pred_xy, layer_proba, layer_train_pred_xy
+    return layer_values, ordered, loss_histories, layer_pred_xy, layer_proba, layer_train_pred_xy, layer_clfs
 
 
 def _ordered_layers(layers):
@@ -2099,7 +2100,7 @@ if __name__ == '__main__':
                   f"max_iters={n_iters_layers}, patience={pat}, "
                   f"max_samples={ms}, device={args.device}")
             layer_fold_values, ordered, loss_histories, \
-                layer_pred_xy, layer_proba, layer_train_pred_xy = \
+                layer_pred_xy, layer_proba, layer_train_pred_xy, layer_clfs = \
                 decode_layers_classification_holdout(
                     layers, pos, layers_test_dict, pos_test, width, height,
                     n_iters=n_iters_layers, n_jobs=args.n_jobs,
@@ -2132,6 +2133,7 @@ if __name__ == '__main__':
             layer_pred_xy = {}
             layer_train_pred_xy = {}
             layer_proba = {}
+            layer_clfs = {}
 
         layer_sizes = {ln: arr.shape[1] for ln, arr in layers.items()}
         plot_layer_comparison(layer_fold_values, ordered, save_dir, metric=metric,
@@ -2172,25 +2174,61 @@ if __name__ == '__main__':
 
         # Save reusable per-layer decoders if requested
         if args.save_model:
-            print("\n=== Saving Layer Decoders (retrain on full data) ===")
-            print("  Freeing decode results to save memory...")
-            # Free the large layers dict — save_layer_decoders will reload
-            # one layer at a time from files via ep_file_index
-            layers = None
-            layers_test_dict = None
-            layer_pred_xy = None
-            layer_train_pred_xy = None
-            layer_proba = None
-            loss_histories = None
-            gc.collect()
-            save_layer_decoders(
-                None, pos, width, height, ordered, save_dir,
-                n_iters=(args.n_iters if args.max_iters is not None
-                         else max(args.n_iters, 50000)),
-                device=args.device, n_jobs=args.n_jobs,
-                patience=args.patience,
-                ep_file_index=ep_file_index,
-                train_mask=train_mask)
+            if layer_clfs:
+                # Holdout mode: save the already-trained classifiers directly
+                # (no retraining needed)
+                print("\n=== Saving Layer Decoders (from holdout training) ===")
+                out_dir = save_dir / 'layer_decoders'
+                out_dir.mkdir(parents=True, exist_ok=True)
+                layer_files = {}
+                for ln in ordered:
+                    if ln not in layer_clfs:
+                        continue
+                    clf = layer_clfs[ln]
+                    safe = ln.replace('/', '_')
+                    fname = f'{safe}.pkl'
+                    meta = {
+                        'layer_name': ln,
+                        'n_units': clf.model[0].in_features,
+                        'n_classes': width * height,
+                        'width': width, 'height': height,
+                        'type': 'classifier', 'grid': (width, height),
+                    }
+                    save_classifier_model(clf, meta, out_dir / fname)
+                    layer_files[ln] = fname
+                layer_sizes = {ln: layer_clfs[ln].model[0].in_features
+                               for ln in ordered if ln in layer_clfs}
+                manifest = {
+                    'ordered': ordered,
+                    'grid': (width, height),
+                    'metric': 'manhattan',
+                    'decoder_type': 'classifier',
+                    'layer_files': layer_files,
+                    'layer_sizes': layer_sizes,
+                    'n_train_samples': len(pos),
+                }
+                with open(out_dir / 'manifest.pkl', 'wb') as f:
+                    pickle.dump(manifest, f)
+                print(f"  Saved manifest to {out_dir / 'manifest.pkl'}")
+            else:
+                # CV mode: no single classifier per layer, retrain on full data
+                print("\n=== Saving Layer Decoders (retrain on full data) ===")
+                print("  Freeing decode results to save memory...")
+                layers = None
+                layers_test_dict = None
+                layer_pred_xy = None
+                layer_train_pred_xy = None
+                layer_proba = None
+                loss_histories = None
+                gc.collect()
+                save_layer_decoders(
+                    None, pos, width, height, ordered, save_dir,
+                    n_iters=(args.n_iters if args.max_iters is not None
+                             else max(args.n_iters, 50000)),
+                    device=args.device, n_jobs=args.n_jobs,
+                    patience=args.patience,
+                    ep_file_index=ep_file_index,
+                    train_mask=train_mask)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {
