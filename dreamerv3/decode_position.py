@@ -413,89 +413,6 @@ def load_classifier_model(path):
 # Layer decoder save / load / eval
 # ---------------------------------------------------------------------------
 
-def save_layer_decoders(layers, pos, width, height, ordered, save_dir,
-                        n_iters=50000, device='cpu', n_jobs=1, patience=500,
-                        ep_file_index=None, train_mask=None):
-    """Retrain one classifier decoder per layer on ALL data and save to disk.
-
-    Saves:
-      <save_dir>/layer_decoders/<layer_safe_name>.pkl  (one per layer)
-      <save_dir>/layer_decoders/manifest.pkl           (metadata)
-
-    Args:
-        ep_file_index: If provided, reload layers one-at-a-time from files
-            to avoid OOM. ``layers`` may be empty/None in this case but
-            must still provide layer_sizes via a prior pass.
-        train_mask: Boolean mask to select training samples when reloading
-            from ep_file_index (needed when holdout split was applied).
-    """
-    import gc as _gc
-    out_dir = Path(save_dir) / 'layer_decoders'
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    pos_int = pos.astype(int)
-    pos_int[:, 0] = np.clip(pos_int[:, 0], 0, width - 1)
-    pos_int[:, 1] = np.clip(pos_int[:, 1], 0, height - 1)
-    y_cls = np.ravel_multi_index(
-        (pos_int[:, 0], pos_int[:, 1]), (width, height))
-
-    # Record layer sizes before we potentially discard layers dict
-    layer_sizes = {}
-    if layers:
-        layer_sizes = {ln: layers[ln].shape[1] for ln in ordered
-                       if ln in layers}
-
-    def _get_layer(ln):
-        """Get layer data, reloading from files if needed."""
-        if layers and ln in layers:
-            return layers[ln]
-        if ep_file_index is not None:
-            X, _, _ = reload_layer_from_files(ep_file_index, ln)
-            if train_mask is not None:
-                X = X[train_mask]
-            return X
-        raise KeyError(f"Layer {ln} not in layers dict and no ep_file_index")
-
-    layer_files = {}
-
-    if not HAS_TORCH:
-        raise RuntimeError("torch required to save classifier layer decoders")
-    for i, ln in enumerate(ordered):
-        safe = ln.replace('/', '_')
-        X = _get_layer(ln)
-        if ln not in layer_sizes:
-            layer_sizes[ln] = X.shape[1]
-        clf = LinearClassifier(X.shape[1], width * height, device=device)
-        print(f"  [{i+1}/{len(ordered)}] Training full classifier on "
-              f"{ln} ({X.shape[1]} dims)...")
-        clf.fit(X, y_cls, n_iters=n_iters, verbose=False, patience=patience)
-        fname = f'{safe}.pkl'
-        path = out_dir / fname
-        meta = {
-            'layer_name': ln, 'n_units': X.shape[1],
-            'n_classes': width * height, 'width': width, 'height': height,
-            'type': 'classifier', 'grid': (width, height),
-        }
-        save_classifier_model(clf, meta, path)
-        layer_files[ln] = fname
-        print(f"  Saved classifier decoder: {ln} → {path}")
-        del X, clf
-        _gc.collect()
-
-    manifest = {
-        'ordered': ordered,
-        'grid': (width, height),
-        'metric': 'manhattan',
-        'decoder_type': 'classifier',
-        'layer_files': layer_files,
-        'layer_sizes': layer_sizes,
-        'n_train_samples': len(pos),
-    }
-    manifest_path = out_dir / 'manifest.pkl'
-    with open(manifest_path, 'wb') as f:
-        pickle.dump(manifest, f)
-    print(f"  Saved manifest to {manifest_path}")
-
 
 def eval_layer_decoders(from_model_dir, layers, pos, width, height):
     """Load saved layer decoders and evaluate on new data.
@@ -1222,8 +1139,6 @@ def decode_layers_classification_holdout(
 
     todo = [ln for ln in ordered if ln not in layer_values]
     print(f"  Layers to process: {len(todo)} / {len(ordered)}")
-    if not todo:
-        return layer_values, ordered, loss_histories, {}, {}, {}
 
     # Subsample training data if requested
     if max_samples > 0 and len(pos_train) > max_samples:
@@ -2174,10 +2089,12 @@ if __name__ == '__main__':
 
         # Save reusable per-layer decoders if requested
         if args.save_model:
-            if layer_clfs:
-                # Holdout mode: save the already-trained classifiers directly
-                # (no retraining needed)
-                print("\n=== Saving Layer Decoders (from holdout training) ===")
+            print("\n=== Saving Layer Decoders ===")
+            if not layer_clfs:
+                print("  WARNING: No classifiers to save (all layers resumed "
+                      "from checkpoint). Delete the checkpoint and rerun, or "
+                      "use --from_model to evaluate existing decoders.")
+            else:
                 out_dir = save_dir / 'layer_decoders'
                 out_dir.mkdir(parents=True, exist_ok=True)
                 layer_files = {}
@@ -2210,25 +2127,6 @@ if __name__ == '__main__':
                 with open(out_dir / 'manifest.pkl', 'wb') as f:
                     pickle.dump(manifest, f)
                 print(f"  Saved manifest to {out_dir / 'manifest.pkl'}")
-            else:
-                # CV mode: no single classifier per layer, retrain on full data
-                print("\n=== Saving Layer Decoders (retrain on full data) ===")
-                print("  Freeing decode results to save memory...")
-                layers = None
-                layers_test_dict = None
-                layer_pred_xy = None
-                layer_train_pred_xy = None
-                layer_proba = None
-                loss_histories = None
-                gc.collect()
-                save_layer_decoders(
-                    None, pos, width, height, ordered, save_dir,
-                    n_iters=(args.n_iters if args.max_iters is not None
-                             else max(args.n_iters, 50000)),
-                    device=args.device, n_jobs=args.n_jobs,
-                    patience=args.patience,
-                    ep_file_index=ep_file_index,
-                    train_mask=train_mask)
 
         results_file = save_dir / 'layer_decode_results.pkl'
         save_payload = {
