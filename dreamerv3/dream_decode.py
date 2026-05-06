@@ -163,15 +163,21 @@ def plot_dream_probmaps(dream_proba, start_pos, metadata, save_dir,
         if n_steps == 1:
             axes = [axes]
 
-        # Zoom bounds from start position
+        # Zoom bounds from start position + all argmax decoded positions
         sp = start_pos[di]
-        pad = tile_size * 8
-        cx = sp[0] * tile_size + tile_size // 2
-        cy = img_h - (sp[1] * tile_size + tile_size // 2)
-        x_lo = max(0, cx - pad)
-        x_hi = min(img_w, cx + pad)
-        y_lo = max(0, cy - pad)
-        y_hi = min(img_h, cy + pad)
+        # Collect all argmax positions for this dream
+        all_cx = [sp[0] * tile_size + tile_size // 2]
+        all_cy = [img_h - (sp[1] * tile_size + tile_size // 2)]
+        for t in step_indices:
+            p_grid_t = dream_proba[di, t]
+            dx, dy = np.unravel_index(p_grid_t.argmax(), p_grid_t.shape)
+            all_cx.append(dx * tile_size + tile_size // 2)
+            all_cy.append(img_h - (dy * tile_size + tile_size // 2))
+        pad = tile_size * 5
+        x_lo = max(0, min(all_cx) - pad)
+        x_hi = min(img_w, max(all_cx) + pad)
+        y_lo = max(0, min(all_cy) - pad)
+        y_hi = min(img_h, max(all_cy) + pad)
 
         for si, ax in enumerate(axes):
             ax.set_facecolor('#1a1a1a')
@@ -211,6 +217,13 @@ def plot_dream_probmaps(dream_proba, start_pos, metadata, save_dir,
             ax.set_title(f't={t}', fontsize=9, fontweight='bold', color='white',
                          bbox=dict(facecolor='black', alpha=0.6, pad=2))
             ax.axis('off')
+            if si == 0:
+                ax.plot([], [], 'o', color='cyan', markersize=7,
+                        markeredgecolor='white', label='start')
+                ax.plot([], [], '*', color='lime', markersize=11,
+                        markeredgecolor='white', label='argmax pos')
+                ax.legend(fontsize=7, loc='upper left',
+                          facecolor='black', edgecolor='grey', labelcolor='white')
 
         fig.suptitle(f'Dream {di+1} P(pos) (seed={env_seed})',
                      fontsize=12, color='white')
@@ -378,8 +391,9 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
     print("Running report() to get dream rollouts...")
     stream = make_stream(replay, 'report')
     stream = agent.stream(stream)
+    stream = iter(stream)
 
-    carry = agent.init_report
+    carry = agent.init_report(args.batch_size)
     num_batches = dd_config.num_batches
 
     all_dream_deter = []
