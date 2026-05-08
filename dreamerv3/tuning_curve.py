@@ -648,6 +648,68 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     plt.close(fig)
 
 
+def plot_tuning_with_autocorr(tc_array, metrics, layer_name, save_path,
+                              n_examples=10, sort_by='EV'):
+    """Top tuning curves (row 1) with their spatial autocorrelations (row 2).
+
+    Shows the top-N neurons by EV (or SI) with their 2D autocorrelation below,
+    annotated with the number of peaks detected.
+
+    Args:
+        tc_array: (N_neurons, H, W) tuning curves.
+        metrics: dict with 'SI', 'EVs', 'pf_peaks'.
+        layer_name: name for title.
+        save_path: output file path.
+        n_examples: how many neurons to show.
+        sort_by: 'EV' or 'SI'.
+    """
+    n_neurons = tc_array.shape[0]
+    n_show = min(n_examples, n_neurons)
+    metric_key = 'EVs' if sort_by == 'EV' else 'SI'
+    order = np.argsort(metrics[metric_key])[::-1]
+    selected = order[:n_show]
+
+    fig, axes = plt.subplots(2, n_show, figsize=(2 * n_show, 4.5),
+                              squeeze=False)
+
+    for col, neuron_idx in enumerate(selected):
+        tc = tc_array[neuron_idx]
+        ev_val = metrics['EVs'][neuron_idx]
+        si_val = metrics['SI'][neuron_idx]
+        peaks = int(metrics['pf_peaks'][neuron_idx]) if np.isfinite(
+            metrics['pf_peaks'][neuron_idx]) else 0
+
+        # Row 0: tuning curve
+        ax_tc = axes[0, col]
+        ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                     interpolation='nearest', cmap=_tc_cmap())
+        ax_tc.set_title(f'n{neuron_idx}\nEV={ev_val:.2f} SI={si_val:.2f}',
+                        fontsize=6)
+        ax_tc.set_xticks([])
+        ax_tc.set_yticks([])
+
+        # Row 1: autocorrelation
+        ax_ac = axes[1, col]
+        ac = correlate2d(np.nan_to_num(tc), np.nan_to_num(tc), mode='full')
+        if ac.max() > 0:
+            ac = ac / ac.max()
+        ax_ac.imshow(ac.T, origin='lower', interpolation='nearest',
+                     cmap='RdBu_r', vmin=-0.2, vmax=1.0)
+        ax_ac.set_title(f'peaks={peaks}', fontsize=6)
+        ax_ac.set_xticks([])
+        ax_ac.set_yticks([])
+
+    axes[0, 0].set_ylabel('Tuning Curve', fontsize=8)
+    axes[1, 0].set_ylabel('Autocorrelation', fontsize=8)
+
+    fig.suptitle(f'{layer_name}: Top {n_show} by {sort_by} + Spatial Autocorrelation',
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    print(f"  Saved {save_path}")
+
+
 def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
     """N×(1+M) grid: SI vs EV scatter (col 0) + M sampled tuning curves per layer.
 
@@ -1026,14 +1088,37 @@ def main():
                              'metadata or inferred from positions.')
     parser.add_argument('--from_pkl', default=None,
                         help='Load precomputed tuning_results.pkl and show interactive viewer (no recomputation)')
+    parser.add_argument('--plot_autocorr', action='store_true',
+                        help='With --from_pkl: generate tuning+autocorr plots instead of interactive viewer')
     args = parser.parse_args()
 
-    # Interactive viewer from precomputed pkl — no data/save needed
+    # Interactive viewer or autocorr plots from precomputed pkl
     if args.from_pkl:
         with open(args.from_pkl, 'rb') as f:
             results_dict = pickle.load(f)
         layers = results_dict['layers']
         layer_names = list(layers.keys())
+
+        # --plot_autocorr: batch generate tuning+autocorr plots
+        if args.plot_autocorr:
+            pkl_path = Path(args.from_pkl)
+            out_dir = Path(args.save) if args.save else pkl_path.parent
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ordered = get_sorted_layers(layer_names)
+            if args.layers:
+                ordered = [ln for ln in ordered if ln in args.layers]
+            for ln in ordered:
+                ld = layers[ln]
+                safe_name = ln.replace('/', '_')
+                plot_tuning_with_autocorr(
+                    ld['tuning_curves'], ld['metrics'], ln,
+                    out_dir / f'{safe_name}_tuning_with_autocorr.pdf',
+                    n_examples=10, sort_by='EV',
+                )
+            print("Done.")
+            return
+
+        # Interactive viewer
         if len(layer_names) == 1:
             ln = layer_names[0]
         else:
@@ -1267,6 +1352,11 @@ def main():
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                 layer_dir / 'example_tuning_curves_ev.pdf',
                 area=area, sort_by='EV',
+            )
+            plot_tuning_with_autocorr(
+                res['tuning_curves'], res['metrics'], ln,
+                layer_dir / 'tuning_with_autocorr.pdf',
+                n_examples=10, sort_by='EV',
             )
 
         if len(all_results) > 1:
