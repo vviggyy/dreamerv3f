@@ -201,6 +201,120 @@ def calculate_field_asymmetry(tc_autocorr, threshold=0.5):
 
 
 # ---------------------------------------------------------------------------
+# Global spatial autocorrelation metrics (Moran's I, Geary's C, Getis-Ord G)
+# ---------------------------------------------------------------------------
+
+def _inverse_distance_weights(valid_mask):
+    """Build inverse-distance weight matrix for valid bins on a 2D grid.
+
+    Args:
+        valid_mask: (H, W) boolean array, True for non-NaN bins.
+    Returns:
+        W: (N, N) weight matrix, N = number of valid bins.
+        valid_indices: (N, 2) array of (row, col) for each valid bin.
+    """
+    valid_indices = np.argwhere(valid_mask)  # (N, 2)
+    N = len(valid_indices)
+    if N < 2:
+        return np.zeros((N, N)), valid_indices
+    # Pairwise Euclidean distances
+    diff = valid_indices[:, None, :] - valid_indices[None, :, :]  # (N, N, 2)
+    dist = np.sqrt((diff ** 2).sum(axis=2))  # (N, N)
+    # Inverse distance, diagonal = 0
+    with np.errstate(divide='ignore'):
+        W = np.where(dist > 0, 1.0 / dist, 0.0)
+    return W, valid_indices
+
+
+def global_morans_i(tc):
+    """Global Moran's I for a single 2D tuning curve. NaN bins excluded.
+
+    I = (N / W_sum) * (z^T @ W @ z) / (z^T @ z)
+    where z = x - mean(x).
+
+    Returns NaN if fewer than 3 valid bins or zero variance.
+    """
+    valid_mask = ~np.isnan(tc)
+    N = valid_mask.sum()
+    if N < 3:
+        return np.nan
+    vals = tc[valid_mask]
+    z = vals - vals.mean()
+    ss = (z ** 2).sum()
+    if ss == 0:
+        return np.nan
+    W, _ = _inverse_distance_weights(valid_mask)
+    W_sum = W.sum()
+    if W_sum == 0:
+        return np.nan
+    I = (N / W_sum) * (z @ W @ z) / ss
+    return float(I)
+
+
+def gearys_c(tc):
+    """Geary's C for a single 2D tuning curve. NaN bins excluded.
+
+    C = ((N-1) / (2 * W_sum)) * sum_ij(w_ij * (x_i - x_j)^2) / sum(z_i^2)
+
+    Returns NaN if fewer than 3 valid bins or zero variance.
+    """
+    valid_mask = ~np.isnan(tc)
+    N = valid_mask.sum()
+    if N < 3:
+        return np.nan
+    vals = tc[valid_mask]
+    z = vals - vals.mean()
+    ss = (z ** 2).sum()
+    if ss == 0:
+        return np.nan
+    W, _ = _inverse_distance_weights(valid_mask)
+    W_sum = W.sum()
+    if W_sum == 0:
+        return np.nan
+    diff = vals[:, None] - vals[None, :]  # (N, N)
+    numer = (W * diff ** 2).sum()
+    C = ((N - 1) / (2 * W_sum)) * numer / ss
+    return float(C)
+
+
+def getis_ord_g(tc):
+    """Getis-Ord General G for a single 2D tuning curve. NaN bins excluded.
+
+    G = sum_ij(w_ij * x_i * x_j) / sum_ij(x_i * x_j), i != j
+
+    Returns NaN if fewer than 3 valid bins or zero denominator.
+    """
+    valid_mask = ~np.isnan(tc)
+    N = valid_mask.sum()
+    if N < 3:
+        return np.nan
+    vals = tc[valid_mask]
+    W, _ = _inverse_distance_weights(valid_mask)
+    cross = vals[:, None] * vals[None, :]  # (N, N)
+    # Exclude diagonal
+    np.fill_diagonal(cross, 0)
+    denom = cross.sum()
+    if denom == 0:
+        return np.nan
+    G = (W * cross).sum() / denom
+    return float(G)
+
+
+def _compute_spatial_autocorr_metrics(tuning_curves):
+    """Compute Moran's I, Geary's C, Getis-Ord G for an array of tuning curves.
+
+    Args:
+        tuning_curves: (N_neurons, H, W) array.
+    Returns:
+        morans, gearys, getis: each (N_neurons,) arrays.
+    """
+    morans = np.array([global_morans_i(tc) for tc in tuning_curves])
+    gearys = np.array([gearys_c(tc) for tc in tuning_curves])
+    getis = np.array([getis_ord_g(tc) for tc in tuning_curves])
+    return morans, gearys, getis
+
+
+# ---------------------------------------------------------------------------
 # EV reliability (from pRNN TuningCurveAnalysis.py makeFAKEdata)
 # ---------------------------------------------------------------------------
 
@@ -493,6 +607,9 @@ def analyze_layer(layer_name, activations, positions, groups, area,
     fieldsizes = np.array([calculate_field_size(ac) for ac in autocorrs])
     fieldasymmetries = np.array([calculate_field_asymmetry(ac) for ac in autocorrs])
 
+    # Global spatial autocorrelation metrics
+    morans, gearys, getis = _compute_spatial_autocorr_metrics(tc_array)
+
     # Border score: NaN (no terrain data at analysis time)
     border_score = np.full(n_neurons, np.nan)
 
@@ -504,6 +621,9 @@ def analyze_layer(layer_name, activations, positions, groups, area,
         'pf_peaks': peaks,
         'fieldsize': fieldsizes,
         'fieldasymmetry': fieldasymmetries,
+        'morans_i': morans,
+        'gearys_c': gearys,
+        'getis_ord_g': getis,
     }
 
     # Cell classification
@@ -605,11 +725,24 @@ def plot_cell_types(group_ids, layer_name, save_path):
 def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
                                sort_by='SI'):
-    """Grid of example tuning curves sorted by SI or EV."""
+    """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.)."""
     n_neurons = tc_array.shape[0]
     n_show = min(n_examples, n_neurons)
-    metric_key = 'EVs' if sort_by == 'EV' else 'SI'
-    order = np.argsort(metrics[metric_key])[::-1]
+    # Map sort_by name to metrics dict key
+    _sort_key_map = {'EV': 'EVs', 'SI': 'SI',
+                     'morans_i': 'morans_i', 'gearys_c': 'gearys_c',
+                     'getis_ord_g': 'getis_ord_g'}
+    metric_key = _sort_key_map.get(sort_by, sort_by)
+    if metric_key not in metrics:
+        print(f"  Warning: metric '{metric_key}' not found, falling back to SI")
+        metric_key = 'SI'
+        sort_by = 'SI'
+    vals = metrics[metric_key]
+    # For Geary's C, lower = more spatial structure, so sort ascending
+    if sort_by == 'gearys_c':
+        order = np.argsort(vals)  # ascending — lowest C = most clustered
+    else:
+        order = np.argsort(vals)[::-1]  # descending — highest = best
     selected = order[:n_show]
 
     ncols = min(5, n_show)
@@ -704,7 +837,8 @@ def plot_tuning_with_autocorr(tc_array, metrics, layer_name, save_path,
 
     fig.suptitle(f'{layer_name}: Top {n_show} by {sort_by} + Spatial Autocorrelation',
                  fontsize=10)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.subplots_adjust(hspace=0.4)
     fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     print(f"  Saved {save_path}")
@@ -1099,6 +1233,16 @@ def main():
         layers = results_dict['layers']
         layer_names = list(layers.keys())
 
+        # Backward compat: recompute spatial autocorrelation metrics if missing
+        for ln in layer_names:
+            ld = layers[ln]
+            if 'morans_i' not in ld['metrics']:
+                print(f"  Recomputing spatial autocorr metrics for {ln}...")
+                m, g, go = _compute_spatial_autocorr_metrics(ld['tuning_curves'])
+                ld['metrics']['morans_i'] = m
+                ld['metrics']['gearys_c'] = g
+                ld['metrics']['getis_ord_g'] = go
+
         # --plot_autocorr: batch generate tuning+autocorr plots
         if args.plot_autocorr:
             pkl_path = Path(args.from_pkl)
@@ -1115,6 +1259,14 @@ def main():
                     out_dir / f'{safe_name}_tuning_with_autocorr.pdf',
                     n_examples=10, sort_by='EV',
                 )
+                for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g'):
+                    plot_example_tuning_curves(
+                        ld['tuning_curves'], ld['metrics'],
+                        ld.get('group_ids', np.zeros(len(ld['metrics']['SI']), dtype=int)),
+                        ln,
+                        out_dir / f'{safe_name}_example_tuning_curves_{metric_name}.pdf',
+                        sort_by=metric_name,
+                    )
             print("Done.")
             return
 
@@ -1358,6 +1510,12 @@ def main():
                 layer_dir / 'tuning_with_autocorr.pdf',
                 n_examples=10, sort_by='EV',
             )
+            for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g'):
+                plot_example_tuning_curves(
+                    res['tuning_curves'], res['metrics'], res['group_ids'], ln,
+                    layer_dir / f'example_tuning_curves_{metric_name}.pdf',
+                    area=area, sort_by=metric_name,
+                )
 
         if len(all_results) > 1:
             plot_layer_summary(all_results, save_dir / 'layer_summary.svg')
