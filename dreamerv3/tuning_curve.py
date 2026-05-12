@@ -1275,9 +1275,11 @@ def main():
             for ln in ordered:
                 ld = layers[ln]
                 safe_name = ln.replace('/', '_')
+                layer_dir = out_dir / safe_name
+                layer_dir.mkdir(parents=True, exist_ok=True)
                 plot_tuning_with_autocorr(
                     ld['tuning_curves'], ld['metrics'], ln,
-                    out_dir / f'{safe_name}_tuning_with_autocorr.pdf',
+                    layer_dir / 'tuning_with_autocorr.pdf',
                     n_examples=10, sort_by='EV',
                 )
                 for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize'):
@@ -1285,7 +1287,7 @@ def main():
                         ld['tuning_curves'], ld['metrics'],
                         ld.get('group_ids', np.zeros(len(ld['metrics']['SI']), dtype=int)),
                         ln,
-                        out_dir / f'{safe_name}_example_tuning_curves_{metric_name}.pdf',
+                        layer_dir / f'example_tuning_curves_{metric_name}.pdf',
                         sort_by=metric_name,
                         ev_filter=args.ev_filter,
                     )
