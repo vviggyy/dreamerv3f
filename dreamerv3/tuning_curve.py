@@ -724,10 +724,14 @@ def plot_cell_types(group_ids, layer_name, save_path):
 
 def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
-                               sort_by='SI'):
-    """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.)."""
+                               sort_by='SI', ev_filter=0.0):
+    """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.).
+
+    Args:
+        ev_filter: For autocorr metrics (morans_i, gearys_c, getis_ord_g),
+            only show neurons with EV > ev_filter. Set 0 to disable.
+    """
     n_neurons = tc_array.shape[0]
-    n_show = min(n_examples, n_neurons)
     # Map sort_by name to metrics dict key
     _sort_key_map = {'EV': 'EVs', 'SI': 'SI',
                      'morans_i': 'morans_i', 'gearys_c': 'gearys_c',
@@ -738,11 +742,22 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         metric_key = 'SI'
         sort_by = 'SI'
     vals = metrics[metric_key]
+    # Build candidate mask: exclude NaN/Inf values
+    candidate_mask = np.isfinite(vals)
+    # For autocorr metrics, also require EV above threshold
+    _autocorr_metrics = {'morans_i', 'gearys_c', 'getis_ord_g'}
+    if sort_by in _autocorr_metrics and ev_filter > 0 and 'EVs' in metrics:
+        candidate_mask &= np.isfinite(metrics['EVs']) & (metrics['EVs'] > ev_filter)
+    candidates = np.where(candidate_mask)[0]
+    if len(candidates) == 0:
+        print(f"  Warning: no valid neurons for {sort_by} (ev_filter={ev_filter}), skipping")
+        return
+    n_show = min(n_examples, len(candidates))
     # For Geary's C, lower = more spatial structure, so sort ascending
     if sort_by == 'gearys_c':
-        order = np.argsort(vals)  # ascending — lowest C = most clustered
+        order = candidates[np.argsort(vals[candidates])]  # ascending — lowest C = most clustered
     else:
-        order = np.argsort(vals)[::-1]  # descending — highest = best
+        order = candidates[np.argsort(vals[candidates])[::-1]]  # descending — highest = best
     selected = order[:n_show]
 
     ncols = min(5, n_show)
@@ -797,9 +812,15 @@ def plot_tuning_with_autocorr(tc_array, metrics, layer_name, save_path,
         sort_by: 'EV' or 'SI'.
     """
     n_neurons = tc_array.shape[0]
-    n_show = min(n_examples, n_neurons)
     metric_key = 'EVs' if sort_by == 'EV' else 'SI'
-    order = np.argsort(metrics[metric_key])[::-1]
+    vals = metrics[metric_key]
+    # Filter out NaN/Inf before sorting
+    valid = np.where(np.isfinite(vals))[0]
+    if len(valid) == 0:
+        print(f"  Warning: no finite values for {sort_by} in {layer_name}, skipping")
+        return
+    n_show = min(n_examples, len(valid))
+    order = valid[np.argsort(vals[valid])[::-1]]
     selected = order[:n_show]
 
     fig, axes = plt.subplots(2, n_show, figsize=(2 * n_show, 4.5),
@@ -1266,6 +1287,7 @@ def main():
                         ln,
                         out_dir / f'{safe_name}_example_tuning_curves_{metric_name}.pdf',
                         sort_by=metric_name,
+                        ev_filter=args.ev_filter,
                     )
             print("Done.")
             return
@@ -1515,6 +1537,7 @@ def main():
                     res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                     layer_dir / f'example_tuning_curves_{metric_name}.pdf',
                     area=area, sort_by=metric_name,
+                    ev_filter=args.ev_filter,
                 )
 
         if len(all_results) > 1:
