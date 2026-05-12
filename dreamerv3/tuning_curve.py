@@ -204,11 +204,13 @@ def calculate_field_asymmetry(tc_autocorr, threshold=0.5):
 # Global spatial autocorrelation metrics (Moran's I, Geary's C, Getis-Ord G)
 # ---------------------------------------------------------------------------
 
-def _inverse_distance_weights(valid_mask):
+def _inverse_distance_weights(valid_mask, dist_cutoff=0):
     """Build inverse-distance weight matrix for valid bins on a 2D grid.
 
     Args:
         valid_mask: (H, W) boolean array, True for non-NaN bins.
+        dist_cutoff: Max distance in tiles. Pairs beyond this get weight 0.
+            0 means no cutoff (all pairs weighted).
     Returns:
         W: (N, N) weight matrix, N = number of valid bins.
         valid_indices: (N, 2) array of (row, col) for each valid bin.
@@ -223,10 +225,13 @@ def _inverse_distance_weights(valid_mask):
     # Inverse distance, diagonal = 0
     with np.errstate(divide='ignore'):
         W = np.where(dist > 0, 1.0 / dist, 0.0)
+    # Apply distance cutoff
+    if dist_cutoff > 0:
+        W[dist > dist_cutoff] = 0.0
     return W, valid_indices
 
 
-def global_morans_i(tc):
+def global_morans_i(tc, dist_cutoff=0):
     """Global Moran's I for a single 2D tuning curve. NaN bins excluded.
 
     I = (N / W_sum) * (z^T @ W @ z) / (z^T @ z)
@@ -243,7 +248,7 @@ def global_morans_i(tc):
     ss = (z ** 2).sum()
     if ss == 0:
         return np.nan
-    W, _ = _inverse_distance_weights(valid_mask)
+    W, _ = _inverse_distance_weights(valid_mask, dist_cutoff=dist_cutoff)
     W_sum = W.sum()
     if W_sum == 0:
         return np.nan
@@ -251,7 +256,7 @@ def global_morans_i(tc):
     return float(I)
 
 
-def gearys_c(tc):
+def gearys_c(tc, dist_cutoff=0):
     """Geary's C for a single 2D tuning curve. NaN bins excluded.
 
     C = ((N-1) / (2 * W_sum)) * sum_ij(w_ij * (x_i - x_j)^2) / sum(z_i^2)
@@ -267,7 +272,7 @@ def gearys_c(tc):
     ss = (z ** 2).sum()
     if ss == 0:
         return np.nan
-    W, _ = _inverse_distance_weights(valid_mask)
+    W, _ = _inverse_distance_weights(valid_mask, dist_cutoff=dist_cutoff)
     W_sum = W.sum()
     if W_sum == 0:
         return np.nan
@@ -277,7 +282,7 @@ def gearys_c(tc):
     return float(C)
 
 
-def getis_ord_g(tc):
+def getis_ord_g(tc, dist_cutoff=0):
     """Getis-Ord General G for a single 2D tuning curve. NaN bins excluded.
 
     G = sum_ij(w_ij * x_i * x_j) / sum_ij(x_i * x_j), i != j
@@ -289,7 +294,7 @@ def getis_ord_g(tc):
     if N < 3:
         return np.nan
     vals = tc[valid_mask]
-    W, _ = _inverse_distance_weights(valid_mask)
+    W, _ = _inverse_distance_weights(valid_mask, dist_cutoff=dist_cutoff)
     cross = vals[:, None] * vals[None, :]  # (N, N)
     # Exclude diagonal
     np.fill_diagonal(cross, 0)
@@ -300,17 +305,18 @@ def getis_ord_g(tc):
     return float(G)
 
 
-def _compute_spatial_autocorr_metrics(tuning_curves):
+def _compute_spatial_autocorr_metrics(tuning_curves, dist_cutoff=0):
     """Compute Moran's I, Geary's C, Getis-Ord G for an array of tuning curves.
 
     Args:
         tuning_curves: (N_neurons, H, W) array.
+        dist_cutoff: Max distance in tiles for weight matrix (0=no cutoff).
     Returns:
         morans, gearys, getis: each (N_neurons,) arrays.
     """
-    morans = np.array([global_morans_i(tc) for tc in tuning_curves])
-    gearys = np.array([gearys_c(tc) for tc in tuning_curves])
-    getis = np.array([getis_ord_g(tc) for tc in tuning_curves])
+    morans = np.array([global_morans_i(tc, dist_cutoff) for tc in tuning_curves])
+    gearys = np.array([gearys_c(tc, dist_cutoff) for tc in tuning_curves])
+    getis = np.array([getis_ord_g(tc, dist_cutoff) for tc in tuning_curves])
     return morans, gearys, getis
 
 
@@ -552,7 +558,8 @@ def compute_hd_info(rates, hd, epoch):
 
 def analyze_layer(layer_name, activations, positions, groups, area,
                   facing=None, test_activations=None, test_positions=None,
-                  test_groups=None, compute_hd=True, smooth_sigma=0):
+                  test_groups=None, compute_hd=True, smooth_sigma=0,
+                  dist_cutoff=0):
     """Full tuning curve analysis for one layer.
 
     Args:
@@ -567,6 +574,7 @@ def analyze_layer(layer_name, activations, positions, groups, area,
         test_groups: optional held-out episode groups.
         compute_hd: whether to compute HD metrics.
         smooth_sigma: Gaussian smoothing sigma (bins) for tuning curves before SI.
+        dist_cutoff: Max distance (tiles) for spatial autocorr weights (0=no cutoff).
 
     Returns:
         dict with tuning_curves, metrics, groups, group_ids.
@@ -608,7 +616,7 @@ def analyze_layer(layer_name, activations, positions, groups, area,
     fieldasymmetries = np.array([calculate_field_asymmetry(ac) for ac in autocorrs])
 
     # Global spatial autocorrelation metrics
-    morans, gearys, getis = _compute_spatial_autocorr_metrics(tc_array)
+    morans, gearys, getis = _compute_spatial_autocorr_metrics(tc_array, dist_cutoff=dist_cutoff)
 
     # Border score: NaN (no terrain data at analysis time)
     border_score = np.full(n_neurons, np.nan)
@@ -1231,6 +1239,9 @@ def main():
                         help='Gaussian smoothing sigma (bins) on tuning curves before SI (0=off)')
     parser.add_argument('--ev_filter', type=float, default=0.4,
                         help='EV cutoff for filtered SI/EV boxplots (default 0.4)')
+    parser.add_argument('--dist_cutoff', type=float, default=7,
+                        help='Max distance (tiles) for spatial autocorr weight matrix. '
+                             'Pairs beyond this get weight 0. 0=no cutoff (default 7)')
     parser.add_argument('--min_bbox', type=float, default=0,
                         help='Min bounding-box area (tiles²) to keep an episode (0=no filter)')
     parser.add_argument('--interactive', action='store_true',
@@ -1254,15 +1265,15 @@ def main():
         layers = results_dict['layers']
         layer_names = list(layers.keys())
 
-        # Backward compat: recompute spatial autocorrelation metrics if missing
+        # Recompute spatial autocorrelation metrics (always, since dist_cutoff may differ)
+        dc = getattr(args, 'dist_cutoff', 0)
         for ln in layer_names:
             ld = layers[ln]
-            if 'morans_i' not in ld['metrics']:
-                print(f"  Recomputing spatial autocorr metrics for {ln}...")
-                m, g, go = _compute_spatial_autocorr_metrics(ld['tuning_curves'])
-                ld['metrics']['morans_i'] = m
-                ld['metrics']['gearys_c'] = g
-                ld['metrics']['getis_ord_g'] = go
+            print(f"  Computing spatial autocorr metrics for {ln} (dist_cutoff={dc})...")
+            m, g, go = _compute_spatial_autocorr_metrics(ld['tuning_curves'], dist_cutoff=dc)
+            ld['metrics']['morans_i'] = m
+            ld['metrics']['gearys_c'] = g
+            ld['metrics']['getis_ord_g'] = go
 
         # --plot_autocorr: batch generate tuning+autocorr plots
         if args.plot_autocorr:
@@ -1439,6 +1450,7 @@ def main():
             test_groups=test_groups,
             compute_hd=not args.no_hd and facing is not None,
             smooth_sigma=args.smooth_sigma,
+            dist_cutoff=args.dist_cutoff,
         )
         all_results.append(result)
 
