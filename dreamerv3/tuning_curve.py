@@ -743,7 +743,8 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     # Map sort_by name to metrics dict key
     _sort_key_map = {'EV': 'EVs', 'SI': 'SI',
                      'morans_i': 'morans_i', 'gearys_c': 'gearys_c',
-                     'getis_ord_g': 'getis_ord_g', 'fieldsize': 'fieldsize'}
+                     'getis_ord_g': 'getis_ord_g', 'fieldsize': 'fieldsize',
+                     'pf_peaks': 'pf_peaks'}
     metric_key = _sort_key_map.get(sort_by, sort_by)
     if metric_key not in metrics:
         print(f"  Warning: metric '{metric_key}' not found, falling back to SI")
@@ -753,7 +754,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     # Build candidate mask: exclude NaN/Inf values
     candidate_mask = np.isfinite(vals)
     # For autocorr metrics, also require EV above threshold
-    _autocorr_metrics = {'morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize'}
+    _autocorr_metrics = {'morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'}
     if sort_by in _autocorr_metrics and ev_filter > 0 and 'EVs' in metrics:
         candidate_mask &= np.isfinite(metrics['EVs']) & (metrics['EVs'] > ev_filter)
     candidates = np.where(candidate_mask)[0]
@@ -1293,7 +1294,7 @@ def main():
                     layer_dir / 'tuning_with_autocorr.pdf',
                     n_examples=10, sort_by='EV',
                 )
-                for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize'):
+                for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
                     plot_example_tuning_curves(
                         ld['tuning_curves'], ld['metrics'],
                         ld.get('group_ids', np.zeros(len(ld['metrics']['SI']), dtype=int)),
@@ -1546,7 +1547,7 @@ def main():
                 layer_dir / 'tuning_with_autocorr.pdf',
                 n_examples=10, sort_by='EV',
             )
-            for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize'):
+            for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
                 plot_example_tuning_curves(
                     res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                     layer_dir / f'example_tuning_curves_{metric_name}.pdf',
