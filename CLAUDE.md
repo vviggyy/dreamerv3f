@@ -213,9 +213,9 @@ MPLBACKEND=Agg python dreamerv3/manifold_analysis.py \
   --dream_data ./logdir/my_run/dream_results/dream_results.pkl \
   --save ./logdir/my_run/manifold_results
 ```
-Compares wake (real trajectory) and dream (imagination) activations on the neural manifold. Three metrics: sRSA (Spearman rank correlation of spatial vs neural distances on wake), Isomap (2D manifold visualization of wake+dream), SW distance (median min cosine distance from dream to nearest wake point). `--dream_data` accepts either a `dream_results.pkl` (from dream_decode with `save_activations=True`) or a second trajectory directory (for wake-vs-wake control). Key args: `--layers dyn/deter dyn/stoch` (default), `--max_wake_samples 4000`, `--n_neighbors 150` (Isomap), `--no_isomap` (skip Isomap for speed), `--min_bbox N`.
+Compares wake (real trajectory) and dream (imagination) activations on the neural manifold, following pRNN's `representationalGeometryAnalysis.py`. Four metrics: sRSA (Spearman rank correlation of spatial vs neural distances on wake, shown as P[neural|spatial] conditional histogram), Hill fit (saturating Hill function fitted to binned neural-vs-spatial distance, extracting dh_0/dh_inf/dx_1/2), Isomap (2D manifold visualization of wake+dream), SW distance (median min cosine distance from dream to nearest wake point, shown as pRNN-style vertical column). `--dream_data` accepts either a `dream_results.pkl` (from dream_decode with `save_activations=True`) or a second trajectory directory (for wake-vs-wake control). Key args: `--layers dyn/deter dyn/stoch` (default), `--max_wake_samples 4000`, `--n_neighbors 150` (Isomap), `--no_isomap` (skip Isomap for speed), `--no_hill` (skip Hill fit), `--min_bbox N`.
 
-Outputs: `{layer}_srsa.png`, `{layer}_isomap_position.png`, `{layer}_isomap_wakedream.png`, `{layer}_swdist.png`, `manifold_summary.png`, `manifold_results.pkl`.
+Outputs: `{layer}_srsa.png`, `{layer}_hillfit.png`, `{layer}_swdist.png`, `{layer}_isomap_position.png`, `{layer}_isomap_wakedream.png`, `{layer}_wakesleep.png` (combined pRNN-style figure), `manifold_summary.png`, `manifold_results.pkl`.
 
 ### interactive tuning viewer (from precomputed pkl)
 ```
