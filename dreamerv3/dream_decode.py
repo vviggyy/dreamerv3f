@@ -488,6 +488,13 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
     if dream_proba is not None:
         results['dream_proba'] = dream_proba
 
+    # Save raw dream activations for downstream manifold analysis
+    if dd_config.save_activations:
+        results['dream_deter'] = dream_deter  # (N, H, D)
+        if dream_stoch is not None:
+            results['dream_stoch'] = dream_stoch  # (N, H, ...)
+        print(f"  Saved raw dream activations (save_activations=True)")
+
     results_file = save_dir / 'dream_results.pkl'
     with open(results_file, 'wb') as f:
         pickle.dump(results, f)

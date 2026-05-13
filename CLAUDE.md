@@ -11,6 +11,7 @@
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
 - `dreamerv3/tuning_cluster.py` — dimensionality reduction clustering of tuning curves: PCA/t-SNE/UMAP on spatial autocorrelation maps + HDBSCAN clustering. Loads `tuning_results.pkl`, produces scree plots, 2D scatter plots colored by cluster/cell-type/SI, and example tuning curve grids per cluster. Requires `umap-learn` and `hdbscan` for full pipeline (graceful fallback to PCA+t-SNE if missing)
+- `dreamerv3/manifold_analysis.py` — neural manifold analysis: sRSA (spatial structure in reps), Isomap (2D manifold visualization), SW distance (dream-to-wake proximity). Compares wake vs dream activations on dyn/deter and dyn/stoch layers
 - `dreamerv3/compare_conditions.py` — cross-condition comparison: loads layer_decode_results.pkl and tuning_results.pkl from N runs, produces heatmaps, line plots, cell type composition charts, and summary CSV
 - `dreamerv3/plot_training.py` — reads `scores.jsonl` + `metrics.jsonl`, produces training_progress.png with episode score, cumulative reward, Crafter score, per-achievement unlock rates, and optionally loss/reward/value panels
 - `dreamerv3/run_info.py` — lightweight run provenance logger. `log_run_info(save_dir, stage, args, outputs, extra)` appends a JSON entry to `<save_dir>/run_info.json` with timestamp, git SHA, command line, SLURM job ID, and all args. Integrated into decode_position, plot_trajectories, plot_training, and tuning_curve
@@ -28,6 +29,7 @@
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
 - `run_Clustering.sh` — tuning curve clustering via PCA/t-SNE/UMAP + HDBSCAN (CPU, day partition). Settings: FROM_PKL, n_components, perplexity, umap_neighbors, min_cluster_size
+- `run_Manifold.sh` — neural manifold analysis (CPU, day partition). Settings: LOGDIR, DREAM_DATA, LAYERS, MAX_WAKE_SAMPLES, N_NEIGHBORS, NO_ISOMAP
 
 ## run provenance
 Every analysis script appends to `<save_dir>/run_info.json` via `dreamerv3/run_info.py`:
@@ -203,6 +205,17 @@ MPLBACKEND=Agg python dreamerv3/tuning_cluster.py \
 Runs PCA/t-SNE/UMAP on spatial autocorrelation maps of tuning curves + HDBSCAN clustering on UMAP embedding. Loads precomputed `tuning_results.pkl`. Key args: `--layers dyn/deter dyn/stoch` (optional filter), `--n_components 50` (PCA dims), `--perplexity 30` (t-SNE), `--umap_neighbors 15`, `--min_cluster_size 20` (HDBSCAN), `--no_normalize` (skip z-score). Requires `umap-learn` + `hdbscan` for full pipeline; falls back to PCA + t-SNE if missing.
 
 Outputs per layer: `{layer}_scree.svg`, `{layer}_pca.svg`, `{layer}_tsne.svg`, `{layer}_umap.svg` (scatter plots colored by HDBSCAN cluster, cell type, and SI), `{layer}_cluster_examples.svg` (top-SI tuning curves per cluster), `cluster_results.pkl`.
+
+### manifold analysis (sRSA, Isomap, SW distance)
+```
+MPLBACKEND=Agg python dreamerv3/manifold_analysis.py \
+  --data ./logdir/my_run/trajectories \
+  --dream_data ./logdir/my_run/dream_results/dream_results.pkl \
+  --save ./logdir/my_run/manifold_results
+```
+Compares wake (real trajectory) and dream (imagination) activations on the neural manifold. Three metrics: sRSA (Spearman rank correlation of spatial vs neural distances on wake), Isomap (2D manifold visualization of wake+dream), SW distance (median min cosine distance from dream to nearest wake point). `--dream_data` accepts either a `dream_results.pkl` (from dream_decode with `save_activations=True`) or a second trajectory directory (for wake-vs-wake control). Key args: `--layers dyn/deter dyn/stoch` (default), `--max_wake_samples 4000`, `--n_neighbors 150` (Isomap), `--no_isomap` (skip Isomap for speed), `--min_bbox N`.
+
+Outputs: `{layer}_srsa.png`, `{layer}_isomap_position.png`, `{layer}_isomap_wakedream.png`, `{layer}_swdist.png`, `manifold_summary.png`, `manifold_results.pkl`.
 
 ### interactive tuning viewer (from precomputed pkl)
 ```

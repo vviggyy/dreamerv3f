@@ -56,6 +56,7 @@ defaults:
     decoder_model: ''
     save_path: ''
     num_episodes: 3
+    save_activations: True
 
   replay_activations:
     source_data: ''
