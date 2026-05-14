@@ -202,9 +202,21 @@ MPLBACKEND=Agg python dreamerv3/tuning_cluster.py \
   --from_pkl ./logdir/my_run/tuning_results/tuning_results.pkl \
   --save ./logdir/my_run/tuning_results/cluster_plots
 ```
-Runs PCA/t-SNE/UMAP on spatial autocorrelation maps of tuning curves + HDBSCAN clustering on UMAP embedding. Loads precomputed `tuning_results.pkl`. Key args: `--layers dyn/deter dyn/stoch` (optional filter), `--n_components 50` (PCA dims), `--perplexity 30` (t-SNE), `--umap_neighbors 15`, `--min_cluster_size 20` (HDBSCAN), `--no_normalize` (skip z-score). Requires `umap-learn` + `hdbscan` for full pipeline; falls back to PCA + t-SNE if missing.
+Two modes via `--mode`:
 
-Outputs per layer: `{layer}_scree.svg`, `{layer}_pca.svg`, `{layer}_tsne.svg`, `{layer}_umap.svg` (scatter plots colored by HDBSCAN cluster, cell type, and SI), `{layer}_cluster_examples.svg` (top-SI tuning curves per cluster), `cluster_results.pkl`.
+**autocorr** (default): PCA/t-SNE/UMAP on spatial autocorrelation maps of tuning curves + HDBSCAN clustering on UMAP embedding. Key args: `--n_components 50` (PCA dims), `--perplexity 30` (t-SNE), `--umap_neighbors 15`, `--min_cluster_size 20` (HDBSCAN). Requires `umap-learn` + `hdbscan` for full pipeline; falls back to PCA + t-SNE if missing. Outputs per layer: `{layer}_scree.svg`, `{layer}_pca.svg`, `{layer}_tsne.svg`, `{layer}_umap.svg`, `{layer}_cluster_examples.svg`, `cluster_results.pkl`.
+
+**metrics**: Isomap on per-neuron metric feature vectors (SI, EV, Moran's I, Geary's C, Getis-Ord G, field size, pf_peaks). Neurons with NaN in any metric are dropped. Key args: `--isomap_neighbors 15`, `--interactive` (launches click-to-inspect viewer: Isomap scatter on left, tuning curve + metric values on right). Outputs per layer: `{layer}_isomap_metrics_celltype.svg`, `{layer}_isomap_metrics_si.svg`, `metric_cluster_results.pkl`.
+
+Common args: `--layers dyn/deter dyn/stoch` (optional filter), `--no_normalize` (skip z-score).
+
+```bash
+# Metric-space interactive viewer
+python dreamerv3/tuning_cluster.py \
+  --from_pkl ./tuning_results/tuning_results.pkl \
+  --save ./cluster_plots \
+  --mode metrics --interactive --layers dyn/deter
+```
 
 ### manifold analysis (sRSA, Isomap, SW distance)
 ```

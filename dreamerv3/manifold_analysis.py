@@ -297,22 +297,21 @@ def _setup_dark_style():
     })
 
 
-def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir):
-    """Isomap colored by x and y position (viridis)."""
+def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
+                         mapcenter=None):
+    """Isomap colored by arctan(x/y) position angle (viridis, pRNN style)."""
     _setup_dark_style()
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    if mapcenter is None:
+        mapcenter = [pos_wake[:, 0].mean(), pos_wake[:, 1].mean()]
+    color = np.arctan((pos_wake[:, 0] - mapcenter[0]) /
+                      (pos_wake[:, 1] - mapcenter[1]))
 
-    for i, (label, vals) in enumerate([('x position', pos_wake[:, 0]),
-                                        ('y position', pos_wake[:, 1])]):
-        ax = axes[i]
-        sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=vals, cmap='viridis',
-                        s=4, alpha=0.6, edgecolors='none')
-        cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
-        cbar.set_label(label, fontsize=9)
-        ax.set_xlabel('Isomap 1', fontsize=10)
-        ax.set_ylabel('Isomap 2', fontsize=10)
-        ax.set_title(f'{layer_name} — {label}', fontsize=11, fontweight='bold')
+    fig, ax = plt.subplots(1, 1, figsize=(7, 6))
+    sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color, cmap='viridis',
+                    s=4, alpha=0.6, edgecolors='none')
+    ax.axis('off')
+    ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
     out = save_dir / f'{layer_name.replace("/", "_")}_isomap_position.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
@@ -514,9 +513,11 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
         emb_dream = r['isomap_dream']
         pos_wake = r['pos_wake']
 
-        # Panel 3: Isomap colored by position (x)
+        # Panel 3: Isomap colored by position angle (pRNN style)
         ax = axes[2]
-        sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=pos_wake[:, 0],
+        cx, cy = pos_wake[:, 0].mean(), pos_wake[:, 1].mean()
+        color = np.arctan((pos_wake[:, 0] - cx) / (pos_wake[:, 1] - cy))
+        sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color,
                         cmap='viridis', s=4, alpha=0.6, edgecolors='none')
         ax.axis('off')
         ax.set_title('position', fontsize=9, color='white')
