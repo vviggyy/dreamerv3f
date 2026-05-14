@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""Tuning curve clustering via dimensionality reduction.
+"""Tuning curve analysis: clustering, metric-space embedding, distributions.
 
-Two modes:
+Three modes:
   autocorr (default): PCA / t-SNE / UMAP on spatial autocorrelation maps
     of tuning curves + HDBSCAN clustering.
   metrics: Isomap on per-neuron metric feature vectors (SI, EV, Moran's I,
     Geary's C, Getis-Ord G, field size, pf_peaks). Supports --interactive
     for a click-to-inspect viewer (scatter + tuning curve panel).
+  distributions: Per-metric histogram + example tuning curves at quantile
+    positions. Shows how each metric is distributed and what tuning curves
+    look like at different metric values.
 
 Usage:
     # Autocorrelation clustering (original)
-    python dreamerv3/tuning_cluster.py \
+    python dreamerv3/analyze_tuning.py \
         --from_pkl ./tuning_results/tuning_results.pkl \
         --save ./tuning_results/cluster_plots
 
     # Metric-space Isomap (static plots)
-    python dreamerv3/tuning_cluster.py \
+    python dreamerv3/analyze_tuning.py \
         --from_pkl ./tuning_results/tuning_results.pkl \
         --save ./tuning_results/cluster_plots \
         --mode metrics --layers dyn/deter
 
-    # Metric-space Isomap (interactive viewer)
-    python dreamerv3/tuning_cluster.py \
+    # Metric distributions + example tuning curves
+    python dreamerv3/analyze_tuning.py \
         --from_pkl ./tuning_results/tuning_results.pkl \
-        --save ./tuning_results/cluster_plots \
-        --mode metrics --interactive --layers dyn/deter
+        --save ./tuning_results/dist_plots \
+        --mode distributions --layers dyn/deter
 """
 
 import argparse
@@ -324,11 +327,18 @@ METRIC_DISPLAY = {
 def _build_feature_matrix(metrics):
     """Build (N, D) feature matrix from per-neuron metrics dict."""
     cols = []
+    used_keys = []
     for key in METRIC_FEATURES:
+        if key not in metrics:
+            print(f'  Warning: metric {key!r} missing from pkl (old format?), skipping')
+            continue
         v = np.asarray(metrics[key], dtype=float)
         cols.append(v)
+        used_keys.append(key)
+    if not cols:
+        raise ValueError('No metric features found in pkl — re-run tuning_curve.py')
     X = np.column_stack(cols)  # (N, D)
-    return X
+    return X, used_keys
 
 
 def process_layer_metrics(layer_name, layer_data, save_dir, args):
@@ -345,7 +355,7 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
         return None
 
     # Build feature matrix and drop neurons with any NaN
-    X = _build_feature_matrix(metrics)
+    X, used_keys = _build_feature_matrix(metrics)
     valid = ~np.isnan(X).any(axis=1)
     X = X[valid]
     valid_idx = np.where(valid)[0]
@@ -388,7 +398,8 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
         'valid_idx': valid_idx,
         'group_ids': group_ids[valid_idx],
         'si': si[valid_idx],
-        'metrics': {k: np.asarray(metrics[k], dtype=float)[valid_idx] for k in METRIC_FEATURES},
+        'metrics': {k: np.asarray(metrics[k], dtype=float)[valid_idx] for k in used_keys},
+        'used_keys': used_keys,
     }
 
 
@@ -457,9 +468,11 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
 
         # Metric summary text
         lines = [f'Neuron {neuron_idx}  ({GROUP_NAMES[group_ids[valid_row]]})']
-        for key in METRIC_FEATURES:
+        for key in result.get('used_keys', METRIC_FEATURES):
+            if key not in metrics:
+                continue
             val = float(metrics[key][valid_row])
-            lines.append(f'  {METRIC_DISPLAY[key]}: {val:.4f}')
+            lines.append(f'  {METRIC_DISPLAY.get(key, key)}: {val:.4f}')
         ax_tc.set_title('\n'.join(lines), fontsize=8, loc='left', family='monospace')
         ax_tc.set_xlabel('x')
         ax_tc.set_ylabel('y')
@@ -469,6 +482,121 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
     fig.tight_layout()
     plt.show()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Metric distributions (histogram + example tuning curves at quantiles)
+# ---------------------------------------------------------------------------
+
+# All metrics to iterate over in distributions mode
+DIST_METRICS = [
+    ('SI', 'Spatial Information'),
+    ('EVs', 'Explained Variance'),
+    ('morans_i', "Moran's I"),
+    ('gearys_c', "Geary's C (lower = more spatial)"),
+    ('getis_ord_g', "Getis-Ord G"),
+    ('fieldsize', 'Field size'),
+    ('pf_peaks', '# peaks'),
+]
+
+
+def plot_metric_distribution(tc_array, metric_values, metric_name,
+                             display_name, layer_name, save_path,
+                             n_per_quantile=3,
+                             quantiles=(0.1, 0.3, 0.5, 0.7, 0.9)):
+    """Combined figure: histogram of metric + example TCs at quantile positions.
+
+    Top panel: density histogram with vertical lines at each quantile.
+    Bottom panel: grid of example tuning curves (n_quantiles cols x n_per_quantile rows).
+    """
+    valid = np.isfinite(metric_values)
+    if valid.sum() < 10:
+        print(f'  Skipping {metric_name}: too few finite values ({valid.sum()})')
+        return
+
+    vals = metric_values[valid]
+    valid_idx = np.where(valid)[0]
+
+    n_q = len(quantiles)
+    quantile_values = np.quantile(vals, quantiles)
+
+    fig = plt.figure(figsize=(3.2 * n_q, 2.5 + 2.2 * n_per_quantile))
+    gs = fig.add_gridspec(1 + n_per_quantile, n_q,
+                          height_ratios=[2.5] + [2.0] * n_per_quantile,
+                          hspace=0.4, wspace=0.3)
+
+    # --- Top panel: histogram spanning all columns ---
+    ax_hist = fig.add_subplot(gs[0, :])
+    ax_hist.hist(vals, bins=min(50, max(20, len(vals) // 20)),
+                 density=True, color='steelblue', alpha=0.7, edgecolor='white',
+                 linewidth=0.5)
+    for i, (q, qv) in enumerate(zip(quantiles, quantile_values)):
+        ax_hist.axvline(qv, color='crimson', linestyle='--', linewidth=1, alpha=0.8)
+        ax_hist.text(qv, ax_hist.get_ylim()[1] * 0.95, f'{int(q*100)}%',
+                     ha='center', va='top', fontsize=7, color='crimson',
+                     fontweight='bold')
+    ax_hist.set_xlabel(display_name)
+    ax_hist.set_ylabel('Density')
+    ax_hist.set_title(f'{layer_name} — {display_name} distribution (N={len(vals)})')
+
+    # --- Bottom panel: example tuning curves at each quantile ---
+    for qi, (q, qv) in enumerate(zip(quantiles, quantile_values)):
+        # Find neuron closest to this quantile value
+        dists = np.abs(vals - qv)
+        sorted_by_dist = np.argsort(dists)
+        selected = sorted_by_dist[:n_per_quantile]
+
+        for ri, sel in enumerate(selected):
+            ax = fig.add_subplot(gs[1 + ri, qi])
+            neuron_orig = valid_idx[sel]
+            tc = tc_array[neuron_orig]
+            ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                      interpolation='nearest', cmap='hot')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            val_str = f'{vals[sel]:.3f}'
+            ax.set_title(f'n{neuron_orig} ({val_str})', fontsize=7)
+            if ri == 0:
+                ax.text(0.5, 1.35, f'Q{int(q*100)} = {qv:.3f}',
+                        ha='center', va='bottom', transform=ax.transAxes,
+                        fontsize=8, fontweight='bold', color='crimson')
+
+    _save(fig, save_path)
+
+
+def process_layer_distributions(layer_name, layer_data, save_dir, args):
+    """Generate metric distribution plots for one layer."""
+    tc = layer_data['tuning_curves']
+    metrics = layer_data['metrics']
+    N = tc.shape[0]
+    print(f'\n--- {layer_name} ({N} neurons) [distributions] ---')
+
+    if N < 10:
+        print(f'  Skipping {layer_name}: too few neurons ({N})')
+        return None
+
+    prefix = layer_name.replace('/', '_')
+    summary = {}
+
+    for metric_key, display_name in DIST_METRICS:
+        if metric_key not in metrics:
+            print(f'  {metric_key}: not found, skipping')
+            continue
+        vals = np.asarray(metrics[metric_key], dtype=float)
+        save_path = save_dir / f'{prefix}_dist_{metric_key}.png'
+        plot_metric_distribution(tc, vals, metric_key, display_name,
+                                 layer_name, save_path)
+        finite = vals[np.isfinite(vals)]
+        if len(finite) > 0:
+            summary[metric_key] = {
+                'mean': float(np.mean(finite)),
+                'std': float(np.std(finite)),
+                'median': float(np.median(finite)),
+                'n_finite': int(len(finite)),
+                'n_total': int(len(vals)),
+            }
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -484,12 +612,12 @@ def main():
                         help='Output directory for plots and results')
     parser.add_argument('--layers', nargs='*', default=None,
                         help='Layer filter (e.g. dyn/deter dyn/stoch)')
-    parser.add_argument('--mode', choices=['autocorr', 'metrics'],
+    parser.add_argument('--mode', choices=['autocorr', 'metrics', 'distributions'],
                         default='autocorr',
                         help='autocorr: PCA/t-SNE/UMAP on autocorrelation maps. '
-                             'metrics: Isomap on per-neuron metric feature vectors '
-                             '(SI, EV, Moran\'s I, Geary\'s C, Getis-Ord G, '
-                             'field size, pf_peaks)')
+                             'metrics: Isomap on per-neuron metric feature vectors. '
+                             'distributions: per-metric histogram + example TCs at '
+                             'quantile positions')
     parser.add_argument('--interactive', action='store_true', default=False,
                         help='Launch interactive click-to-inspect viewer '
                              '(metrics mode only)')
@@ -533,7 +661,26 @@ def main():
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.mode == 'metrics':
+    if args.mode == 'distributions':
+        # ----- Metric distribution plots -----
+        all_results = {}
+        for ln in all_layers:
+            result = process_layer_distributions(ln, layers_data[ln], save_dir, args)
+            if result is not None:
+                all_results[ln] = result
+
+        out_path = save_dir / 'distribution_results.pkl'
+        with open(out_path, 'wb') as f:
+            pickle.dump({
+                'metadata': {
+                    'source_pkl': str(args.from_pkl),
+                    'mode': 'distributions',
+                },
+                'layers': all_results,
+            }, f)
+        print(f'\nSaved distribution_results.pkl to {out_path}')
+
+    elif args.mode == 'metrics':
         # ----- Metric-space Isomap pipeline -----
         all_results = {}
         for ln in all_layers:
@@ -565,7 +712,7 @@ def main():
                     'mode': 'metrics',
                     'isomap_neighbors': args.isomap_neighbors,
                     'normalize': args.normalize,
-                    'features': METRIC_FEATURES,
+                    'features': list(set().union(*(r['used_keys'] for r in all_results.values() if r))),
                 },
                 'layers': all_results,
             }, f)
