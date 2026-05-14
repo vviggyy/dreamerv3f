@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 """Tuning curve clustering via dimensionality reduction.
 
-Runs PCA / t-SNE / UMAP on spatial autocorrelation maps of tuning curves
-to discover emergent clusters of spatial tuning patterns.  HDBSCAN is used
-for automatic cluster discovery on the UMAP embedding.
+Two modes:
+  autocorr (default): PCA / t-SNE / UMAP on spatial autocorrelation maps
+    of tuning curves + HDBSCAN clustering.
+  metrics: Isomap on per-neuron metric feature vectors (SI, EV, Moran's I,
+    Geary's C, Getis-Ord G, field size, pf_peaks). Supports --interactive
+    for a click-to-inspect viewer (scatter + tuning curve panel).
 
 Usage:
+    # Autocorrelation clustering (original)
+    python dreamerv3/tuning_cluster.py \
+        --from_pkl ./tuning_results/tuning_results.pkl \
+        --save ./tuning_results/cluster_plots
+
+    # Metric-space Isomap (static plots)
     python dreamerv3/tuning_cluster.py \
         --from_pkl ./tuning_results/tuning_results.pkl \
         --save ./tuning_results/cluster_plots \
-        --layers dyn/deter dyn/stoch \
-        --n_components 50 --perplexity 30 \
-        --umap_neighbors 15 --min_cluster_size 20
+        --mode metrics --layers dyn/deter
+
+    # Metric-space Isomap (interactive viewer)
+    python dreamerv3/tuning_cluster.py \
+        --from_pkl ./tuning_results/tuning_results.pkl \
+        --save ./tuning_results/cluster_plots \
+        --mode metrics --interactive --layers dyn/deter
 """
 
 import argparse
@@ -23,7 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import correlate2d
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from sklearn.manifold import TSNE, Isomap
 from sklearn.preprocessing import StandardScaler
 
 # ---------------------------------------------------------------------------
@@ -295,6 +308,170 @@ def process_layer(layer_name, layer_data, save_dir, args):
 
 
 # ---------------------------------------------------------------------------
+# Metric-space clustering (Isomap on per-neuron feature vectors)
+# ---------------------------------------------------------------------------
+
+METRIC_FEATURES = [
+    'SI', 'EVs', 'morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks',
+]
+
+METRIC_DISPLAY = {
+    'SI': 'SI', 'EVs': 'EV', 'morans_i': "Moran's I", 'gearys_c': "Geary's C",
+    'getis_ord_g': "Getis-Ord G", 'fieldsize': 'Field size', 'pf_peaks': '# peaks',
+}
+
+
+def _build_feature_matrix(metrics):
+    """Build (N, D) feature matrix from per-neuron metrics dict."""
+    cols = []
+    for key in METRIC_FEATURES:
+        v = np.asarray(metrics[key], dtype=float)
+        cols.append(v)
+    X = np.column_stack(cols)  # (N, D)
+    return X
+
+
+def process_layer_metrics(layer_name, layer_data, save_dir, args):
+    """Isomap on metric feature vectors for one layer."""
+    tc = layer_data['tuning_curves']
+    metrics = layer_data['metrics']
+    group_ids = layer_data['group_ids']
+    si = metrics['SI']
+    N = tc.shape[0]
+    print(f'\n--- {layer_name} ({N} neurons) [metric-space] ---')
+
+    if N < 10:
+        print(f'  Skipping {layer_name}: too few neurons ({N})')
+        return None
+
+    # Build feature matrix and drop neurons with any NaN
+    X = _build_feature_matrix(metrics)
+    valid = ~np.isnan(X).any(axis=1)
+    X = X[valid]
+    valid_idx = np.where(valid)[0]
+    n_dropped = N - valid.sum()
+    if n_dropped:
+        print(f'  Dropped {n_dropped} neurons with NaN metrics')
+    N_valid = X.shape[0]
+
+    if N_valid < 10:
+        print(f'  Skipping {layer_name}: too few valid neurons ({N_valid})')
+        return None
+
+    # Z-score normalize
+    if args.normalize:
+        X = StandardScaler().fit_transform(X)
+
+    # Isomap
+    n_neighbors = min(args.isomap_neighbors, N_valid - 1)
+    isomap = Isomap(n_components=2, n_neighbors=n_neighbors)
+    embedding = isomap.fit_transform(X)
+
+    prefix = layer_name.replace('/', '_')
+
+    # Static plots
+    plot_scatter(embedding, group_ids[valid_idx],
+                 f'{layer_name} — Isomap metrics (cell type)',
+                 save_dir / f'{prefix}_isomap_metrics_celltype.svg',
+                 label_names=GROUP_NAMES,
+                 xlabel='Isomap 1', ylabel='Isomap 2')
+
+    plot_scatter(embedding, si[valid_idx],
+                 f'{layer_name} — Isomap metrics (SI)',
+                 save_dir / f'{prefix}_isomap_metrics_si.svg',
+                 is_continuous=True,
+                 xlabel='Isomap 1', ylabel='Isomap 2')
+
+    return {
+        'feature_matrix': X,
+        'isomap_embedding': embedding,
+        'valid_idx': valid_idx,
+        'group_ids': group_ids[valid_idx],
+        'si': si[valid_idx],
+        'metrics': {k: np.asarray(metrics[k], dtype=float)[valid_idx] for k in METRIC_FEATURES},
+    }
+
+
+def _interactive_metric_scatter(layer_name, layer_data, result):
+    """Interactive Isomap scatter — click a point to show tuning curve + metrics."""
+    tc_array = layer_data['tuning_curves']  # full (N_total, H, W)
+    embedding = result['isomap_embedding']
+    valid_idx = result['valid_idx']         # maps embed row → original neuron id
+    group_ids = result['group_ids']         # already subsetted to valid
+    metrics = result['metrics']             # already subsetted to valid
+
+    fig, (ax_scatter, ax_tc) = plt.subplots(
+        1, 2, figsize=(13, 5.5), gridspec_kw={'width_ratios': [1, 1]})
+
+    # Color by cell type
+    cmap = _group_cmap()
+    for gid, gname in enumerate(GROUP_NAMES):
+        mask = group_ids == gid
+        if not mask.any():
+            continue
+        ax_scatter.scatter(embedding[mask, 0], embedding[mask, 1],
+                           s=12, alpha=0.5, color=cmap(gid),
+                           label=gname, picker=True)
+    ax_scatter.legend(fontsize=7, markerscale=2, loc='best', framealpha=0.7)
+    ax_scatter.set_xlabel('Isomap 1')
+    ax_scatter.set_ylabel('Isomap 2')
+    ax_scatter.set_title(f'{layer_name}: metric-space Isomap  (click a point)')
+
+    ax_tc.set_title('Tuning curve')
+    ax_tc.axis('off')
+    ax_tc.text(0.5, 0.5, 'Click a point\nin the scatter',
+               ha='center', va='center', transform=ax_tc.transAxes,
+               fontsize=12, color='grey')
+
+    highlight = ax_scatter.scatter([], [], s=80, facecolors='none',
+                                   edgecolors='red', linewidths=2, zorder=5)
+
+    # Build a map from each scatter collection → indices into the valid subset.
+    # matplotlib picker returns ind relative to the PathCollection, so we track
+    # which valid-subset rows each collection holds.
+    collection_valid_rows = []
+    for gid in range(len(GROUP_NAMES)):
+        mask = group_ids == gid
+        if mask.any():
+            collection_valid_rows.append(np.where(mask)[0])
+    n_collections = len(collection_valid_rows)
+
+    def on_pick(event):
+        artist = event.artist
+        scatter_collections = ax_scatter.collections[:n_collections]
+        if artist not in scatter_collections:
+            return
+        coll_idx = scatter_collections.index(artist)
+        local_ind = event.ind[0]
+        valid_row = collection_valid_rows[coll_idx][local_ind]
+        neuron_idx = valid_idx[valid_row]  # original neuron id
+
+        # Highlight
+        highlight.set_offsets([embedding[valid_row]])
+
+        # Tuning curve from original array
+        ax_tc.clear()
+        tc = tc_array[neuron_idx]
+        ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                     interpolation='nearest', cmap='hot')
+
+        # Metric summary text
+        lines = [f'Neuron {neuron_idx}  ({GROUP_NAMES[group_ids[valid_row]]})']
+        for key in METRIC_FEATURES:
+            val = float(metrics[key][valid_row])
+            lines.append(f'  {METRIC_DISPLAY[key]}: {val:.4f}')
+        ax_tc.set_title('\n'.join(lines), fontsize=8, loc='left', family='monospace')
+        ax_tc.set_xlabel('x')
+        ax_tc.set_ylabel('y')
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect('pick_event', on_pick)
+    fig.tight_layout()
+    plt.show()
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -307,18 +484,29 @@ def main():
                         help='Output directory for plots and results')
     parser.add_argument('--layers', nargs='*', default=None,
                         help='Layer filter (e.g. dyn/deter dyn/stoch)')
+    parser.add_argument('--mode', choices=['autocorr', 'metrics'],
+                        default='autocorr',
+                        help='autocorr: PCA/t-SNE/UMAP on autocorrelation maps. '
+                             'metrics: Isomap on per-neuron metric feature vectors '
+                             '(SI, EV, Moran\'s I, Geary\'s C, Getis-Ord G, '
+                             'field size, pf_peaks)')
+    parser.add_argument('--interactive', action='store_true', default=False,
+                        help='Launch interactive click-to-inspect viewer '
+                             '(metrics mode only)')
     parser.add_argument('--n_components', type=int, default=50,
                         help='Number of PCA components for t-SNE/UMAP input')
     parser.add_argument('--perplexity', type=float, default=30,
                         help='t-SNE perplexity')
     parser.add_argument('--umap_neighbors', type=int, default=15,
                         help='UMAP n_neighbors')
+    parser.add_argument('--isomap_neighbors', type=int, default=15,
+                        help='Isomap n_neighbors (metrics mode)')
     parser.add_argument('--min_cluster_size', type=int, default=20,
                         help='HDBSCAN min_cluster_size')
     parser.add_argument('--min_samples', type=int, default=5,
                         help='HDBSCAN min_samples')
     parser.add_argument('--normalize', action='store_true', default=True,
-                        help='Z-score normalize flattened autocorrelations')
+                        help='Z-score normalize features')
     parser.add_argument('--no_normalize', action='store_false', dest='normalize')
 
     args = parser.parse_args()
@@ -345,29 +533,67 @@ def main():
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process each layer
-    all_results = {}
-    for ln in all_layers:
-        result = process_layer(ln, layers_data[ln], save_dir, args)
-        if result is not None:
-            all_results[ln] = result
+    if args.mode == 'metrics':
+        # ----- Metric-space Isomap pipeline -----
+        all_results = {}
+        for ln in all_layers:
+            result = process_layer_metrics(ln, layers_data[ln], save_dir, args)
+            if result is not None:
+                all_results[ln] = result
 
-    # Save combined results
-    out_path = save_dir / 'cluster_results.pkl'
-    with open(out_path, 'wb') as f:
-        pickle.dump({
-            'metadata': {
-                'source_pkl': str(args.from_pkl),
-                'n_components': args.n_components,
-                'perplexity': args.perplexity,
-                'umap_neighbors': args.umap_neighbors,
-                'min_cluster_size': args.min_cluster_size,
-                'min_samples': args.min_samples,
-                'normalize': args.normalize,
-            },
-            'layers': all_results,
-        }, f)
-    print(f'\nSaved cluster_results.pkl to {out_path}')
+        # Interactive viewer
+        if args.interactive:
+            # Pick layer
+            available = list(all_results.keys())
+            if len(available) == 1:
+                chosen = available[0]
+            else:
+                print('\nAvailable layers:')
+                for i, ln in enumerate(available):
+                    print(f'  [{i}] {ln}')
+                idx = int(input('Select layer index: '))
+                chosen = available[idx]
+            _interactive_metric_scatter(
+                chosen, layers_data[chosen], all_results[chosen])
+
+        # Save
+        out_path = save_dir / 'metric_cluster_results.pkl'
+        with open(out_path, 'wb') as f:
+            pickle.dump({
+                'metadata': {
+                    'source_pkl': str(args.from_pkl),
+                    'mode': 'metrics',
+                    'isomap_neighbors': args.isomap_neighbors,
+                    'normalize': args.normalize,
+                    'features': METRIC_FEATURES,
+                },
+                'layers': all_results,
+            }, f)
+        print(f'\nSaved metric_cluster_results.pkl to {out_path}')
+
+    else:
+        # ----- Original autocorrelation pipeline -----
+        all_results = {}
+        for ln in all_layers:
+            result = process_layer(ln, layers_data[ln], save_dir, args)
+            if result is not None:
+                all_results[ln] = result
+
+        out_path = save_dir / 'cluster_results.pkl'
+        with open(out_path, 'wb') as f:
+            pickle.dump({
+                'metadata': {
+                    'source_pkl': str(args.from_pkl),
+                    'n_components': args.n_components,
+                    'perplexity': args.perplexity,
+                    'umap_neighbors': args.umap_neighbors,
+                    'min_cluster_size': args.min_cluster_size,
+                    'min_samples': args.min_samples,
+                    'normalize': args.normalize,
+                },
+                'layers': all_results,
+            }, f)
+        print(f'\nSaved cluster_results.pkl to {out_path}')
 
 
 if __name__ == '__main__':
