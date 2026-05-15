@@ -10,7 +10,7 @@
 - `dreamerv3/dream_decode.py` — applies pretrained classification position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
-- `dreamerv3/tuning_cluster.py` — dimensionality reduction clustering of tuning curves: PCA/t-SNE/UMAP on spatial autocorrelation maps + HDBSCAN clustering. Loads `tuning_results.pkl`, produces scree plots, 2D scatter plots colored by cluster/cell-type/SI, and example tuning curve grids per cluster. Requires `umap-learn` and `hdbscan` for full pipeline (graceful fallback to PCA+t-SNE if missing)
+- `dreamerv3/analyze_tuning.py` — tuning curve analysis: clustering, metric-space embedding, distributions. Three modes: `autocorr` (PCA/t-SNE/UMAP on autocorrelation maps + HDBSCAN), `metrics` (Isomap on per-neuron feature vectors), `distributions` (per-metric histogram + example tuning curves at quantile positions). Loads `tuning_results.pkl`. Requires `umap-learn` and `hdbscan` for full autocorr pipeline (graceful fallback to PCA+t-SNE if missing)
 - `dreamerv3/manifold_analysis.py` — neural manifold analysis: sRSA (spatial structure in reps), Isomap (2D manifold visualization), SW distance (dream-to-wake proximity). Compares wake vs dream activations on dyn/deter and dyn/stoch layers
 - `dreamerv3/compare_conditions.py` — cross-condition comparison: loads layer_decode_results.pkl and tuning_results.pkl from N runs, produces heatmaps, line plots, cell type composition charts, and summary CSV
 - `dreamerv3/plot_training.py` — reads `scores.jsonl` + `metrics.jsonl`, produces training_progress.png with episode score, cumulative reward, Crafter score, per-achievement unlock rates, and optionally loss/reward/value panels
@@ -28,7 +28,7 @@
 - `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, holdout, resume
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
-- `run_Clustering.sh` — tuning curve clustering via PCA/t-SNE/UMAP + HDBSCAN (CPU, day partition). Settings: FROM_PKL, n_components, perplexity, umap_neighbors, min_cluster_size
+- `run_Clustering.sh` — tuning curve analysis via PCA/t-SNE/UMAP + HDBSCAN / metric distributions (CPU, day partition). Settings: FROM_PKL, n_components, perplexity, umap_neighbors, min_cluster_size
 - `run_Manifold.sh` — neural manifold analysis (CPU, day partition). Settings: LOGDIR, DREAM_DATA, LAYERS, MAX_WAKE_SAMPLES, N_NEIGHBORS, NO_ISOMAP
 
 ## run provenance
@@ -198,21 +198,23 @@ Outputs: `decode_heatmap.png` (conditions × layers heatmap), `decode_lineplot.p
 
 ### tuning curve clustering
 ```
-MPLBACKEND=Agg python dreamerv3/tuning_cluster.py \
+MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
   --from_pkl ./logdir/my_run/tuning_results/tuning_results.pkl \
   --save ./logdir/my_run/tuning_results/cluster_plots
 ```
-Two modes via `--mode`:
+Three modes via `--mode`:
 
 **autocorr** (default): PCA/t-SNE/UMAP on spatial autocorrelation maps of tuning curves + HDBSCAN clustering on UMAP embedding. Key args: `--n_components 50` (PCA dims), `--perplexity 30` (t-SNE), `--umap_neighbors 15`, `--min_cluster_size 20` (HDBSCAN). Requires `umap-learn` + `hdbscan` for full pipeline; falls back to PCA + t-SNE if missing. Outputs per layer: `{layer}_scree.svg`, `{layer}_pca.svg`, `{layer}_tsne.svg`, `{layer}_umap.svg`, `{layer}_cluster_examples.svg`, `cluster_results.pkl`.
 
 **metrics**: Isomap on per-neuron metric feature vectors (SI, EV, Moran's I, Geary's C, Getis-Ord G, field size, pf_peaks). Neurons with NaN in any metric are dropped. Key args: `--isomap_neighbors 15`, `--interactive` (launches click-to-inspect viewer: Isomap scatter on left, tuning curve + metric values on right). Outputs per layer: `{layer}_isomap_metrics_celltype.svg`, `{layer}_isomap_metrics_si.svg`, `metric_cluster_results.pkl`.
 
+**distributions**: Per-metric histogram + example tuning curves at quantile positions (10%, 30%, 50%, 70%, 90%). Shows 3 neurons near each quantile. Outputs per layer per metric: `{layer}_dist_{metric}.png`, `distribution_results.pkl`.
+
 Common args: `--layers dyn/deter dyn/stoch` (optional filter), `--no_normalize` (skip z-score).
 
 ```bash
 # Metric-space interactive viewer
-python dreamerv3/tuning_cluster.py \
+python dreamerv3/analyze_tuning.py \
   --from_pkl ./tuning_results/tuning_results.pkl \
   --save ./cluster_plots \
   --mode metrics --interactive --layers dyn/deter

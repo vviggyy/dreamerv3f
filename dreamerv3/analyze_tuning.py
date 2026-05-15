@@ -341,6 +341,46 @@ def _build_feature_matrix(metrics):
     return X, used_keys
 
 
+def plot_metric_covariance(X, used_keys, layer_name, save_path):
+    """Heatmap of the Pearson correlation matrix across metric features.
+
+    Low off-diagonal correlations indicate independent bases in the
+    tuning-curve metric space.
+    """
+    # Correlation matrix (handles constant columns gracefully)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        R = np.corrcoef(X, rowvar=False)
+    R = np.nan_to_num(R, nan=0.0)
+
+    display_names = [METRIC_DISPLAY.get(k, k) for k in used_keys]
+    D = len(display_names)
+
+    fig, ax = plt.subplots(figsize=(1.0 + 0.8 * D, 0.6 + 0.8 * D))
+    im = ax.imshow(R, cmap='RdBu_r', vmin=-1, vmax=1, aspect='equal')
+    plt.colorbar(im, ax=ax, shrink=0.8, label='Pearson r')
+
+    ax.set_xticks(range(D))
+    ax.set_yticks(range(D))
+    ax.set_xticklabels(display_names, rotation=45, ha='right', fontsize=8)
+    ax.set_yticklabels(display_names, fontsize=8)
+
+    # Annotate cells
+    for i in range(D):
+        for j in range(D):
+            color = 'white' if abs(R[i, j]) > 0.6 else 'black'
+            ax.text(j, i, f'{R[i, j]:.2f}', ha='center', va='center',
+                    fontsize=7, color=color)
+
+    # Summary stat: mean |r| of off-diagonal entries
+    mask_offdiag = ~np.eye(D, dtype=bool)
+    mean_abs_r = np.abs(R[mask_offdiag]).mean()
+    ax.set_title(f'{layer_name} — metric correlation  '
+                 f'(mean |r|_{{off-diag}} = {mean_abs_r:.3f})', fontsize=10)
+
+    fig.tight_layout()
+    _save(fig, save_path)
+
+
 def process_layer_metrics(layer_name, layer_data, save_dir, args):
     """Isomap on metric feature vectors for one layer."""
     tc = layer_data['tuning_curves']
@@ -391,6 +431,10 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
                  save_dir / f'{prefix}_isomap_metrics_si.svg',
                  is_continuous=True,
                  xlabel='Isomap 1', ylabel='Isomap 2')
+
+    # Metric correlation heatmap (independence of bases)
+    plot_metric_covariance(X, used_keys, layer_name,
+                           save_dir / f'{prefix}_metric_corr.png')
 
     return {
         'feature_matrix': X,
