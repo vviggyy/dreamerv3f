@@ -388,7 +388,21 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
     group_ids = layer_data['group_ids']
     si = metrics['SI']
     N = tc.shape[0]
-    print(f'\n--- {layer_name} ({N} neurons) [metric-space] ---')
+
+    # EV threshold filtering
+    if args.ev_thresh is not None:
+        evs = np.asarray(metrics['EVs'], dtype=float)
+        ev_mask = np.isfinite(evs) & (evs > args.ev_thresh)
+        n_keep = ev_mask.sum()
+        print(f'\n--- {layer_name} ({N} neurons, {n_keep} with EV > {args.ev_thresh}) [metric-space] ---')
+        idx = np.where(ev_mask)[0]
+        tc = tc[idx]
+        group_ids = group_ids[idx]
+        si = si[idx]
+        metrics = {k: np.asarray(v, dtype=float)[idx] for k, v in metrics.items()}
+        N = n_keep
+    else:
+        print(f'\n--- {layer_name} ({N} neurons) [metric-space] ---')
 
     if N < 10:
         print(f'  Skipping {layer_name}: too few neurons ({N})')
@@ -613,7 +627,19 @@ def process_layer_distributions(layer_name, layer_data, save_dir, args):
     tc = layer_data['tuning_curves']
     metrics = layer_data['metrics']
     N = tc.shape[0]
-    print(f'\n--- {layer_name} ({N} neurons) [distributions] ---')
+
+    # EV threshold filtering
+    if args.ev_thresh is not None:
+        evs = np.asarray(metrics['EVs'], dtype=float)
+        ev_mask = np.isfinite(evs) & (evs > args.ev_thresh)
+        n_keep = ev_mask.sum()
+        print(f'\n--- {layer_name} ({N} neurons, {n_keep} with EV > {args.ev_thresh}) [distributions] ---')
+        idx = np.where(ev_mask)[0]
+        tc = tc[idx]
+        metrics = {k: np.asarray(v, dtype=float)[idx] for k, v in metrics.items()}
+        N = n_keep
+    else:
+        print(f'\n--- {layer_name} ({N} neurons) [distributions] ---')
 
     if N < 10:
         print(f'  Skipping {layer_name}: too few neurons ({N})')
@@ -677,6 +703,9 @@ def main():
                         help='HDBSCAN min_cluster_size')
     parser.add_argument('--min_samples', type=int, default=5,
                         help='HDBSCAN min_samples')
+    parser.add_argument('--ev_thresh', type=float, default=None,
+                        help='Only include neurons with EV > this threshold '
+                             '(metrics and distributions modes)')
     parser.add_argument('--normalize', action='store_true', default=True,
                         help='Z-score normalize features')
     parser.add_argument('--no_normalize', action='store_false', dest='normalize')
