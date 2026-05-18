@@ -874,7 +874,7 @@ def plot_tuning_with_autocorr(tc_array, metrics, layer_name, save_path,
     print(f"  Saved {save_path}")
 
 
-def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
+def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None, ev_thresh=None):
     """N×(1+M) grid: SI vs EV scatter (col 0) + M sampled tuning curves per layer.
 
     Sampled neurons are highlighted on the scatter with colored circles matching
@@ -927,8 +927,11 @@ def plot_layer_si_ev_grid(all_results, save_path, m=5, seed=None):
             continue
 
         n_neurons = tc_array.shape[0]
-        # Sample from top 10th percentile of EV
-        ev_cutoff = np.percentile(ev, 90)
+        # Sample from neurons above ev_thresh, or top 10th percentile if not set
+        if ev_thresh is not None:
+            ev_cutoff = ev_thresh
+        else:
+            ev_cutoff = np.percentile(ev, 90)
         top_ev_idx = np.where(ev >= ev_cutoff)[0]
         if len(top_ev_idx) == 0:
             top_ev_idx = np.arange(n_neurons)
@@ -1306,6 +1309,73 @@ def main():
             print("Done.")
             return
 
+        # Batch reclassify + replot when --save is provided (non-interactive)
+        if args.save and not args.interactive:
+            save_dir = Path(args.save)
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            # Rebuild all_results list from pkl layers
+            all_results = []
+            ordered = get_sorted_layers(layer_names)
+            if args.layers:
+                ordered = [ln for ln in ordered if ln in args.layers]
+            for ln in ordered:
+                ld = layers[ln]
+                cell_groups, group_ids = classify_cells(
+                    ld['metrics'],
+                    SI_thresh=args.SI_thresh,
+                    EV_thresh=args.EV_thresh,
+                    EV_unthresh=args.EV_unthresh,
+                    HD_thresh=args.HD_thresh,
+                )
+                all_results.append({
+                    'layer_name': ln,
+                    'tuning_curves': ld['tuning_curves'],
+                    'metrics': ld['metrics'],
+                    'cell_groups': cell_groups,
+                    'group_ids': group_ids,
+                })
+
+            # Infer area from tuning curve shape
+            tc0 = all_results[0]['tuning_curves']
+            area = list(tc0.shape[1:])  # (n_neurons, H, W) -> [H, W]
+
+            # Plots
+            if not args.no_plots:
+                print("\nGenerating plots...")
+                for res in all_results:
+                    ln = res['layer_name']
+                    safe_name = ln.replace('/', '_')
+                    layer_dir = save_dir / safe_name
+                    layer_dir.mkdir(parents=True, exist_ok=True)
+                    plot_si_ev_scatter(
+                        res['metrics'], res['group_ids'], ln,
+                        layer_dir / 'si_ev_scatter.svg',
+                        tc_array=res['tuning_curves'],
+                    )
+                    plot_cell_types(
+                        res['group_ids'], ln,
+                        layer_dir / 'cell_types.svg',
+                    )
+                    plot_example_tuning_curves(
+                        res['tuning_curves'], res['metrics'], res['group_ids'], ln,
+                        layer_dir / 'example_tuning_curves.pdf',
+                        area=area, sort_by='SI',
+                    )
+                    plot_example_tuning_curves(
+                        res['tuning_curves'], res['metrics'], res['group_ids'], ln,
+                        layer_dir / 'example_tuning_curves_ev.pdf',
+                        area=area, sort_by='EV',
+                    )
+                if len(all_results) > 1:
+                    plot_layer_summary(all_results, save_dir / 'layer_summary.svg')
+                    plot_layer_si_ev(all_results, save_dir)
+                    plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=args.ev_filter)
+                    plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.svg', ev_thresh=args.EV_thresh)
+                print(f"Plots saved to {save_dir}")
+            print("Done.")
+            return
+
         # Interactive viewer
         if len(layer_names) == 1:
             ln = layer_names[0]
@@ -1559,7 +1629,7 @@ def main():
             plot_layer_summary(all_results, save_dir / 'layer_summary.svg')
             plot_layer_si_ev(all_results, save_dir)
             plot_layer_si_ev_filtered(all_results, save_dir, ev_thresh=args.ev_filter)
-            plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.svg')
+            plot_layer_si_ev_grid(all_results, save_dir / 'layer_si_ev_grid.svg', ev_thresh=args.EV_thresh)
 
         print(f"Plots saved to {save_dir}")
 

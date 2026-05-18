@@ -249,7 +249,7 @@ def plot_crafter_score(ax, records, smooth_window):
     print(f'  Crafter score (last window): {final:.1f}% ({n_ach} achievements)')
 
 
-def plot_achievement_rates(ax, records, smooth_window):
+def plot_achievement_rates(ax, records, smooth_window, show_raw=True):
     ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
     all_keys = set()
     for r in records:
@@ -280,7 +280,8 @@ def plot_achievement_rates(ax, records, smooth_window):
         name = ach_pattern.match(key).group(1).replace('_', ' ')
         color = ACHIEVEMENT_COLORS[i % len(ACHIEVEMENT_COLORS)]
         # faint raw, bold smoothed
-        ax.plot(steps, vals, alpha=0.2, linewidth=0.7, color=color)
+        if show_raw:
+            ax.plot(steps, vals, alpha=0.2, linewidth=0.7, color=color)
         if smooth_window > 1 and len(steps) > smooth_window:
             sx, sy = smooth(steps, vals, smooth_window)
             ax.plot(sx, sy, linewidth=1.4, color=color, label=name)
@@ -291,6 +292,7 @@ def plot_achievement_rates(ax, records, smooth_window):
     ax.set_title('Per-Achievement Unlock Rate', fontsize=13)
     ax.legend(fontsize=7, framealpha=0.8, ncol=2, loc='upper left')
     style_ax(ax)
+    return ax
 
 
 def main():
@@ -305,6 +307,15 @@ def main():
                         help='Skip the per-achievement panel')
     parser.add_argument('--no_losses', action='store_true',
                         help='Skip the loss and reward/value panels')
+    parser.add_argument('--ylim_ach', type=float, default=None,
+                        help='Y-axis upper limit for achievement panel. '
+                             'Use "auto" via --ylim_ach_auto to clip to 95th '
+                             'percentile of smoothed values. (default: no clip)')
+    parser.add_argument('--ylim_ach_auto', action='store_true',
+                        help='Auto-clip achievement panel y-axis to 1.2x the '
+                             '95th percentile of smoothed values')
+    parser.add_argument('--no_raw_ach', action='store_true',
+                        help='Hide raw (unsmoothed) traces on achievement panel')
     args = parser.parse_args()
 
     logdir = pathlib.Path(args.logdir)
@@ -373,7 +384,22 @@ def main():
         elif panel_type == 'crafter_score':
             plot_crafter_score(ax, score_records, args.smooth)
         elif panel_type == 'achievements':
-            plot_achievement_rates(ax, metric_records, args.smooth)
+            plot_achievement_rates(ax, metric_records, args.smooth,
+                                  show_raw=not args.no_raw_ach)
+            # Apply y-axis clipping if requested
+            if args.ylim_ach is not None:
+                ax.set_ylim(bottom=0, top=args.ylim_ach)
+            elif args.ylim_ach_auto:
+                # Auto-clip to 1.2x the 95th percentile of visible smoothed lines
+                smoothed_vals = []
+                for line in ax.get_lines():
+                    yd = line.get_ydata()
+                    alpha = line.get_alpha()
+                    if alpha is None or alpha > 0.5:  # smoothed lines
+                        smoothed_vals.extend(yd)
+                if smoothed_vals:
+                    p95 = np.percentile(smoothed_vals, 95)
+                    ax.set_ylim(bottom=0, top=p95 * 1.2)
 
     for i, panel_type in enumerate(top_panels):
         render_panel(axes[0, i], panel_type)
