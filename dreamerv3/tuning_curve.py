@@ -1235,14 +1235,14 @@ def main():
     parser.add_argument('--n_jobs', type=int, default=1,
                         help='Parallel workers (-1=all CPUs)')
     # Classification thresholds
-    parser.add_argument('--SI_thresh', type=float, default=0.5)
-    parser.add_argument('--EV_thresh', type=float, default=0.5)
-    parser.add_argument('--EV_unthresh', type=float, default=0.15)
+    parser.add_argument('--SI_thresh', type=float, default=0.5) 
+    parser.add_argument('--EV_thresh', type=float, default=0.5) #used for cell-type classificatoin Upper bound
+    parser.add_argument('--EV_unthresh', type=float, default=0.15) #also used for cell type class. lower poind
     parser.add_argument('--HD_thresh', type=float, default=0.5)
     parser.add_argument('--smooth_sigma', type=float, default=0,
                         help='Gaussian smoothing sigma (bins) on tuning curves before SI (0=off)')
     parser.add_argument('--ev_filter', type=float, default=0.4,
-                        help='EV cutoff for filtered SI/EV boxplots (default 0.4)')
+                        help='EV cutoff for filtered SI/EV boxplots (default 0.4)') #used for "exmple tuning curves" 
     parser.add_argument('--dist_cutoff', type=float, default=7,
                         help='Max distance (tiles) for spatial autocorr weight matrix. '
                              'Pairs beyond this get weight 0. 0=no cutoff (default 7)')
