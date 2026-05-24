@@ -1839,11 +1839,17 @@ if __name__ == '__main__':
 
     if args.mode == 'layers' and ep_files:
         # --- Lightweight loading for layer mode ---
-        # Discover layers from first file
+        # Discover layers from first file + extract metadata keys
         with open(ep_files[0], 'rb') as f:
             first_ep = pickle.load(f)
         all_layer_keys = set(
             k[len('act/'):] for k in first_ep if k.startswith('act/'))
+        # Extract metadata from first episode if sidecar not available
+        _ep_metadata = {}
+        for mk in ('env_seed', 'world_seed', 'area', 'fixed_seed',
+                    'random_spawn', 'task'):
+            if mk in first_ep:
+                _ep_metadata[mk] = first_ep[mk]
         del first_ep
 
         # Load only pos/metadata from each file
@@ -1859,6 +1865,8 @@ if __name__ == '__main__':
         print(f"  {len(lightweight_eps)} episodes loaded (lightweight)")
 
         metadata = _load_metadata_only(data_path)
+        if metadata is None and _ep_metadata:
+            metadata = _ep_metadata
 
         if args.min_bbox > 0:
             n_before = len(lightweight_eps)
