@@ -448,7 +448,7 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
 
     # Metric correlation heatmap (independence of bases)
     plot_metric_covariance(X, used_keys, layer_name,
-                           save_dir / f'{prefix}_metric_corr.png')
+                           save_dir / f'{prefix}_metric_corr.svg')
 
     return {
         'feature_matrix': X,
@@ -586,7 +586,7 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
     # --- Top panel: histogram spanning all columns ---
     ax_hist = fig.add_subplot(gs[0, :])
     ax_hist.hist(vals, bins=min(50, max(20, len(vals) // 20)),
-                 density=True, color='steelblue', alpha=0.7, edgecolor='white',
+                 density=False, color='steelblue', alpha=0.7, edgecolor='white',
                  linewidth=0.5)
     for i, (q, qv) in enumerate(zip(quantiles, quantile_values)):
         ax_hist.axvline(qv, color='crimson', linestyle='--', linewidth=1, alpha=0.8)
@@ -594,7 +594,7 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
                      ha='center', va='top', fontsize=7, color='crimson',
                      fontweight='bold')
     ax_hist.set_xlabel(display_name)
-    ax_hist.set_ylabel('Density')
+    ax_hist.set_ylabel('Count')
     ax_hist.set_title(f'{layer_name} — {display_name} distribution (N={len(vals)})')
 
     # --- Bottom panel: example tuning curves at each quantile ---
@@ -653,7 +653,7 @@ def process_layer_distributions(layer_name, layer_data, save_dir, args):
             print(f'  {metric_key}: not found, skipping')
             continue
         vals = np.asarray(metrics[metric_key], dtype=float)
-        save_path = save_dir / f'{prefix}_dist_{metric_key}.png'
+        save_path = save_dir / f'{prefix}_dist_{metric_key}.svg'
         plot_metric_distribution(tc, vals, metric_key, display_name,
                                  layer_name, save_path)
         finite = vals[np.isfinite(vals)]

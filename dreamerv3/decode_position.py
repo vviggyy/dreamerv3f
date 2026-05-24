@@ -1577,7 +1577,7 @@ def plot_layer_error_histogram(layer_fold_values, save_dir,
     print(f"  Saved {out.name}")
 
 
-def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='ce_loss',
+def plot_layer_comparison(layer_fold_values, ordered, save_dir, metric='manhattan',
                           layer_sizes=None):
     """Horizontal boxplot: one box per layer, ordered early → late.
 
@@ -1805,6 +1805,14 @@ if __name__ == '__main__':
                               metric=metric)
         if metric == 'manhattan':
             plot_layer_error_histogram(layer_fold_values, save_dir)
+        # Regenerate probmap if saved
+        if 'probmap_proba' in saved and saved.get('metadata'):
+            probmap_layer = saved['probmap_layer']
+            print(f"Regenerating probmap for {probmap_layer}...")
+            plot_layer_probmap_on_world(
+                saved['probmap_proba'], saved['probmap_pos_test'],
+                saved['probmap_groups_test'], saved['metadata'],
+                probmap_layer, save_dir)
         print("Done.")
         raise SystemExit(0)
 
@@ -2137,6 +2145,16 @@ if __name__ == '__main__':
             'n_episodes': len(np.unique(groups)),
             'metric': metric,
         }
+        # Save probmap data for regenerating plots later
+        if has_test and layer_proba:
+            probmap_layer = 'dyn/deter' if 'dyn/deter' in layer_proba else next(iter(layer_proba), None)
+            if probmap_layer:
+                save_payload['probmap_layer'] = probmap_layer
+                save_payload['probmap_proba'] = layer_proba[probmap_layer]
+                save_payload['probmap_pos_test'] = pos_test
+                save_payload['probmap_groups_test'] = groups_test
+                if metadata:
+                    save_payload['metadata'] = metadata
         with open(results_file, 'wb') as f:
             pickle.dump(save_payload, f)
         print(f"\nResults saved to {results_file}")
@@ -2217,7 +2235,7 @@ if __name__ == '__main__':
             pred_xy = np.stack(
                 np.unravel_index(pred_cls, (width, height)), axis=1)
             true_xy = pos_int[test_mask]
-            errors = np.sum(np.abs(pred_xy - true_xy), axis=1)
+            errors = np.sum(np.abs(pred_xy - true_xy), axis=1) #MANHATTAN ERRORS calculated here?
             shuffle = np.sum(np.abs(
                 np.column_stack([
                     np.random.randint(0, width, len(true_xy)),
