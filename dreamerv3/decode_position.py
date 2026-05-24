@@ -1782,6 +1782,10 @@ if __name__ == '__main__':
                         help='[--mode layers] Only decode these layers '
                              '(e.g. --layers dyn/deter dyn/stoch). '
                              'If not set, all available layers are decoded.')
+    parser.add_argument('--env_seed', type=int, default=None,
+                        help='Crafter world seed for rendering the world map '
+                             'in probmap plots. Overrides any auto-detected '
+                             'seed from metadata.')
     parser.add_argument('--from_results', default=None,
                         help='Path to an existing layer_decode_results.pkl '
                              '(or layer_decode_checkpoint.pkl). Regenerates '
@@ -1867,6 +1871,10 @@ if __name__ == '__main__':
         metadata = _load_metadata_only(data_path)
         if metadata is None and _ep_metadata:
             metadata = _ep_metadata
+        if args.env_seed is not None:
+            if metadata is None:
+                metadata = {'area': [32, 32]}
+            metadata['env_seed'] = args.env_seed
 
         if args.min_bbox > 0:
             n_before = len(lightweight_eps)
