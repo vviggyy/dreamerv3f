@@ -1778,6 +1778,10 @@ if __name__ == '__main__':
                              'Episodes where (max_x-min_x)*(max_y-min_y) < this '
                              'are excluded as "stuck". 0 = no filtering. '
                              '(default: 0)')
+    parser.add_argument('--layers', nargs='+', default=None,
+                        help='[--mode layers] Only decode these layers '
+                             '(e.g. --layers dyn/deter dyn/stoch). '
+                             'If not set, all available layers are decoded.')
     parser.add_argument('--from_results', default=None,
                         help='Path to an existing layer_decode_results.pkl '
                              '(or layer_decode_checkpoint.pkl). Regenerates '
@@ -1869,6 +1873,14 @@ if __name__ == '__main__':
         # Get pos/groups from first layer via file reload
         if not all_layer_keys:
             raise ValueError("No 'act/*' keys in episodes.")
+        if args.layers:
+            requested = set(args.layers)
+            missing = requested - all_layer_keys
+            if missing:
+                print(f"  WARNING: requested layers not found: {sorted(missing)}")
+            all_layer_keys = all_layer_keys & requested
+            if not all_layer_keys:
+                raise ValueError("No matching layers after --layers filter.")
         print(f"  Layers found: {sorted(all_layer_keys)}")
         _first_ln = sorted(all_layer_keys)[0]
         _, pos, groups = reload_layer_from_files(ep_file_index, _first_ln)
