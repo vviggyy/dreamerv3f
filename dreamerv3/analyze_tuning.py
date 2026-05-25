@@ -494,6 +494,13 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
 
     highlight = ax_scatter.scatter([], [], s=80, facecolors='none',
                                    edgecolors='red', linewidths=2, zorder=5)
+    # Text annotation for neuron number
+    neuron_label = ax_scatter.annotate('', xy=(0, 0), fontsize=8,
+                                        fontweight='bold', color='red',
+                                        xytext=(8, 8),
+                                        textcoords='offset points',
+                                        zorder=6)
+    neuron_label.set_visible(False)
 
     # Build a map from each scatter collection → indices into the valid subset.
     # matplotlib picker returns ind relative to the PathCollection, so we track
@@ -515,8 +522,11 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
         valid_row = collection_valid_rows[coll_idx][local_ind]
         neuron_idx = valid_idx[valid_row]  # original neuron id
 
-        # Highlight
+        # Highlight circle + neuron number label
         highlight.set_offsets([embedding[valid_row]])
+        neuron_label.xy = (embedding[valid_row, 0], embedding[valid_row, 1])
+        neuron_label.set_text(f'n{neuron_idx}')
+        neuron_label.set_visible(True)
 
         # Tuning curve from original array
         ax_tc.clear()
@@ -709,6 +719,9 @@ def main():
     parser.add_argument('--normalize', action='store_true', default=True,
                         help='Z-score normalize features')
     parser.add_argument('--no_normalize', action='store_false', dest='normalize')
+    parser.add_argument('--neuron', type=int, default=None,
+                        help='Print tuning curve and metrics for a specific neuron index '
+                             '(requires --layers to select exactly one layer)')
 
     args = parser.parse_args()
 
@@ -730,6 +743,43 @@ def main():
         return
 
     print(f'Layers: {all_layers}')
+
+    # --neuron: print tuning curve + metrics for a specific neuron, then exit
+    if args.neuron is not None:
+        if len(all_layers) != 1:
+            print('Error: --neuron requires exactly one layer via --layers')
+            return
+        ln = all_layers[0]
+        ld = layers_data[ln]
+        tc = ld['tuning_curves']
+        metrics = ld['metrics']
+        group_ids = ld['group_ids']
+        nidx = args.neuron
+        if nidx < 0 or nidx >= tc.shape[0]:
+            print(f'Error: neuron {nidx} out of range [0, {tc.shape[0]-1}]')
+            return
+        print(f'\n=== {ln} — neuron {nidx} ===')
+        print(f'Cell type: {GROUP_NAMES[group_ids[nidx]]}')
+        for key in METRIC_FEATURES:
+            if key in metrics:
+                val = float(np.asarray(metrics[key], dtype=float)[nidx])
+                print(f'  {METRIC_DISPLAY.get(key, key)}: {val:.4f}')
+        # Show tuning curve
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.imshow(np.ma.masked_invalid(tc[nidx].T), origin='lower',
+                  interpolation='nearest', cmap='hot')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_title(f'{ln} — neuron {nidx} ({GROUP_NAMES[group_ids[nidx]]})')
+        plt.tight_layout()
+        if args.save:
+            save_dir = Path(args.save)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            out = save_dir / f'neuron_{nidx}.png'
+            fig.savefig(out, bbox_inches='tight')
+            print(f'Saved {out}')
+        plt.show()
+        return
 
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
