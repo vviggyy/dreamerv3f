@@ -793,6 +793,9 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         for spine in ax.spines.values():
             spine.set_edgecolor('black')
             spine.set_linewidth(0.8)
+        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cb.set_label('Mean activation', fontsize=5)
+        cb.ax.tick_params(labelsize=5)
 
     # Hide unused axes
     for idx in range(n_show, nrows * ncols):
@@ -1269,18 +1272,18 @@ def main():
         layers = results_dict['layers']
         layer_names = list(layers.keys())
 
-        # Recompute spatial autocorrelation metrics (always, since dist_cutoff may differ)
-        dc = getattr(args, 'dist_cutoff', 0)
-        for ln in layer_names:
-            ld = layers[ln]
-            print(f"  Computing spatial autocorr metrics for {ln} (dist_cutoff={dc})...")
-            m, g, go = _compute_spatial_autocorr_metrics(ld['tuning_curves'], dist_cutoff=dc)
-            ld['metrics']['morans_i'] = m
-            ld['metrics']['gearys_c'] = g
-            ld['metrics']['getis_ord_g'] = go
-
         # --plot_autocorr: batch generate tuning+autocorr plots
         if args.plot_autocorr:
+            # Recompute spatial autocorrelation metrics (dist_cutoff may differ)
+            dc = getattr(args, 'dist_cutoff', 0)
+            _autocorr_layers = [ln for ln in layer_names if ln in args.layers] if args.layers else layer_names
+            for ln in _autocorr_layers:
+                ld = layers[ln]
+                print(f"  Computing spatial autocorr metrics for {ln} (dist_cutoff={dc})...")
+                m, g, go = _compute_spatial_autocorr_metrics(ld['tuning_curves'], dist_cutoff=dc)
+                ld['metrics']['morans_i'] = m
+                ld['metrics']['gearys_c'] = g
+                ld['metrics']['getis_ord_g'] = go
             pkl_path = Path(args.from_pkl)
             out_dir = Path(args.save) if args.save else pkl_path.parent
             out_dir.mkdir(parents=True, exist_ok=True)

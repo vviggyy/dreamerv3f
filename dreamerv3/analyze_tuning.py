@@ -112,12 +112,12 @@ def plot_scree(explained_var, save_path):
 
 def plot_scatter(embedding, labels, title, save_path, cmap=None,
                  is_continuous=False, label_names=None, xlabel='Dim 1',
-                 ylabel='Dim 2'):
+                 ylabel='Dim 2', colorbar_label=None):
     fig, ax = plt.subplots(figsize=(6, 5))
     if is_continuous:
         sc = ax.scatter(embedding[:, 0], embedding[:, 1], c=labels, s=4,
                         alpha=0.6, cmap=cmap or 'viridis')
-        plt.colorbar(sc, ax=ax, shrink=0.8)
+        plt.colorbar(sc, ax=ax, shrink=0.8, label=colorbar_label or '')
     else:
         unique = np.unique(labels)
         cm = cmap or plt.get_cmap('tab10', max(len(unique), 1))
@@ -163,7 +163,7 @@ def plot_cluster_examples(tuning_curves, cluster_labels, si_values, save_path,
             ax = axes[row, col]
             if col < len(selected):
                 tc = tuning_curves[selected[col]]
-                ax.imshow(tc, cmap='hot', interpolation='nearest')
+                ax.imshow(tc, cmap='viridis', interpolation='nearest')
             ax.set_xticks([])
             ax.set_yticks([])
             if col == 0:
@@ -255,7 +255,8 @@ def process_layer(layer_name, layer_data, save_dir, args):
     plot_scatter(pca_feats[:, :2], si,
                  f'{layer_name} — PCA (SI)',
                  save_dir / f'{prefix}_pca_si.svg',
-                 is_continuous=True, xlabel='PC1', ylabel='PC2')
+                 is_continuous=True, xlabel='PC1', ylabel='PC2',
+                 colorbar_label='Spatial Information')
 
     # t-SNE scatter
     plot_scatter(tsne_feats, cluster_labels,
@@ -273,7 +274,8 @@ def process_layer(layer_name, layer_data, save_dir, args):
                  f'{layer_name} — t-SNE (SI)',
                  save_dir / f'{prefix}_tsne_si.svg',
                  is_continuous=True,
-                 xlabel='t-SNE 1', ylabel='t-SNE 2')
+                 xlabel='t-SNE 1', ylabel='t-SNE 2',
+                 colorbar_label='Spatial Information')
 
     # UMAP scatter
     if umap_feats is not None:
@@ -292,7 +294,8 @@ def process_layer(layer_name, layer_data, save_dir, args):
                      f'{layer_name} — UMAP (SI)',
                      save_dir / f'{prefix}_umap_si.svg',
                      is_continuous=True,
-                     xlabel='UMAP 1', ylabel='UMAP 2')
+                     xlabel='UMAP 1', ylabel='UMAP 2',
+                     colorbar_label='Spatial Information')
 
     # Cluster examples
     if (cluster_labels >= 0).any():
@@ -315,7 +318,7 @@ def process_layer(layer_name, layer_data, save_dir, args):
 # ---------------------------------------------------------------------------
 
 METRIC_FEATURES = [
-    'SI', 'EVs', 'morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks',
+    'SI', 'EVs', 'morans_i', 'fieldsize', 'pf_peaks',
 ]
 
 METRIC_DISPLAY = {
@@ -444,7 +447,8 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
                  f'{layer_name} — Isomap metrics (SI)',
                  save_dir / f'{prefix}_isomap_metrics_si.svg',
                  is_continuous=True,
-                 xlabel='Isomap 1', ylabel='Isomap 2')
+                 xlabel='Isomap 1', ylabel='Isomap 2',
+                 colorbar_label='Spatial Information')
 
     # Metric correlation heatmap (independence of bases)
     plot_metric_covariance(X, used_keys, layer_name,
@@ -502,6 +506,9 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
                                         zorder=6)
     neuron_label.set_visible(False)
 
+    # Track colorbar so we can remove it on each click
+    _cbar_ref = [None]
+
     # Build a map from each scatter collection → indices into the valid subset.
     # matplotlib picker returns ind relative to the PathCollection, so we track
     # which valid-subset rows each collection holds.
@@ -529,10 +536,14 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
         neuron_label.set_visible(True)
 
         # Tuning curve from original array
+        if _cbar_ref[0] is not None:
+            _cbar_ref[0].remove()
+            _cbar_ref[0] = None
         ax_tc.clear()
         tc = tc_array[neuron_idx]
-        ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                     interpolation='nearest', cmap='hot')
+        im = ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                         interpolation='nearest', cmap='viridis')
+        _cbar_ref[0] = plt.colorbar(im, ax=ax_tc, shrink=0.8, label='Mean activation')
 
         # Metric summary text
         lines = [f'Neuron {neuron_idx}  ({GROUP_NAMES[group_ids[valid_row]]})']
@@ -619,7 +630,7 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
             neuron_orig = valid_idx[sel]
             tc = tc_array[neuron_orig]
             ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                      interpolation='nearest', cmap='hot')
+                      interpolation='nearest', cmap='viridis')
             ax.set_xticks([])
             ax.set_yticks([])
             val_str = f'{vals[sel]:.3f}'
@@ -719,9 +730,11 @@ def main():
     parser.add_argument('--normalize', action='store_true', default=True,
                         help='Z-score normalize features')
     parser.add_argument('--no_normalize', action='store_false', dest='normalize')
-    parser.add_argument('--neuron', type=int, default=None,
-                        help='Print tuning curve and metrics for a specific neuron index '
-                             '(requires --layers to select exactly one layer)')
+    parser.add_argument('--neuron', type=int, nargs='+', default=None,
+                        help='Export tuning curve SVGs for specific neuron indices '
+                             '(requires --layers to select exactly one layer). '
+                             'Example: --neuron 42 107 255')
+
 
     args = parser.parse_args()
 
@@ -744,7 +757,7 @@ def main():
 
     print(f'Layers: {all_layers}')
 
-    # --neuron: print tuning curve + metrics for a specific neuron, then exit
+    # --neuron: export tuning curve SVGs for specific neurons
     if args.neuron is not None:
         if len(all_layers) != 1:
             print('Error: --neuron requires exactly one layer via --layers')
@@ -754,31 +767,30 @@ def main():
         tc = ld['tuning_curves']
         metrics = ld['metrics']
         group_ids = ld['group_ids']
-        nidx = args.neuron
-        if nidx < 0 or nidx >= tc.shape[0]:
-            print(f'Error: neuron {nidx} out of range [0, {tc.shape[0]-1}]')
-            return
-        print(f'\n=== {ln} — neuron {nidx} ===')
-        print(f'Cell type: {GROUP_NAMES[group_ids[nidx]]}')
-        for key in METRIC_FEATURES:
-            if key in metrics:
-                val = float(np.asarray(metrics[key], dtype=float)[nidx])
-                print(f'  {METRIC_DISPLAY.get(key, key)}: {val:.4f}')
-        # Show tuning curve
-        fig, ax = plt.subplots(figsize=(5, 4))
-        ax.imshow(np.ma.masked_invalid(tc[nidx].T), origin='lower',
-                  interpolation='nearest', cmap='hot')
-        ax.set_xlabel('x')
-        ax.set_ylabel('y')
-        ax.set_title(f'{ln} — neuron {nidx} ({GROUP_NAMES[group_ids[nidx]]})')
-        plt.tight_layout()
-        if args.save:
-            save_dir = Path(args.save)
-            save_dir.mkdir(parents=True, exist_ok=True)
-            out = save_dir / f'neuron_{nidx}.png'
+        save_dir = Path(args.save)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for nidx in args.neuron:
+            if nidx < 0 or nidx >= tc.shape[0]:
+                print(f'Error: neuron {nidx} out of range [0, {tc.shape[0]-1}], skipping')
+                continue
+            print(f'\n=== {ln} — neuron {nidx} ===')
+            print(f'Cell type: {GROUP_NAMES[group_ids[nidx]]}')
+            for key in METRIC_FEATURES:
+                if key in metrics:
+                    val = float(np.asarray(metrics[key], dtype=float)[nidx])
+                    print(f'  {METRIC_DISPLAY.get(key, key)}: {val:.4f}')
+            fig, ax = plt.subplots(figsize=(5, 4))
+            im = ax.imshow(np.ma.masked_invalid(tc[nidx].T), origin='lower',
+                           interpolation='nearest', cmap='viridis')
+            plt.colorbar(im, ax=ax, shrink=0.8, label='Mean activation')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            ax.set_title(f'{ln} — neuron {nidx} ({GROUP_NAMES[group_ids[nidx]]})')
+            fig.tight_layout()
+            out = save_dir / f'neuron_{nidx}.svg'
             fig.savefig(out, bbox_inches='tight')
-            print(f'Saved {out}')
-        plt.show()
+            plt.close(fig)
+            print(f'  Saved {out}')
         return
 
     save_dir = Path(args.save)

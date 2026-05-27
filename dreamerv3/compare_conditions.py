@@ -31,8 +31,8 @@ LAYER_ORDER = [
     'enc/mlp0', 'enc/mlp1', 'enc/mlp2',
     'enc/tokens',
     'dyn/stoch', 'dyn/deter',
-    'pol/mlp/linear0', 'pol/mlp/linear1', 'pol/mlp/linear2',
     'val/mlp/linear0', 'val/mlp/linear1', 'val/mlp/linear2',
+    'pol/mlp/linear0', 'pol/mlp/linear1', 'pol/mlp/linear2',
 ]
 
 SECTION_COLORS = {
@@ -115,6 +115,12 @@ def _condition_colors(n):
     return [cmap(i % 10) for i in range(n)]
 
 
+# Line styles and markers to distinguish conditions (standard in papers)
+CONDITION_LINESTYLES = ['-', '--', ':', '-.', (0, (3, 1, 1, 1, 1, 1))]
+CONDITION_MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X']
+CONDITION_HATCHES = ['', '///', '...', 'xxx', '\\\\\\', '+++']
+
+
 # ---------------------------------------------------------------------------
 # Plot 1: Decode heatmap
 # ---------------------------------------------------------------------------
@@ -173,7 +179,8 @@ def plot_decode_lineplot(decode_data, labels, layers, metric_name, save_dir):
     if n_layers == 0:
         return
 
-    colors = _condition_colors(len(labels))
+    n_cond = len(labels)
+    layer_colors = [_section_color(ln) for ln in layers]
     fig, ax = plt.subplots(figsize=(max(8, n_layers * 0.6), 5))
     x = np.arange(n_layers)
 
@@ -197,8 +204,23 @@ def plot_decode_lineplot(decode_data, labels, layers, metric_name, save_dir):
         medians = np.array(medians)
         lo = np.array(lo)
         hi = np.array(hi)
-        ax.plot(x, medians, 'o-', color=colors[i], label=label, markersize=4)
-        ax.fill_between(x, lo, hi, alpha=0.15, color=colors[i])
+        ls = CONDITION_LINESTYLES[i % len(CONDITION_LINESTYLES)]
+        mk = CONDITION_MARKERS[i % len(CONDITION_MARKERS)]
+        # Plot segments colored by layer section
+        for j in range(n_layers):
+            if j < n_layers - 1:
+                ax.plot(x[j:j+2], medians[j:j+2], linestyle=ls,
+                        color=layer_colors[j], linewidth=1.5, zorder=2)
+            ax.plot(x[j], medians[j], marker=mk, color=layer_colors[j],
+                    markersize=5, zorder=3)
+            if not np.isnan(lo[j]) and not np.isnan(hi[j]):
+                ax.fill_between(x[j:j+2] if j < n_layers - 1 else x[j:j+1],
+                                lo[j:j+2] if j < n_layers - 1 else lo[j:j+1],
+                                hi[j:j+2] if j < n_layers - 1 else hi[j:j+1],
+                                alpha=0.10, color=layer_colors[j])
+        # Invisible line for condition legend entry
+        ax.plot([], [], linestyle=ls, marker=mk, color='black',
+                label=label, markersize=5)
 
     ax.set_xticks(x)
     ax.set_xticklabels(layers, rotation=45, ha='right', fontsize=8)
@@ -206,7 +228,7 @@ def plot_decode_lineplot(decode_data, labels, layers, metric_name, save_dir):
         ax.get_xticklabels()[idx].set_color(_section_color(ln))
     ax.set_ylabel(metric_name, fontsize=10)
     ax.set_title(f'Layer Decoding — {metric_name}', fontsize=11)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, title='Condition', title_fontsize=9)
     _style_ax(ax)
     fig.tight_layout()
     out = Path(save_dir) / 'decode_lineplot.png'
@@ -308,11 +330,13 @@ def plot_tuning_celltypes(tuning_data, labels, layers, save_dir):
 
     for i in range(n_cond):
         offsets = np.arange(n_layers) + i * bar_width - 0.4 + bar_width / 2
+        hatch = CONDITION_HATCHES[i % len(CONDITION_HATCHES)]
         bottom = np.zeros(n_layers)
         for g in range(n_groups):
             label_str = GROUP_NAMES[g] if i == 0 else None
             ax.bar(offsets, fracs[i, :, g], bar_width, bottom=bottom,
-                   color=colors[g], label=label_str, edgecolor='white', linewidth=0.3)
+                   color=colors[g], label=label_str, edgecolor='white',
+                   linewidth=0.3, hatch=hatch)
             bottom += fracs[i, :, g]
 
     ax.set_xticks(np.arange(n_layers))
@@ -330,19 +354,19 @@ def plot_tuning_celltypes(tuning_data, labels, layers, save_dir):
     ax.legend(handles[:n_groups], GROUP_NAMES, fontsize=7, loc='upper right',
               ncol=2, framealpha=0.8)
 
-    # Condition labels below legend
+    # Condition legend using hatching
     if n_cond > 1:
-        cond_colors = _condition_colors(n_cond)
-        # Add condition indicator as a second legend
         from matplotlib.patches import Patch
-        cond_patches = [Patch(facecolor=cond_colors[i], label=labels[i])
+        cond_patches = [Patch(facecolor='lightgrey', edgecolor='black',
+                              hatch=CONDITION_HATCHES[i % len(CONDITION_HATCHES)],
+                              label=labels[i])
                         for i in range(n_cond)]
         ax2 = ax.twinx()
         ax2.set_yticks([])
         ax2.spines['top'].set_visible(False)
         ax2.spines['right'].set_visible(False)
         ax2.legend(handles=cond_patches, fontsize=7, loc='upper left',
-                   framealpha=0.8, title='Conditions', title_fontsize=8)
+                   framealpha=0.8, title='Condition', title_fontsize=8)
 
     fig.tight_layout()
     out = Path(save_dir) / 'tuning_celltypes.png'
