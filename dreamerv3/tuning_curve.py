@@ -159,13 +159,64 @@ def pf_autocorr(tuning_curves_array, peak_norm=True):
     return np.array(results)
 
 
-def count_autocorr_peaks(autocorr, size=3, threshold=0.15):
-    """Count local maxima in autocorrelation map."""
-    local_max = (maximum_filter(autocorr, size=size) == autocorr) & (
-        autocorr > threshold
-    )
-    _, num_features = label(local_max)
-    return num_features
+def count_autocorr_peaks(autocorr, min_distance=5, threshold=0.15,
+                         smooth_sigma=1.5, prominence=0.1):
+    """Count distinct peaks in a 2-D autocorrelation map.
+
+    Applies Gaussian smoothing to suppress noise, then detects local maxima
+    that are both (a) the tallest point within a *min_distance* radius and
+    (b) prominent — i.e. they rise at least *prominence* above the highest
+    saddle connecting them to a taller peak.  This ensures that only
+    coherent, round bumps are counted rather than noisy single-pixel
+    fluctuations.
+
+    Args:
+        autocorr: 2-D autocorrelation array (peak-normalised to [0, 1]).
+        min_distance: Minimum separation (pixels) between peaks.
+        threshold: Absolute height threshold — candidates below this are
+            discarded.
+        smooth_sigma: Gaussian sigma (pixels) applied before peak finding.
+            Set to 0 to disable smoothing.
+        prominence: Minimum prominence — a peak must rise this much above
+            the lowest contour that separates it from a taller neighbour.
+
+    Returns:
+        Number of detected peaks (int).
+    """
+    ac = autocorr.copy()
+    if smooth_sigma > 0:
+        ac = gaussian_filter(ac, sigma=smooth_sigma)
+
+    # Find local maxima separated by at least min_distance
+    filter_size = 2 * min_distance + 1
+    local_max = (maximum_filter(ac, size=filter_size) == ac) & (ac > threshold)
+
+    # Label connected peak regions and get their coordinates / heights
+    labeled, num_candidates = label(local_max)
+    if num_candidates == 0:
+        return 0
+
+    # For each candidate, record the peak height in the smoothed map
+    peak_heights = np.zeros(num_candidates)
+    for i in range(1, num_candidates + 1):
+        peak_heights[i - 1] = ac[labeled == i].max()
+
+    # Estimate prominence: for each peak, prominence = peak_height minus
+    # the minimum value on the path to a taller peak.  We approximate this
+    # with the minimum autocorrelation value in the annulus between
+    # min_distance and 2*min_distance around the peak.
+    from scipy.ndimage import minimum_filter
+    bg = minimum_filter(ac, size=2 * filter_size + 1)
+    prominences = np.zeros(num_candidates)
+    for i in range(1, num_candidates + 1):
+        mask = labeled == i
+        ph = ac[mask].max()
+        # Background level around this peak
+        bg_level = bg[mask].min()
+        prominences[i - 1] = ph - bg_level
+
+    n_peaks = int(np.sum((prominences >= prominence) & (peak_heights > threshold)))
+    return n_peaks
 
 
 def calculate_field_size(tc_autocorr, threshold=0.5):
