@@ -161,7 +161,13 @@ def pf_autocorr(tuning_curves_array, peak_norm=True):
 
 def count_autocorr_peaks(autocorr, min_distance=5, threshold=0.15,
                          smooth_sigma=1.5, prominence=0.1):
-    """Count distinct peaks in a 2-D autocorrelation map.
+    """DEPRECATED: use count_tuning_curve_peaks instead.
+
+    Peak finding on the autocorrelation is noisy and requires halving
+    due to the symmetric structure. count_tuning_curve_peaks operates
+    directly on tuning curves with relative thresholds.
+
+    Count distinct peaks in a 2-D autocorrelation map.
 
     Applies Gaussian smoothing to suppress noise, then detects local maxima
     that are both (a) the tallest point within a *min_distance* radius and
@@ -216,6 +222,75 @@ def count_autocorr_peaks(autocorr, min_distance=5, threshold=0.15,
         prominences[i - 1] = ph - bg_level
 
     n_peaks = int(np.sum((prominences >= prominence) & (peak_heights > threshold)))
+    return n_peaks
+
+
+def count_tuning_curve_peaks(tc, min_distance=5, threshold_frac=0.75,
+                             smooth_sigma=1.5, prominence_frac=0.1):
+    """Count distinct peaks directly on a 2-D tuning curve.
+
+    Unlike count_autocorr_peaks (which operates on the symmetric
+    autocorrelation and requires halving), this works on the tuning curve
+    itself so each detected peak maps 1:1 to a place field.
+
+    Thresholds are relative to the neuron's own activation range so the
+    function generalises across neurons with different firing rates.
+
+    Args:
+        tc: 2-D tuning curve array (H, W). NaN = unvisited bins.
+        min_distance: Minimum separation (pixels) between peaks.
+        threshold_frac: Fraction of the tuning curve max — candidates
+            below ``max * threshold_frac`` are discarded (default 0.75).
+        smooth_sigma: Gaussian sigma (pixels) applied before peak finding.
+            Set to 0 to disable smoothing.
+        prominence_frac: Minimum prominence as a fraction of the tuning
+            curve range (max - min). A peak must rise at least this much
+            above its surrounding background (default 0.1).
+
+    Returns:
+        Number of detected peaks (int).
+    """
+    tc_clean = np.nan_to_num(tc, nan=0.0).copy()
+    tc_max = tc_clean.max()
+    tc_min = tc_clean.min()
+    tc_range = tc_max - tc_min
+    if tc_range == 0 or tc_max == 0:
+        return 0
+
+    if smooth_sigma > 0:
+        tc_clean = gaussian_filter(tc_clean, sigma=smooth_sigma)
+        # Recompute after smoothing
+        tc_max = tc_clean.max()
+        tc_min = tc_clean.min()
+        tc_range = tc_max - tc_min
+
+    abs_threshold = tc_max * threshold_frac
+    abs_prominence = tc_range * prominence_frac
+
+    # Find local maxima separated by at least min_distance
+    filter_size = 2 * min_distance + 1
+    local_max = ((maximum_filter(tc_clean, size=filter_size) == tc_clean)
+                 & (tc_clean > abs_threshold))
+
+    labeled, num_candidates = label(local_max)
+    if num_candidates == 0:
+        return 0
+
+    peak_heights = np.zeros(num_candidates)
+    for i in range(1, num_candidates + 1):
+        peak_heights[i - 1] = tc_clean[labeled == i].max()
+
+    from scipy.ndimage import minimum_filter
+    bg = minimum_filter(tc_clean, size=2 * filter_size + 1)
+    prominences = np.zeros(num_candidates)
+    for i in range(1, num_candidates + 1):
+        mask = labeled == i
+        ph = tc_clean[mask].max()
+        bg_level = bg[mask].min()
+        prominences[i - 1] = ph - bg_level
+
+    n_peaks = int(np.sum((prominences >= abs_prominence)
+                         & (peak_heights > abs_threshold)))
     return n_peaks
 
 
@@ -610,7 +685,8 @@ def compute_hd_info(rates, hd, epoch):
 def analyze_layer(layer_name, activations, positions, groups, area,
                   facing=None, test_activations=None, test_positions=None,
                   test_groups=None, compute_hd=True, smooth_sigma=0,
-                  dist_cutoff=0):
+                  dist_cutoff=0, peak_smooth_sigma=1.5,
+                  peak_threshold_frac=0.75, peak_prominence_frac=0.1):
     """Full tuning curve analysis for one layer.
 
     Args:
@@ -626,6 +702,12 @@ def analyze_layer(layer_name, activations, positions, groups, area,
         compute_hd: whether to compute HD metrics.
         smooth_sigma: Gaussian smoothing sigma (bins) for tuning curves before SI.
         dist_cutoff: Max distance (tiles) for spatial autocorr weights (0=no cutoff).
+        peak_smooth_sigma: Gaussian sigma (pixels) for smoothing tuning curves
+            before peak counting (default 1.5, 0=off).
+        peak_threshold_frac: Fraction of tuning curve max — peaks below this
+            are discarded (default 0.75).
+        peak_prominence_frac: Minimum prominence as fraction of tuning curve
+            range (max - min). Default 0.1.
 
     Returns:
         dict with tuning_curves, metrics, groups, group_ids.
@@ -661,8 +743,12 @@ def analyze_layer(layer_name, activations, positions, groups, area,
 
     # Autocorrelation metrics
     autocorrs = pf_autocorr(tc_array, peak_norm=True)
-    peaks = np.array([count_autocorr_peaks(ac) for ac in autocorrs])
-    peaks = (peaks + 1) // 2
+    # Peak counting on tuning curves directly (no halving needed)
+    peaks = np.array([count_tuning_curve_peaks(
+        tc, smooth_sigma=peak_smooth_sigma,
+        threshold_frac=peak_threshold_frac,
+        prominence_frac=peak_prominence_frac,
+    ) for tc in tc_array])
     fieldsizes = np.array([calculate_field_size(ac) for ac in autocorrs])
     fieldasymmetries = np.array([calculate_field_asymmetry(ac) for ac in autocorrs])
 
@@ -783,12 +869,15 @@ def plot_cell_types(group_ids, layer_name, save_path):
 
 def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
-                               sort_by='SI', ev_filter=0.0):
+                               sort_by='SI', ev_filter=0.0,
+                               show_autocorr=False):
     """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.).
 
     Args:
         ev_filter: For autocorr metrics (morans_i, gearys_c, getis_ord_g),
             only show neurons with EV > ev_filter. Set 0 to disable.
+        show_autocorr: If True, show spatial autocorrelation next to each
+            tuning curve (doubles the columns).
     """
     n_neurons = tc_array.shape[0]
     # Map sort_by name to metrics dict key
@@ -820,9 +909,17 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         order = candidates[np.argsort(vals[candidates])[::-1]]  # descending — highest = best
     selected = order[:n_show]
 
-    ncols = min(5, n_show)
-    nrows = int(np.ceil(n_show / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2, nrows * 2))
+    # Layout: each neuron gets 1 column (or 2 if show_autocorr)
+    neurons_per_row = min(5, n_show)
+    nrows = int(np.ceil(n_show / neurons_per_row))
+    if show_autocorr:
+        ncols = neurons_per_row * 2  # TC + autocorr side by side
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(neurons_per_row * 3.5, nrows * 2))
+    else:
+        ncols = neurons_per_row
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(ncols * 2, nrows * 2))
     if nrows == 1 and ncols == 1:
         axes = np.array([[axes]])
     elif nrows == 1:
@@ -831,27 +928,69 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         axes = axes[:, np.newaxis]
 
     for idx, neuron_idx in enumerate(selected):
-        r, c = idx // ncols, idx % ncols
-        ax = axes[r, c]
+        r = idx // neurons_per_row
         tc = tc_array[neuron_idx]
-        im = ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                       interpolation='nearest', cmap=_tc_cmap())
         val = metrics[metric_key][neuron_idx]
-        ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
-                     fontsize=7)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_edgecolor('black')
-            spine.set_linewidth(0.8)
-        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cb.set_label('Mean activation', fontsize=5)
-        cb.ax.tick_params(labelsize=5)
+
+        if show_autocorr:
+            c_tc = (idx % neurons_per_row) * 2
+            c_ac = c_tc + 1
+
+            # Tuning curve
+            ax = axes[r, c_tc]
+            im = ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                           interpolation='nearest', cmap=_tc_cmap())
+            ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
+                         fontsize=7)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_edgecolor('black')
+                spine.set_linewidth(0.8)
+
+            # Autocorrelation
+            ax_ac = axes[r, c_ac]
+            ac = correlate2d(np.nan_to_num(tc), np.nan_to_num(tc),
+                             mode='full')
+            if ac.max() > 0:
+                ac = ac / ac.max()
+            ax_ac.imshow(ac.T, origin='lower', interpolation='nearest',
+                         cmap='RdBu_r', vmin=-0.2, vmax=1.0)
+            peaks = int(metrics['pf_peaks'][neuron_idx]) if (
+                'pf_peaks' in metrics and np.isfinite(metrics['pf_peaks'][neuron_idx])
+            ) else 0
+            ax_ac.set_title(f'peaks={peaks}', fontsize=7)
+            ax_ac.set_xticks([])
+            ax_ac.set_yticks([])
+            for spine in ax_ac.spines.values():
+                spine.set_edgecolor('gray')
+                spine.set_linewidth(0.5)
+        else:
+            c = idx % ncols
+            ax = axes[r, c]
+            im = ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                           interpolation='nearest', cmap=_tc_cmap())
+            ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
+                         fontsize=7)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_edgecolor('black')
+                spine.set_linewidth(0.8)
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cb.set_label('Mean activation', fontsize=5)
+            cb.ax.tick_params(labelsize=5)
 
     # Hide unused axes
-    for idx in range(n_show, nrows * ncols):
-        r, c = idx // ncols, idx % ncols
-        axes[r, c].axis('off')
+    for idx in range(n_show, nrows * neurons_per_row):
+        r = idx // neurons_per_row
+        if show_autocorr:
+            c_tc = (idx % neurons_per_row) * 2
+            axes[r, c_tc].axis('off')
+            axes[r, c_tc + 1].axis('off')
+        else:
+            c = idx % ncols
+            axes[r, c].axis('off')
 
     fig.suptitle(f'{layer_name}: Top Tuning Curves (by {sort_by})', fontsize=10)
     fig.tight_layout()
@@ -1295,6 +1434,12 @@ def main():
     parser.add_argument('--HD_thresh', type=float, default=0.5)
     parser.add_argument('--smooth_sigma', type=float, default=0,
                         help='Gaussian smoothing sigma (bins) on tuning curves before SI (0=off)')
+    parser.add_argument('--peak_smooth_sigma', type=float, default=1.5,
+                        help='Gaussian sigma (pixels) for smoothing tuning curves before peak counting (0=off)')
+    parser.add_argument('--peak_threshold_frac', type=float, default=0.75,
+                        help='Fraction of tuning curve max below which peaks are discarded (default 0.75)')
+    parser.add_argument('--peak_prominence_frac', type=float, default=0.1,
+                        help='Min prominence as fraction of tuning curve range (default 0.1)')
     parser.add_argument('--ev_filter', type=float, default=0.4,
                         help='EV cutoff for filtered SI/EV boxplots (default 0.4)') #used for "exmple tuning curves" 
     parser.add_argument('--dist_cutoff', type=float, default=7,
@@ -1359,6 +1504,7 @@ def main():
                         layer_dir / f'example_tuning_curves_{metric_name}.pdf',
                         sort_by=metric_name,
                         ev_filter=args.ev_filter,
+                        show_autocorr=(metric_name == 'pf_peaks'),
                     )
             print("Done.")
             return
@@ -1576,6 +1722,9 @@ def main():
             compute_hd=not args.no_hd and facing is not None,
             smooth_sigma=args.smooth_sigma,
             dist_cutoff=args.dist_cutoff,
+            peak_smooth_sigma=args.peak_smooth_sigma,
+            peak_threshold_frac=args.peak_threshold_frac,
+            peak_prominence_frac=args.peak_prominence_frac,
         )
         all_results.append(result)
 
@@ -1677,6 +1826,7 @@ def main():
                     layer_dir / f'example_tuning_curves_{metric_name}.pdf',
                     area=area, sort_by=metric_name,
                     ev_filter=args.ev_filter,
+                    show_autocorr=(metric_name == 'pf_peaks'),
                 )
 
         if len(all_results) > 1:
