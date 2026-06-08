@@ -651,10 +651,25 @@ def main():
                         help='Skip Isomap (faster)')
     parser.add_argument('--no_hill', action='store_true',
                         help='Skip Hill fit')
+    parser.add_argument('--ev_thresh', type=float, default=None,
+                        help='Min EV threshold to subset neurons (requires --tuning_pkl)')
+    parser.add_argument('--tuning_pkl', default=None,
+                        help='Path to tuning_results.pkl (required for --ev_thresh)')
     args = parser.parse_args()
+
+    if args.ev_thresh is not None and args.tuning_pkl is None:
+        parser.error('--ev_thresh requires --tuning_pkl')
 
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load tuning results for EV thresholding
+    tuning_data = None
+    if args.ev_thresh is not None:
+        print(f"Loading tuning results from {args.tuning_pkl} ...")
+        with open(args.tuning_pkl, 'rb') as f:
+            tuning_data = pickle.load(f)
+        print(f"  EV threshold: {args.ev_thresh}")
 
     all_results = {}
     output_files = []
@@ -688,6 +703,22 @@ def main():
             idx = rng.choice(len(X_dream), args.max_dream_samples, replace=False)
             X_dream = X_dream[idx]
         print(f"  Dream: {X_dream.shape[0]} samples, dim={X_dream.shape[1]}")
+
+        # --- EV threshold neuron filtering ---
+        if tuning_data is not None and layer_name in tuning_data:
+            evs = np.asarray(tuning_data[layer_name]['metrics']['EVs'], dtype=float)
+            ev_mask = np.isfinite(evs) & (evs > args.ev_thresh)
+            n_keep = ev_mask.sum()
+            n_total = len(evs)
+            if n_keep < 10:
+                print(f"  SKIP {layer_name}: only {n_keep}/{n_total} neurons above EV > {args.ev_thresh}")
+                continue
+            print(f"  EV filter: {n_keep}/{n_total} neurons above {args.ev_thresh}")
+            neuron_idx = np.where(ev_mask)[0]
+            X_wake = X_wake[:, neuron_idx]
+            X_dream = X_dream[:, neuron_idx]
+        elif tuning_data is not None and layer_name not in tuning_data:
+            print(f"  WARNING: layer '{layer_name}' not found in tuning pkl, skipping EV filter")
 
         # --- sRSA on wake ---
         print("Computing sRSA...")
