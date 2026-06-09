@@ -313,6 +313,8 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color, cmap='viridis',
                     s=4, alpha=0.6, edgecolors='none')
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.set_label('arctan(x/y)', fontsize=9)
     ax.axis('off')
     ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
@@ -532,6 +534,7 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
         color = np.arctan((pos_wake[:, 0] - cx) / (pos_wake[:, 1] - cy))
         sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color,
                         cmap='viridis', s=4, alpha=0.6, edgecolors='none')
+        fig.colorbar(sc, ax=ax, shrink=0.7)
         ax.axis('off')
         ax.set_title('position', fontsize=9, color='white')
 
