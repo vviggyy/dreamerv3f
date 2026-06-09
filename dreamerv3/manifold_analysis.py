@@ -139,13 +139,16 @@ def compute_srsa(X, pos):
     """
     neural_dists = pdist(X, metric='cosine')
     spatial_dists = pdist(pos, metric='euclidean')
-    rho, pval = spearmanr(neural_dists, spatial_dists)
+
+    # Filter NaN pairs (from zero-vector cosine distances)
+    finite_mask = np.isfinite(neural_dists)
+    rho, pval = spearmanr(neural_dists[finite_mask], spatial_dists[finite_mask])
 
     # 2D conditional histogram P[neural | spatial] (pRNN style)
     neural_bins = np.linspace(0, 1, 50)
     sp_max = np.percentile(spatial_dists, 99)
     spatial_bins = np.arange(-0.5, sp_max + 1.5, 1)
-    hist2, _nb, _sb = np.histogram2d(neural_dists, spatial_dists,
+    hist2, _nb, _sb = np.histogram2d(neural_dists[finite_mask], spatial_dists[finite_mask],
                                       bins=[neural_bins, spatial_bins])
     # Normalize each spatial column to get P[neural | spatial]
     col_sums = hist2.sum(axis=0, keepdims=True)
@@ -234,7 +237,7 @@ def compute_sw_distance(X_wake, X_dream):
         dists = cdist(X_dream[start:end], X_wake, metric='cosine')
         min_dists[start:end] = dists.min(axis=1)
 
-    median_sw = float(np.median(min_dists))
+    median_sw = float(np.nanmedian(min_dists))
     return median_sw, min_dists
 
 
@@ -434,21 +437,30 @@ def plot_sw_histogram(min_dists, median_sw, neural_bins, layer_name, save_dir):
     fig, axes = plt.subplots(1, 2, figsize=(9, 5),
                               gridspec_kw={'width_ratios': [1, 4]})
 
+    # Filter NaNs for plotting
+    finite_dists = min_dists[np.isfinite(min_dists)]
+    n_nan = len(min_dists) - len(finite_dists)
+    if n_nan > 0:
+        print(f"  WARNING: {n_nan}/{len(min_dists)} SW distances are NaN (zero-vector cosine)")
+
     # Left panel: thin vertical column (pRNN sleepdistPanel style)
     ax = axes[0]
-    n, bins = np.histogram(min_dists, bins=neural_bins)
-    n = n / n.sum()
-    ax.imshow(np.expand_dims(n, axis=1), origin='lower', aspect='auto',
-              extent=(0, 0.1, neural_bins[0], neural_bins[-1]),
-              cmap='binary', interpolation='none')
+    if len(finite_dists) > 0:
+        n, bins = np.histogram(finite_dists, bins=neural_bins)
+        n_total = n.sum()
+        n = n / n_total if n_total > 0 else n
+        ax.imshow(np.expand_dims(n, axis=1), origin='lower', aspect='auto',
+                  extent=(0, 0.1, neural_bins[0], neural_bins[-1]),
+                  cmap='binary', interpolation='none')
     ax.set_xlabel('S-W', fontsize=9)
     ax.set_ylabel('Neural distance (cosine)', fontsize=10)
     ax.xaxis.set_ticklabels([])
 
     # Right panel: regular histogram with median line
     ax = axes[1]
-    ax.hist(min_dists, bins=50, color='#ff6666', edgecolor='#cc3333', alpha=0.8,
-            orientation='horizontal')
+    if len(finite_dists) > 0:
+        ax.hist(finite_dists, bins=50, color='#ff6666', edgecolor='#cc3333', alpha=0.8,
+                orientation='horizontal')
     ax.axhline(median_sw, color='cyan', linestyle='--', linewidth=2,
                label=f'median = {median_sw:.4f}')
     ax.set_xlabel('Count', fontsize=10)
@@ -499,7 +511,8 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
     # Panel 2: SW distance column
     ax = axes[1]
     min_dists = r['sw_min_dists']
-    n, bins = np.histogram(min_dists, bins=neural_bins)
+    finite_dists = min_dists[np.isfinite(min_dists)]
+    n, bins = np.histogram(finite_dists, bins=neural_bins) if len(finite_dists) > 0 else (np.zeros(len(neural_bins)-1), neural_bins)
     n_norm = n / max(n.sum(), 1)
     ax.imshow(np.expand_dims(n_norm, axis=1), origin='lower', aspect='auto',
               extent=(0, 0.1, neural_bins[0], neural_bins[-1]),
@@ -705,8 +718,10 @@ def main():
         print(f"  Dream: {X_dream.shape[0]} samples, dim={X_dream.shape[1]}")
 
         # --- EV threshold neuron filtering ---
-        if tuning_data is not None and layer_name in tuning_data:
-            evs = np.asarray(tuning_data[layer_name]['metrics']['EVs'], dtype=float)
+        # tuning pkl has top-level keys {metadata, layers}; layer data is under 'layers'
+        tuning_layers = tuning_data.get('layers', tuning_data) if tuning_data is not None else None
+        if tuning_layers is not None and layer_name in tuning_layers:
+            evs = np.asarray(tuning_layers[layer_name]['metrics']['EVs'], dtype=float)
             ev_mask = np.isfinite(evs) & (evs > args.ev_thresh)
             n_keep = ev_mask.sum()
             n_total = len(evs)
@@ -717,7 +732,7 @@ def main():
             neuron_idx = np.where(ev_mask)[0]
             X_wake = X_wake[:, neuron_idx]
             X_dream = X_dream[:, neuron_idx]
-        elif tuning_data is not None and layer_name not in tuning_data:
+        elif tuning_layers is not None and layer_name not in tuning_layers:
             print(f"  WARNING: layer '{layer_name}' not found in tuning pkl, skipping EV filter")
 
         # --- sRSA on wake ---
