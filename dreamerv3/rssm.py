@@ -44,12 +44,16 @@ class RSSM(nj.Module):
         stoch=elements.Space(np.float32, (self.stoch, self.classes)))
 
   def initial(self, bsize):
+    # carry is the recurrent state threaded across timesteps via jax scan:
+    # {deter: h, stoch: z}. Initialized to zeros at sequence start.
     carry = nn.cast(dict(
         deter=jnp.zeros([bsize, self.deter], f32),
         stoch=jnp.zeros([bsize, self.stoch, self.classes], f32)))
     return carry
 
   def truncate(self, entries, carry=None):
+    # Extract carry from the last timestep of a sequence, so we can
+    # resume the recurrent state across replay chunks / training batches.
     assert entries['deter'].ndim == 3, entries['deter'].shape
     carry = jax.tree.map(lambda x: x[:, -1], entries)
     return carry
@@ -82,35 +86,41 @@ class RSSM(nj.Module):
       return carry, entries, feat
 
   def _observe(self, carry, tokens, action, reset, training, mask=False):
+    # Posterior update: z ~ Cat(f(h, encoder_tokens)).
+    # Uses both the new deterministic state h and real observations to
+    # compute the posterior distribution over z.
     deter, stoch, action = nn.mask(
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
-    deter = self._core(deter, stoch, action)
+    deter = self._core(deter, stoch, action)  # new h from GRU
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-    post_logit = self._logit('obslogit', x)
+    post_logit = self._logit('obslogit', x)  # posterior logits from h + obs
     prior_logit = self._prior(deter)
     # On masked steps, use prior (dynamics-only) instead of posterior
     mask_bc = jnp.reshape(mask, (*deter.shape[:-1], 1, 1)) if jnp.ndim(mask) > 0 else mask
     logit = jnp.where(mask_bc, prior_logit, post_logit)
+    # Sample z: 32x32 categorical with straight-through one-hot gradients
     stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
-    carry = dict(deter=deter, stoch=stoch)
+    carry = dict(deter=deter, stoch=stoch)  # thread (h, z) to next timestep
     feat = dict(deter=deter, stoch=stoch, logit=logit)
     entry = dict(deter=deter, stoch=stoch)
     assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
     return carry, (entry, feat)
 
   def imagine(self, carry, policy, length, training, single=False):
+    # Prior update: z ~ Cat(f(h)) — no observations, only the dynamics.
+    # Used during imagination / dreaming to predict z from h alone.
     if single:
       action = policy(sg(carry)) if callable(policy) else policy
       actemb = nn.DictConcat(self.act_space, 1)(action)
-      deter = self._core(carry['deter'], carry['stoch'], actemb)
-      logit = self._prior(deter)
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      deter = self._core(carry['deter'], carry['stoch'], actemb)  # new h
+      logit = self._prior(deter)  # prior logits from h only (no obs)
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))  # sample z
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -147,6 +157,8 @@ class RSSM(nj.Module):
     return carry, entries, losses, feat, metrics
 
   def _core(self, deter, stoch, action):
+    # Block-wise GRU: computes new h from (old_h, old_z, action).
+    # Splits h into 8 blocks and applies independent gated updates per block.
     stoch = stoch.reshape((stoch.shape[0], -1))
     action /= sg(jnp.maximum(1, jnp.abs(action)))
     g = self.blocks
@@ -168,11 +180,13 @@ class RSSM(nj.Module):
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
     cand = nn.act(self.gru_act)(reset * cand)
-    update = jax.nn.sigmoid(update - 1)
-    deter = update * cand + (1 - update) * deter
+    update = jax.nn.sigmoid(update - 1)  # bias toward 0 → default is to remember
+    deter = update * cand + (1 - update) * deter  # GRU update: blend new candidate with old h
     return deter
 
   def _prior(self, feat):
+    # Prior: predicts z logits from h alone (no observations).
+    # Used during imagination and as the KL target during training.
     x = feat
     for i in range(self.imglayers):
       x = self.sub(f'prior{i}', nn.Linear, self.hidden, **self.kw)(x)
@@ -185,6 +199,8 @@ class RSSM(nj.Module):
     return x.reshape(x.shape[:-1] + (self.stoch, self.classes))
 
   def _dist(self, logits):
+    # Categorical distribution over z with 1% uniform mixing (unimix=0.01)
+    # and straight-through one-hot gradients for discrete sampling.
     out = embodied.jax.outs.OneHot(logits, self.unimix)
     out = embodied.jax.outs.Agg(out, 1, jnp.sum)
     return out
