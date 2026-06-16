@@ -59,21 +59,29 @@ class RSSM(nj.Module):
     return jax.tree.map(
         lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
 
-  def observe(self, carry, tokens, action, reset, training, single=False):
+  def observe(self, carry, tokens, action, reset, training, single=False,
+              mask=None):
     carry, tokens, action = nn.cast((carry, tokens, action))
     if single:
+      m = mask if mask is not None else False
       carry, (entry, feat) = self._observe(
-          carry, tokens, action, reset, training)
+          carry, tokens, action, reset, training, mask=m)
       return carry, entry, feat
     else:
       unroll = jax.tree.leaves(tokens)[0].shape[1] if self.unroll else 1
+      if mask is None:
+        mask_input = jnp.zeros(reset.shape, dtype=bool)
+      else:
+        mask_input = mask
       carry, (entries, feat) = nj.scan(
           lambda carry, inputs: self._observe(
-              carry, *inputs, training),
-          carry, (tokens, action, reset), unroll=unroll, axis=1)
+              carry, inputs[0], inputs[1], inputs[2], training,
+              mask=inputs[3]),
+          carry, (tokens, action, reset, mask_input),
+          unroll=unroll, axis=1)
       return carry, entries, feat
 
-  def _observe(self, carry, tokens, action, reset, training):
+  def _observe(self, carry, tokens, action, reset, training, mask=False):
     deter, stoch, action = nn.mask(
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
@@ -84,7 +92,11 @@ class RSSM(nj.Module):
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-    logit = self._logit('obslogit', x)
+    post_logit = self._logit('obslogit', x)
+    prior_logit = self._prior(deter)
+    # On masked steps, use prior (dynamics-only) instead of posterior
+    mask_bc = jnp.reshape(mask, (*deter.shape[:-1], 1, 1)) if jnp.ndim(mask) > 0 else mask
+    logit = jnp.where(mask_bc, prior_logit, post_logit)
     stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
@@ -118,9 +130,10 @@ class RSSM(nj.Module):
       # return carry, entries, feat, action
       return carry, feat, action
 
-  def loss(self, carry, tokens, acts, reset, training):
+  def loss(self, carry, tokens, acts, reset, training, mask=None):
     metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
+    carry, entries, feat = self.observe(
+        carry, tokens, acts, reset, training, mask=mask)
     prior = self._prior(feat['deter'])
     post = feat['logit']
     dyn = self._dist(sg(post)).kl(self._dist(prior))

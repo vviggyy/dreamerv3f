@@ -195,8 +195,14 @@ class Agent(embodied.jax.Agent):
     else:
       enc_carry, enc_entries, tokens = self.enc(
           enc_carry, obs, reset, training)
+    # Visual input masking: on masked steps, use prior instead of posterior
+    mask_k = self.config.mask_visual_k
+    if training and mask_k > 0:
+      visual_mask = (jnp.arange(T) % mask_k == 0)[None].repeat(B, axis=0)
+    else:
+      visual_mask = None
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(
-        dyn_carry, tokens, prevact, reset, training)
+        dyn_carry, tokens, prevact, reset, training, mask=visual_mask)
     losses.update(los)
     metrics.update(mets)
     dec_carry, dec_entries, recons = self.dec(
@@ -212,6 +218,14 @@ class Agent(embodied.jax.Agent):
       assert value.dtype == space.dtype, (key, space, value.dtype)
       target = f32(value) / 255 if isimage(space) else value
       losses[key] = recon.loss(sg(target))
+
+    # Optionally zero recon losses on masked steps
+    if visual_mask is not None:
+      metrics['mask/frac'] = visual_mask.astype(f32).mean()
+      if not self.config.mask_recon_loss:
+        recon_weight = 1.0 - visual_mask.astype(f32)
+        for key in recons:
+          losses[key] = losses[key] * recon_weight
 
     # L1 activity regularization on world model representations
     if self.config.l1_wm:
