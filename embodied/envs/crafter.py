@@ -1,18 +1,52 @@
 import json
+import os
 
 import crafter
 import crafter.engine as crafter_engine
+import crafter.objects as crafter_objects
 import elements
 import embodied
 import numpy as np
+
+# Mapping from single-char codes to crafter material names
+MATERIAL_CODES = {
+    '.': 'water',    # empty / border
+    'W': 'water',
+    'G': 'grass',
+    'T': 'tree',
+    'S': 'stone',
+    'P': 'path',
+    'N': 'sand',
+    'L': 'lava',
+    'C': 'coal',
+    'I': 'iron',
+    'D': 'diamond',
+    'A': 'table',
+    'F': 'furnace',
+}
+
+# Object codes — placed on grass tile underneath
+OBJECT_CODES = {
+    '@': 'cow',
+    'Z': 'zombie',
+    'K': 'skeleton',
+}
 
 
 class Crafter(embodied.Env):
 
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
-               egocentric_view=None, disable_mobs=False, upright_sprites=False):
+               egocentric_view=None, disable_mobs=False, upright_sprites=False,
+               custom_world=''):
     assert task in ('reward', 'noreward')
+    # Parse custom world file before creating env (may override area)
+    self._custom_world = custom_world
+    self._custom_grid = None
+    self._custom_area = None
+    if custom_world:
+      self._custom_grid, self._custom_area = self._parse_world_file(custom_world)
+      area = self._custom_area
     self._env = crafter.Env(
         area=area, size=size, reward=(task == 'reward'), seed=seed)
     if disable_mobs:
@@ -119,6 +153,9 @@ class Crafter(embodied.Env):
       if self._fixed_seed:
         self._env._episode = 0
       image = self._env.reset()
+      if self._custom_grid is not None:
+        self._load_custom_world()
+        image = self._env._obs()
       if self._random_spawn:
         self._relocate_player()
         image = self._env._obs()
@@ -153,6 +190,81 @@ class Crafter(embodied.Env):
     idx = self._spawn_rng.randint(0, len(xs))
     new_pos = np.array([xs[idx], ys[idx]])
     world.move(player, new_pos)
+
+  @staticmethod
+  def _parse_world_file(path):
+    """Parse a custom world text file into a 2D grid and area tuple.
+
+    File format: one char per tile, space-separated, one row per line.
+    Returns (grid, area) where grid[row][col] is a char code and
+    area = (n_cols, n_rows) matching crafter's (x, y) convention.
+    """
+    path = os.path.expanduser(path)
+    with open(path) as f:
+      lines = [line.strip() for line in f if line.strip()]
+    grid = [line.split() for line in lines]
+    n_rows = len(grid)
+    n_cols = len(grid[0])
+    for r, row in enumerate(grid):
+      if len(row) != n_cols:
+        raise ValueError(
+            f"Row {r} has {len(row)} cols, expected {n_cols} in {path}")
+      for c, ch in enumerate(row):
+        if ch not in MATERIAL_CODES and ch not in OBJECT_CODES:
+          raise ValueError(
+              f"Unknown tile code '{ch}' at row {r}, col {c} in {path}")
+    return grid, (n_cols, n_rows)
+
+  def _load_custom_world(self):
+    """Overwrite world materials and objects from the parsed custom grid.
+
+    Called after self._env.reset() which runs procedural worldgen.
+    We overwrite _mat_map tile-by-tile and place objects.
+    Grid axes: row=y (top-to-bottom), col=x (left-to-right).
+    Crafter world indexing: world[x, y].
+    """
+    world = self._env._world
+    player = self._env._player
+
+    # Remove all existing objects except the player
+    for obj in list(world.objects):
+      if obj is not player:
+        world.remove(obj)
+
+    # Overwrite materials and place objects
+    for row_idx, row in enumerate(self._custom_grid):
+      for col_idx, ch in enumerate(row):
+        pos = (col_idx, row_idx)  # crafter uses (x, y)
+        if ch in OBJECT_CODES:
+          # Object tiles: grass underneath, object on top
+          world[pos] = 'grass'
+          obj_type = OBJECT_CODES[ch]
+          if obj_type == 'cow':
+            obj = crafter_objects.Cow(world, pos)
+          elif obj_type == 'zombie':
+            obj = crafter_objects.Zombie(world, pos, player)
+          elif obj_type == 'skeleton':
+            obj = crafter_objects.Skeleton(world, pos, player)
+          world.add(obj)
+        else:
+          world[pos] = MATERIAL_CODES[ch]
+
+    # Move player to center of the world (default spawn)
+    cx, cy = self._custom_area[0] // 2, self._custom_area[1] // 2
+    # Find nearest walkable tile to center
+    walkable_mats = ('grass', 'path', 'sand')
+    mat_ids = [world._mat_ids[m] for m in walkable_mats if m in world._mat_ids]
+    walkable = np.isin(world._mat_map, mat_ids) & (world._obj_map == 0)
+    if walkable[cx, cy]:
+      world.move(player, np.array([cx, cy]))
+    else:
+      # Find closest walkable tile to center
+      xs, ys = np.where(walkable)
+      if len(xs) == 0:
+        raise RuntimeError("No walkable tiles in custom world")
+      dists = np.abs(xs - cx) + np.abs(ys - cy)
+      idx = np.argmin(dists)
+      world.move(player, np.array([xs[idx], ys[idx]]))
 
   def _remap_ego_action(self, ego_act):
     """Remap egocentric movement action to world-relative crafter action.
