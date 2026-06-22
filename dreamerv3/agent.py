@@ -199,6 +199,8 @@ class Agent(embodied.jax.Agent):
     mask_k = self.config.mask_visual_k
     if training and mask_k > 0:
       visual_mask = (jnp.arange(T) % mask_k == 0)[None].repeat(B, axis=0)
+      if self.config.mask_visual_invert:
+        visual_mask = ~visual_mask
     else:
       visual_mask = None
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(

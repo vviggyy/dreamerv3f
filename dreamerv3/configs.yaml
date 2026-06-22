@@ -142,6 +142,7 @@ defaults:
     report_dream_feats: False
     record_activations: False
     mask_visual_k: 0
+    mask_visual_invert: False
     mask_recon_loss: True
 
 size1m: &size1m
