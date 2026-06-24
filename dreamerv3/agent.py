@@ -82,6 +82,8 @@ class Agent(embodied.jax.Agent):
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
     scales.update({k: rec for k in dec_space})
+    if self.config.rollout_k > 0:
+      scales['rollout_dyn'] = self.config.rollout_dyn_scale
     self.scales = scales
 
   @property
@@ -207,6 +209,15 @@ class Agent(embodied.jax.Agent):
         dyn_carry, tokens, prevact, reset, training, mask=visual_mask)
     losses.update(los)
     metrics.update(mets)
+    # Multi-step rollout dynamics loss
+    if training and self.config.rollout_k > 0:
+      rollout_dyn, rollout_mets = self.dyn.rollout_loss(
+          dyn_entries, repfeat, prevact, reset, training,
+          rollout_k=self.config.rollout_k)
+      losses['rollout_dyn'] = rollout_dyn
+      metrics.update(rollout_mets)
+    else:
+      losses['rollout_dyn'] = jnp.zeros((B, T))
     dec_carry, dec_entries, recons = self.dec(
         dec_carry, repfeat, reset, training)
     inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)

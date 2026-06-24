@@ -156,6 +156,80 @@ class RSSM(nj.Module):
     metrics['rep_ent'] = self._dist(post).entropy().mean()
     return carry, entries, losses, feat, metrics
 
+  def rollout_loss(self, entries, feat, acts, reset, training, rollout_k):
+    """Multi-step prior rollout loss.
+
+    For each timestep t, rolls forward K steps using _core() + _prior()
+    with real actions, comparing each rolled prior to sg(posterior[t+k]).
+    """
+    B, T = reset.shape
+    posterior_logits = feat['logit']  # (B, T, stoch, classes)
+    total_kl = jnp.zeros((B, T))
+    count = jnp.zeros((B, T))
+    metrics = {}
+
+    # Precompute cumulative reset for cross-episode boundary detection
+    reset_cumsum = jnp.cumsum(reset.astype(f32), axis=1)
+
+    # Start from posterior states at each timestep
+    rolled_deter = entries['deter']  # (B, T, D)
+    rolled_stoch = entries['stoch']  # (B, T, S, C)
+
+    for k in range(1, rollout_k + 1):
+      valid_T = T - k
+      if valid_T <= 0:
+        break
+
+      # Actions for this step: prevact[t+k] transitions state[t+k-1] -> state[t+k]
+      step_acts = {key: v[:, k:k + valid_T] for key, v in acts.items()}
+
+      # Embed actions (merge B*valid_T for DictConcat, then use directly)
+      flat_acts = {key: v.reshape((-1, *v.shape[2:])) for key, v in step_acts.items()}
+      actemb = nn.DictConcat(self.act_space, 1)(flat_acts)
+
+      # Prepare rolled states: (B*valid_T, ...)
+      rd = rolled_deter[:, :valid_T].reshape(-1, rolled_deter.shape[-1])
+      rs = rolled_stoch[:, :valid_T].reshape(-1, *rolled_stoch.shape[2:])
+
+      # Roll forward one step: GRU + prior
+      new_deter = self._core(rd, rs, actemb)
+      prior_logit = self._prior(new_deter)
+      new_stoch = nn.cast(self._dist(prior_logit).sample(seed=nj.seed()))
+
+      # Reshape back to (B, valid_T, ...)
+      new_deter = new_deter.reshape(B, valid_T, -1)
+      prior_logit = prior_logit.reshape(B, valid_T, self.stoch, self.classes)
+      new_stoch = new_stoch.reshape(B, valid_T, self.stoch, self.classes)
+
+      # Target: posterior logits at landing timestep t+k
+      target_logit = posterior_logits[:, k:k + valid_T]
+
+      # KL: prior tries to match stopped posterior (same direction as dyn loss)
+      kl = self._dist(sg(target_logit)).kl(self._dist(prior_logit))
+      if self.free_nats:
+        kl = jnp.maximum(kl, self.free_nats)
+
+      # Mask rollouts crossing episode boundaries
+      # cross_reset[i] = any(reset[i+1], ..., reset[i+k]) for start position i
+      cross_reset = (reset_cumsum[:, k:k + valid_T] - reset_cumsum[:, :valid_T]) > 0
+      valid_mask = (~cross_reset).astype(f32)
+      kl = kl * valid_mask
+
+      # Accumulate into (B, T) tensor, zero-padded at trailing positions
+      total_kl = total_kl.at[:, :valid_T].add(kl)
+      count = count.at[:, :valid_T].add(valid_mask)
+
+      # Per-depth metric
+      metrics[f'rollout_dyn/depth_{k}'] = kl.sum() / valid_mask.sum().clip(1)
+
+      # Carry rolled state forward for next depth
+      rolled_deter = new_deter
+      rolled_stoch = new_stoch
+
+    # Average over depths (avoid div by zero)
+    rollout_dyn = jnp.where(count > 0, total_kl / count, 0.0)
+    return rollout_dyn, metrics
+
   def _core(self, deter, stoch, action):
     # Block-wise GRU: computes new h from (old_h, old_z, action).
     # Splits h into 8 blocks and applies independent gated updates per block.
