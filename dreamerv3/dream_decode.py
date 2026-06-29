@@ -123,6 +123,15 @@ def plot_dream_trajectories_on_world(decoded_pos, start_pos, metadata,
 
     fig.suptitle(f'Dream trajectories on world (seed={env_seed})',
                  fontsize=13, color='white')
+
+    # Add colorbar for timestep
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, H - 1))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, fraction=0.02, pad=0.02, aspect=30)
+    cbar.set_label('Imagination timestep', color='white', fontsize=10)
+    cbar.ax.yaxis.set_tick_params(color='white')
+    cbar.ax.tick_params(labelcolor='white')
+
     fig.tight_layout()
     out = save_dir / 'dream_trajectories_world.png'
     fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='#1a1a1a')
