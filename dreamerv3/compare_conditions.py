@@ -17,10 +17,13 @@ import os
 import pickle
 import sys
 import warnings
+from itertools import combinations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
+from scipy.stats import mannwhitneyu
 
 # ---------------------------------------------------------------------------
 # Constants (mirrored from decode_position.py and tuning_curve.py)
@@ -101,6 +104,15 @@ def load_tuning(path, subdir):
         return pickle.load(f)
 
 
+def load_manifold(path, subdir):
+    fp = Path(path) / subdir / 'manifold_results.pkl'
+    if not fp.exists():
+        warnings.warn(f"Manifold results not found: {fp}")
+        return None
+    with open(fp, 'rb') as f:
+        return pickle.load(f)
+
+
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
@@ -115,10 +127,8 @@ def _condition_colors(n):
     return [cmap(i % 10) for i in range(n)]
 
 
-# Line styles and markers to distinguish conditions (standard in papers)
-CONDITION_LINESTYLES = ['-', '--', ':', '-.', (0, (3, 1, 1, 1, 1, 1))]
-CONDITION_MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X']
 CONDITION_HATCHES = ['', '///', '...', 'xxx', '\\\\\\', '+++']
+CONDITION_ALPHAS = [0.85, 0.50, 0.25, 0.15, 0.10, 0.08]
 
 
 # ---------------------------------------------------------------------------
@@ -171,67 +181,131 @@ def plot_decode_heatmap(decode_data, labels, layers, metric_name, save_dir):
 
 
 # ---------------------------------------------------------------------------
-# Plot 2: Decode line plot
+# Plot 2: Decode grouped boxplot
 # ---------------------------------------------------------------------------
 
-def plot_decode_lineplot(decode_data, labels, layers, metric_name, save_dir):
+def _sig_label(p):
+    if p < 0.001: return '***'
+    if p < 0.01:  return '**'
+    if p < 0.05:  return '*'
+    return 'ns'
+
+
+def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
+                        no_sig=False):
+    """Grouped boxplot: side-by-side boxes per condition at each layer,
+    colored by layer section, distinguished by hatching + alpha.
+    Pairwise Mann-Whitney U with Bonferroni correction."""
     n_layers = len(layers)
-    if n_layers == 0:
+    n_cond = len(labels)
+    if n_layers == 0 or n_cond == 0:
         return
 
-    n_cond = len(labels)
-    layer_colors = [_section_color(ln) for ln in layers]
-    fig, ax = plt.subplots(figsize=(max(8, n_layers * 0.6), 5))
-    x = np.arange(n_layers)
+    # Reorder: value layers before policy layers (policy rightmost)
+    val = [ln for ln in layers if ln.startswith('val/')]
+    pol = [ln for ln in layers if ln.startswith('pol/')]
+    rest = [ln for ln in layers if not ln.startswith('val/') and not ln.startswith('pol/')]
+    layers = rest + val + pol
+    n_layers = len(layers)
 
-    for i, (dd, label) in enumerate(zip(decode_data, labels)):
-        if dd is None:
-            continue
-        medians = []
-        lo = []
-        hi = []
-        for ln in layers:
+    fig, ax = plt.subplots(figsize=(max(12, n_layers * 1.5),
+                                     6 if no_sig else 6 + n_cond * (n_cond - 1) // 2 * 0.6))
+    width = 0.7 / n_cond
+    offsets = np.linspace(-(n_cond - 1) / 2 * width,
+                          (n_cond - 1) / 2 * width, n_cond)
+    whisker_tops = []
+
+    for li, ln in enumerate(layers):
+        layer_color = _section_color(ln)
+        layer_max = 0
+        for ci, dd in enumerate(decode_data):
+            if dd is None:
+                continue
             vals = dd['layer_fold_values'].get(ln)
-            if vals is not None and len(vals) > 0:
-                arr = np.array(vals)
-                medians.append(np.median(arr))
-                lo.append(np.percentile(arr, 25))
-                hi.append(np.percentile(arr, 75))
-            else:
-                medians.append(np.nan)
-                lo.append(np.nan)
-                hi.append(np.nan)
-        medians = np.array(medians)
-        lo = np.array(lo)
-        hi = np.array(hi)
-        ls = CONDITION_LINESTYLES[i % len(CONDITION_LINESTYLES)]
-        mk = CONDITION_MARKERS[i % len(CONDITION_MARKERS)]
-        # Plot segments colored by layer section
-        for j in range(n_layers):
-            if j < n_layers - 1:
-                ax.plot(x[j:j+2], medians[j:j+2], linestyle=ls,
-                        color=layer_colors[j], linewidth=1.5, zorder=2)
-            ax.plot(x[j], medians[j], marker=mk, color=layer_colors[j],
-                    markersize=5, zorder=3)
-            if not np.isnan(lo[j]) and not np.isnan(hi[j]):
-                ax.fill_between(x[j:j+2] if j < n_layers - 1 else x[j:j+1],
-                                lo[j:j+2] if j < n_layers - 1 else lo[j:j+1],
-                                hi[j:j+2] if j < n_layers - 1 else hi[j:j+1],
-                                alpha=0.10, color=layer_colors[j])
-        # Invisible line for condition legend entry
-        ax.plot([], [], linestyle=ls, marker=mk, color='black',
-                label=label, markersize=5)
+            if vals is None or len(vals) == 0:
+                continue
+            hatch = CONDITION_HATCHES[ci % len(CONDITION_HATCHES)]
+            alpha = CONDITION_ALPHAS[ci % len(CONDITION_ALPHAS)]
+            pos = [li + offsets[ci]]
+            bp = ax.boxplot([np.asarray(vals)], positions=pos,
+                            widths=width * 0.85,
+                            patch_artist=True, showfliers=False, showmeans=True,
+                            meanprops=dict(marker='D', markerfacecolor='white',
+                                           markeredgecolor=layer_color, markersize=4),
+                            medianprops=dict(color='white', linewidth=1.5),
+                            whiskerprops=dict(color=layer_color, linewidth=1, alpha=alpha),
+                            capprops=dict(color=layer_color, linewidth=1, alpha=alpha))
+            for patch in bp['boxes']:
+                patch.set_facecolor(layer_color)
+                patch.set_alpha(alpha)
+                patch.set_edgecolor(layer_color)
+                patch.set_hatch(hatch)
+            wtop = max(w.get_ydata()[1] for w in bp['whiskers'][1::2])
+            layer_max = max(layer_max, wtop)
+        whisker_tops.append(layer_max)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(layers, rotation=45, ha='right', fontsize=8)
+    # Significance brackets
+    y_max_global = max(whisker_tops) if whisker_tops else 1
+    bracket_step = y_max_global * 0.06
+    n_pairs = n_cond * (n_cond - 1) // 2
+    pair_indices = list(combinations(range(n_cond), 2))
+
+    if not no_sig:
+        for li, ln in enumerate(layers):
+            base_y = whisker_tops[li] + y_max_global * 0.02
+            for pi, (ci, cj) in enumerate(pair_indices):
+                dd_i = decode_data[ci]
+                dd_j = decode_data[cj]
+                if dd_i is None or dd_j is None:
+                    continue
+                g1 = dd_i['layer_fold_values'].get(ln)
+                g2 = dd_j['layer_fold_values'].get(ln)
+                if g1 is None or g2 is None or len(g1) < 2 or len(g2) < 2:
+                    continue
+                g1, g2 = np.asarray(g1), np.asarray(g2)
+                _, p_raw = mannwhitneyu(g1, g2, alternative='two-sided')
+                p_corr = min(p_raw * n_pairs, 1.0)
+                sl = _sig_label(p_corr)
+                y = base_y + pi * bracket_step
+                x1 = li + offsets[ci]
+                x2 = li + offsets[cj]
+                ax.plot([x1, x1, x2, x2],
+                        [y, y + bracket_step * 0.3, y + bracket_step * 0.3, y],
+                        color='0.3', linewidth=0.8)
+                ax.text((x1 + x2) / 2, y + bracket_step * 0.3, sl,
+                        ha='center', va='bottom', fontsize=6, fontweight='bold',
+                        color='0.2')
+
+    ax.set_xticks(range(n_layers))
+    short_names = [ln.replace('mlp/', '') for ln in layers]
+    ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=9)
     for idx, ln in enumerate(layers):
         ax.get_xticklabels()[idx].set_color(_section_color(ln))
-    ax.set_ylabel(metric_name, fontsize=10)
-    ax.set_title(f'Layer Decoding — {metric_name}', fontsize=11)
-    ax.legend(fontsize=8, title='Condition', title_fontsize=9)
+
+    ax.set_ylabel(metric_name, fontsize=11)
+    ax.set_title(f'Layer Decoding — {metric_name}', fontsize=13, fontweight='bold')
+    if no_sig:
+        ax.set_ylim(ax.get_ylim()[0], y_max_global * 1.1)
+    else:
+        top_bracket_y = (max(whisker_tops) + y_max_global * 0.02
+                         + n_pairs * bracket_step + y_max_global * 0.05)
+        ax.set_ylim(ax.get_ylim()[0], top_bracket_y)
+
+    # Condition legend
+    cond_patches = [Patch(facecolor='#888888',
+                          alpha=CONDITION_ALPHAS[i % len(CONDITION_ALPHAS)],
+                          edgecolor='black',
+                          hatch=CONDITION_HATCHES[i % len(CONDITION_HATCHES)],
+                          label=labels[i])
+                    for i in range(n_cond)]
+    if not no_sig:
+        cond_patches.append(Patch(facecolor='none', edgecolor='none',
+                                  label='Mann-Whitney U, Bonferroni'))
+    ax.legend(handles=cond_patches, fontsize=8, loc='upper left')
+    ax.grid(True, axis='y', alpha=0.3)
     _style_ax(ax)
     fig.tight_layout()
-    out = Path(save_dir) / 'decode_lineplot.png'
+    out = Path(save_dir) / 'decode_boxplot.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out}")
@@ -377,12 +451,73 @@ def plot_tuning_celltypes(tuning_data, labels, layers, save_dir):
 
 
 # ---------------------------------------------------------------------------
+# Plot 6: Manifold heatmaps (sRSA / SW distance)
+# ---------------------------------------------------------------------------
+
+def _manifold_heatmap(manifold_data, labels, layers, metric_key, title, fname,
+                      save_dir, cmap='viridis', fmt='.3f'):
+    n_cond = len(labels)
+    n_layers = len(layers)
+    if n_layers == 0 or n_cond == 0:
+        return
+
+    matrix = np.full((n_cond, n_layers), np.nan)
+    for i, md in enumerate(manifold_data):
+        if md is None:
+            continue
+        for j, ln in enumerate(layers):
+            if ln in md and metric_key in md[ln]:
+                matrix[i, j] = md[ln][metric_key]
+
+    fig, ax = plt.subplots(figsize=(max(8, n_layers * 0.7), max(3, n_cond * 0.5 + 1.5)))
+    im = ax.imshow(matrix, aspect='auto', cmap=cmap)
+    ax.set_xticks(range(n_layers))
+    ax.set_xticklabels(layers, rotation=45, ha='right', fontsize=8)
+    ax.set_yticks(range(n_cond))
+    ax.set_yticklabels(labels, fontsize=9)
+
+    for idx, ln in enumerate(layers):
+        ax.get_xticklabels()[idx].set_color(_section_color(ln))
+
+    for i in range(n_cond):
+        for j in range(n_layers):
+            v = matrix[i, j]
+            if not np.isnan(v):
+                ax.text(j, i, f'{v:{fmt}}', ha='center', va='center',
+                        fontsize=7, color='white' if v < (np.nanmax(matrix) + np.nanmin(matrix)) / 2 else 'black')
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label(title, fontsize=9)
+    ax.set_title(title, fontsize=11)
+    fig.tight_layout()
+    out = Path(save_dir) / fname
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out}")
+    return str(out)
+
+
+def plot_manifold_srsa_heatmap(manifold_data, labels, layers, save_dir):
+    return _manifold_heatmap(manifold_data, labels, layers,
+                             'srsa_rho', 'sRSA (Spearman ρ)',
+                             'manifold_srsa_heatmap.png', save_dir)
+
+
+def plot_manifold_sw_heatmap(manifold_data, labels, layers, save_dir):
+    return _manifold_heatmap(manifold_data, labels, layers,
+                             'sw_median', 'Median SW Distance (cosine)',
+                             'manifold_sw_heatmap.png', save_dir,
+                             cmap='viridis_r')
+
+
+# ---------------------------------------------------------------------------
 # Summary CSV
 # ---------------------------------------------------------------------------
 
-def write_summary_csv(decode_data, tuning_data, labels, decode_layers,
-                      tuning_layers, metric_name, save_dir):
-    all_layers = list(dict.fromkeys(decode_layers + tuning_layers))
+def write_summary_csv(decode_data, tuning_data, manifold_data, labels,
+                      decode_layers, tuning_layers, manifold_layers,
+                      metric_name, save_dir):
+    all_layers = list(dict.fromkeys(decode_layers + tuning_layers + manifold_layers))
     rows = []
     for i, label in enumerate(labels):
         dd = decode_data[i] if i < len(decode_data) else None
@@ -411,13 +546,19 @@ def write_summary_csv(decode_data, tuning_data, labels, decode_layers,
                                 cg.get('complex_cells', np.zeros(n_neurons, dtype=bool)))
                 row['pct_spatial'] = f'{100 * np.mean(spatial_mask):.1f}'
                 row['n_neurons'] = str(n_neurons)
+            # Manifold
+            md = manifold_data[i] if i < len(manifold_data) else None
+            if md is not None and ln in md:
+                row['srsa_rho'] = f'{md[ln]["srsa_rho"]:.4f}'
+                row['sw_median'] = f'{md[ln]["sw_median"]:.4f}'
             rows.append(row)
 
     if not rows:
         return
 
     fieldnames = ['condition', 'layer', 'decode_metric_name', 'decode_metric_median',
-                  'decode_metric_std', 'mean_SI', 'mean_EV', 'pct_spatial', 'n_neurons']
+                  'decode_metric_std', 'mean_SI', 'mean_EV', 'pct_spatial', 'n_neurons',
+                  'srsa_rho', 'sw_median']
     out = Path(save_dir) / 'summary.csv'
     with open(out, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
@@ -445,6 +586,10 @@ def main():
                         help='Optional layer filter (e.g. dyn/deter dyn/stoch)')
     parser.add_argument('--no_decode', action='store_true', help='Skip decoding plots')
     parser.add_argument('--no_tuning', action='store_true', help='Skip tuning plots')
+    parser.add_argument('--no_manifold', action='store_true', help='Skip manifold plots')
+    parser.add_argument('--manifold_subdir', default='manifold_results',
+                        help='Subfolder containing manifold_results.pkl')
+    parser.add_argument('--no_sig', action='store_true', help='Skip significance brackets on boxplot')
     args = parser.parse_args()
 
     conditions = parse_conditions(args.conditions)
@@ -455,6 +600,7 @@ def main():
     # Load data
     decode_data = []
     tuning_data = []
+    manifold_data = []
     for path, label in conditions:
         if not args.no_decode:
             dd = load_decode(path, args.decode_subdir)
@@ -466,6 +612,11 @@ def main():
             tuning_data.append(td)
         else:
             tuning_data.append(None)
+        if not args.no_manifold:
+            md = load_manifold(path, args.manifold_subdir)
+            manifold_data.append(md)
+        else:
+            manifold_data.append(None)
 
     # Determine layers
     decode_layers = []
@@ -489,6 +640,16 @@ def main():
         if args.layers:
             tuning_layers = [ln for ln in tuning_layers if ln in args.layers]
 
+    manifold_layers = []
+    if not args.no_manifold:
+        all_manifold_layers = set()
+        for md in manifold_data:
+            if md is not None:
+                all_manifold_layers.update(md.keys())
+        manifold_layers = _order_layers(all_manifold_layers)
+        if args.layers:
+            manifold_layers = [ln for ln in manifold_layers if ln in args.layers]
+
     # Determine metric name for decode
     metric_name = 'R²'
     for dd in decode_data:
@@ -505,7 +666,8 @@ def main():
         out = plot_decode_heatmap(decode_data, labels, decode_layers, metric_name, save_dir)
         if out:
             outputs.append(out)
-        out = plot_decode_lineplot(decode_data, labels, decode_layers, metric_name, save_dir)
+        out = plot_decode_boxplot(decode_data, labels, decode_layers, metric_name, save_dir,
+                                  no_sig=args.no_sig)
         if out:
             outputs.append(out)
     elif not args.no_decode:
@@ -526,10 +688,23 @@ def main():
     elif not args.no_tuning:
         print("No tuning data found for any condition — skipping tuning plots.")
 
+    # Manifold plots
+    if not args.no_manifold and any(md is not None for md in manifold_data):
+        print("Generating manifold comparison plots...")
+        out = plot_manifold_srsa_heatmap(manifold_data, labels, manifold_layers, save_dir)
+        if out:
+            outputs.append(out)
+        out = plot_manifold_sw_heatmap(manifold_data, labels, manifold_layers, save_dir)
+        if out:
+            outputs.append(out)
+    elif not args.no_manifold:
+        print("No manifold data found for any condition — skipping manifold plots.")
+
     # Summary CSV
     print("Writing summary CSV...")
-    out = write_summary_csv(decode_data, tuning_data, labels,
-                            decode_layers, tuning_layers, metric_name, save_dir)
+    out = write_summary_csv(decode_data, tuning_data, manifold_data, labels,
+                            decode_layers, tuning_layers, manifold_layers,
+                            metric_name, save_dir)
     if out:
         outputs.append(out)
 
@@ -547,6 +722,8 @@ def main():
                 'layers': args.layers,
                 'no_decode': args.no_decode,
                 'no_tuning': args.no_tuning,
+                'no_manifold': args.no_manifold,
+                'manifold_subdir': args.manifold_subdir,
             },
             outputs=outputs,
         )
