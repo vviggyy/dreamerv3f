@@ -75,14 +75,26 @@ def _order_layers(layer_names):
 # ---------------------------------------------------------------------------
 
 def parse_conditions(raw):
-    """Parse 'path:label' strings. Label defaults to basename of path."""
+    """Parse condition strings with optional per-condition subdir overrides.
+
+    Format: path:label[:key=value ...]
+    Supported keys: decode, tuning, manifold (override subdir names).
+    Example:
+        ./logdir/run1:vanilla:decode=layer_decoder_results_seed45:tuning=tuning_results_seed45
+    """
     conditions = []
     for item in raw:
-        if ':' in item:
-            path, label = item.rsplit(':', 1)
+        parts = item.split(':')
+        if len(parts) >= 2:
+            path, label = parts[0], parts[1]
         else:
-            path, label = item, os.path.basename(item.rstrip('/'))
-        conditions.append((path, label))
+            path, label = parts[0], os.path.basename(parts[0].rstrip('/'))
+        overrides = {}
+        for part in parts[2:]:
+            if '=' in part:
+                k, v = part.split('=', 1)
+                overrides[k] = v
+        conditions.append((path, label, overrides))
     return conditions
 
 
@@ -593,7 +605,7 @@ def main():
     args = parser.parse_args()
 
     conditions = parse_conditions(args.conditions)
-    labels = [label for _, label in conditions]
+    labels = [label for _, label, _ in conditions]
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -601,19 +613,22 @@ def main():
     decode_data = []
     tuning_data = []
     manifold_data = []
-    for path, label in conditions:
+    for path, label, overrides in conditions:
+        dec_sub = overrides.get('decode', args.decode_subdir)
+        tun_sub = overrides.get('tuning', args.tuning_subdir)
+        man_sub = overrides.get('manifold', args.manifold_subdir)
         if not args.no_decode:
-            dd = load_decode(path, args.decode_subdir)
+            dd = load_decode(path, dec_sub)
             decode_data.append(dd)
         else:
             decode_data.append(None)
         if not args.no_tuning:
-            td = load_tuning(path, args.tuning_subdir)
+            td = load_tuning(path, tun_sub)
             tuning_data.append(td)
         else:
             tuning_data.append(None)
         if not args.no_manifold:
-            md = load_manifold(path, args.manifold_subdir)
+            md = load_manifold(path, man_sub)
             manifold_data.append(md)
         else:
             manifold_data.append(None)
