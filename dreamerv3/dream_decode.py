@@ -465,6 +465,13 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
           f"x=[{decoded_pos[:,:,0].min():.0f}, {decoded_pos[:,:,0].max():.0f}], "
           f"y=[{decoded_pos[:,:,1].min():.0f}, {decoded_pos[:,:,1].max():.0f}]")
 
+    # Compute dream continuity: median Euclidean distance between consecutive steps
+    step_dists = np.linalg.norm(np.diff(decoded_pos, axis=1), axis=-1)  # (N, H-1)
+    median_step_dist = float(np.median(step_dists))
+    mean_step_dist = float(np.mean(step_dists))
+    print(f"  Dream continuity — median step dist: {median_step_dist:.2f} tiles, "
+          f"mean: {mean_step_dist:.2f} tiles")
+
     # 5. Plot
     print("\nGenerating plots...")
 
@@ -493,6 +500,9 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
         'metadata': metadata,
         'num_batches': num_batches,
         'num_episodes': num_episodes,
+        'step_dists': step_dists,
+        'median_step_dist': median_step_dist,
+        'mean_step_dist': mean_step_dist,
     }
     if dream_proba is not None:
         results['dream_proba'] = dream_proba
