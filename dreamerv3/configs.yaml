@@ -58,6 +58,12 @@ defaults:
     num_episodes: 3
     save_activations: True
 
+  dream_vs_future:
+    num_batches: 50
+    decoder_model: ''
+    save_path: ''
+    num_episodes: 3
+
   replay_activations:
     source_data: ''
     save_path: ''

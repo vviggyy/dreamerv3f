@@ -413,6 +413,15 @@ class Agent(embodied.jax.Agent):
       if 'player_pos' in obs:
         metrics['dream/start_pos'] = obs['player_pos'][:RB, T // 2 - 1]
         metrics['dream/obs_pos'] = obs['player_pos'][:RB, :T // 2]
+        # Real future trajectory aligned to the dream window. The dream starts
+        # from the state at index T//2 - 1 and imagines dream_H steps, so its
+        # steps map to real timesteps T//2 .. T//2 + dream_H - 1. Exporting this
+        # lets us measure how far the policy-driven dream diverges from where the
+        # agent actually went. player_pos is carried in obs for logging only and
+        # is never fed to the encoder/decoder (include_position gates that), so
+        # this adds no positional bias to the model.
+        metrics['dream/future_pos'] = obs['player_pos'][
+            :RB, T // 2: T // 2 + dream_H]
 
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
     return carry, metrics

@@ -78,6 +78,7 @@ def main(argv=None):
       replay_context=config.replay_context,
       eval_trajectory=config.eval_trajectory,
       dream_decode=config.dream_decode,
+      dream_vs_future=config.dream_vs_future,
       replay_activations=config.replay_activations,
   )
 
@@ -121,6 +122,17 @@ def main(argv=None):
     config = config.update({'agent.report_dream_feats': True})
     from . import dream_decode
     dream_decode.dream_decode(
+        bind(make_agent, config),
+        bind(make_env, config),
+        bind(make_replay, config, 'replay'),
+        bind(make_stream, config),
+        bind(make_logger, config),
+        args)
+
+  elif config.script == 'dream_vs_future':
+    config = config.update({'agent.report_dream_feats': True})
+    from . import dream_vs_future
+    dream_vs_future.dream_vs_future(
         bind(make_agent, config),
         bind(make_env, config),
         bind(make_replay, config, 'replay'),
