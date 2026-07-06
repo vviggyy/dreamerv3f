@@ -345,10 +345,16 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
     agent = make_agent()
     logger = make_logger()
 
-    cp = elements.Checkpoint()
-    cp.agent = agent
-    cp.load(args.from_checkpoint, keys=['agent'])
-    print(f"Loaded checkpoint: {args.from_checkpoint}")
+    # Load model params only, skipping optimizer state (opt/). A run trained
+    # with extra regularization (weight_decay / l1_wm) has a different optax
+    # chain, so its saved opt/ tree does not match a freshly built agent and
+    # would trip chex's tree-structure assert. Dream inference never uses opt/.
+    # (Mirrors eval_trajectory.py's regex-skip load.)
+    import pickle as _pickle, pathlib as _pl
+    _ckpt_file = _pl.Path(args.from_checkpoint) / 'agent.pkl'
+    with open(_ckpt_file, 'rb') as _f:
+      agent.load(_pickle.load(_f), regex=r'^(?!opt/)')
+    print(f"Loaded checkpoint (params only, skipping opt/): {args.from_checkpoint}")
 
     # 2. Create env with fixed_seed, collect replay data
     print("Collecting replay data...")
