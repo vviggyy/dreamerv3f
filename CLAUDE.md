@@ -1,13 +1,14 @@
 # dreamerv3f repo guide
 
 ## arch
-- `dreamerv3/main.py` — entry point, dispatches on `--script {train,train_eval,eval_only,eval_trajectory,dream_decode,replay_activations,parallel,parallel_env,parallel_envs,parallel_replay}`
+- `dreamerv3/main.py` — entry point, dispatches on `--script {train,train_eval,eval_only,eval_trajectory,dream_decode,dream_vs_future,replay_activations,parallel,parallel_env,parallel_envs,parallel_replay}`
 - `dreamerv3/agent.py` — JAX agent (DreamerV3 world model)
 - `dreamerv3/configs.yaml` — all configs. presets: `defaults`, `crafter`, `crafter_small`, `size{1m,12m,25m,50m,100m,200m,400m}`, `debug`, `atari`, `atari100k`, `procgen`, `minecraft`, `dmlab`, `dmc_proprio`, `dmc_vision`, `bsuite`, `loconav`, `multicpu`
 - `dreamerv3/eval_trajectory.py` — records pos/activations/images per step, saves pkl. Auto-detects checkpoint from `logdir/ckpt/latest` if `--run.from_checkpoint` is empty. Inherits env settings from training run's saved `config.yaml`
 - `dreamerv3/plot_trajectories.py` — plots: trajectories, heatmap, activation, world overlay, fullworld, worldview, world_only, animations (GIF/MP4)
 - `dreamerv3/decode_position.py` — linear classification decoders to predict (x,y) from deter/stoch. Two modes: `standard` (single-repr decoding with CV) and `layers` (per-layer comparison boxplot). Includes `plot_probmap_on_world` (P(pos) heatmap on world map) and `plot_occupancy_vs_error` (occupancy hotspots + Manhattan error scatter). `--save_model` saves fitted decoders for dream_decode. Metric: mean Manhattan distance (tiles)
 - `dreamerv3/dream_decode.py` — applies pretrained classification position decoder to policy-based imagination (dream) rollouts. Tests spatial coherence of dreamed trajectories
+- `dreamerv3/dream_vs_future.py` — decodes policy-driven dream rollouts with a saved position decoder and compares them against the agent's *real future* trajectory from the same replay start (exported as `dream/future_pos` in report). Produces a divergence-vs-horizon curve (Manhattan tiles) with shuffled-future chance baseline. Uses policy actions (not real actions), so divergence conflates dynamics drift + policy/behavior mismatch — by design. Does NOT require `include_position` (player_pos is carried in obs for logging, never fed to the encoder)
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
 - `dreamerv3/analyze_tuning.py` — tuning curve analysis: clustering, metric-space embedding, distributions. Three modes: `autocorr` (PCA/t-SNE/UMAP on autocorrelation maps + HDBSCAN), `metrics` (Isomap on per-neuron feature vectors), `distributions` (per-metric histogram + example tuning curves at quantile positions). Loads `tuning_results.pkl`. Requires `umap-learn` and `hdbscan` for full autocorr pipeline (graceful fallback to PCA+t-SNE if missing)
@@ -25,6 +26,7 @@
 - `run_Trajectory.sh` — eval trajectories (CPU, matches training hyperparams). Auto-resolves checkpoint from `$LOGDIR/ckpt/latest`
 - `run_Loop.sh` — full pipeline: train → eval trajectory → plot → layer decoding → tuning (A100). Saves `hyperparams.txt`
 - `run_Decoding.sh` — standard position decoding (GPU). Settings: repr, device, n_jobs
+- `run_DreamVsFuture.sh` — decode policy dreams and compare to real future trajectory (GPU). Saves decoder if missing, then runs `dream_vs_future`. Settings: LOGDIR, DREAM_EPISODES, DREAM_BATCHES
 - `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, holdout, resume
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
@@ -141,6 +143,27 @@ python dreamerv3/main.py \
 ```
 Outputs: dream_trajectories_world.png, dream_probmap_*.png, dream_vs_real.png, dream_results.pkl
 Additional dream_decode configs: `--dream_decode.num_batches N`, `--dream_decode.num_episodes N`.
+
+### dream vs future (trajectory divergence)
+```
+# Step 1: save a position decoder (as in dream decode)
+MPLBACKEND=Agg python dreamerv3/decode_position.py \
+  --data ./logdir/my_run/trajectories \
+  --save ./logdir/my_run/decoder_results --repr deter --save_model
+
+# Step 2: decode policy dreams and compare to the real future trajectory
+python dreamerv3/main.py \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
+  --script dream_vs_future \
+  --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
+  --dream_vs_future.decoder_model ./logdir/my_run/decoder_results/classifier_deter.pkl \
+  --dream_vs_future.save_path ./logdir/my_run/dream_vs_future \
+  --dream_vs_future.num_batches 50 --seed 42 --jax.platform cpu
+```
+Imagines policy-driven rollouts from replay states, decodes each latent step to (x,y), and compares to the agent's real future positions from the same start (`obs['player_pos'][T//2 : T//2+H]`, exported as `dream/future_pos`). Measures whether the dream stays spatially coherent or diverges. Uses **policy actions**, so divergence mixes dynamics drift + policy/behavior mismatch. N rollouts ≈ RB(=6) × num_batches. Does NOT need `include_position` (player_pos is logged but never encoded). Requires `report_length ≥ T//2 + imag_length` (default 32 ≥ 16+15 ✓). Prints step-0 calibration diagnostic (decoder error floor).
+Outputs: divergence_vs_horizon.png (mean±IQR dream-vs-real, shuffled-future chance baseline, real displacement), dream_vs_real.png, dream_vs_future_results.pkl.
+Additional configs: `--dream_vs_future.num_episodes N`, `--dream_vs_future.num_batches N`.
 
 ### replay activations (untrained control)
 ```
