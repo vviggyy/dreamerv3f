@@ -252,7 +252,9 @@ def dream_vs_future(make_agent, make_env, make_replay, make_stream,
     # plotter, but pass the future trajectory as the "real" line).
     if start_pos is not None:
         from .dream_decode import plot_dream_vs_real
-        plot_dream_vs_real(decoded_pos, start_pos, future_pos, metadata, save_dir)
+        plot_dream_vs_real(decoded_pos, start_pos, future_pos, metadata, save_dir,
+                           real_label='real future (ground truth)',
+                           title='Dream vs real future — accuracy')
 
     # 7. Save results
     results = {

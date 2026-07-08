@@ -28,15 +28,23 @@ def main(argv=None):
     config = config.update(configs[name])
   config = elements.Flags(config).parse(other)
 
-  # For eval_trajectory: inherit env settings from saved training config so
-  # egocentric_view, random_spawn, etc. match what the model was trained with.
-  # CLI args still take priority (they are re-applied below).
-  if config.script == 'eval_trajectory' and '{timestamp}' not in config.logdir:
+  # Inference / analysis scripts rebuild the agent from --configs and load a
+  # trained checkpoint. If the rebuilt config differs from how the model was
+  # trained, non-parameter settings (e.g. agent.dyn.rssm.gru_act) silently
+  # mismatch: weights load fine but the forward pass uses the wrong nonlinearity
+  # -> degenerate imagination. To prevent this, inherit BOTH the agent and env
+  # blocks from the run's saved training config.yaml. CLI args still take
+  # priority (re-applied below), so explicit overrides win.
+  INFERENCE_SCRIPTS = (
+      'eval_trajectory', 'eval_only', 'dream_decode', 'dream_vs_future',
+      'replay_activations')
+  if config.script in INFERENCE_SCRIPTS and '{timestamp}' not in config.logdir:
     saved_path = elements.Path(config.logdir) / 'config.yaml'
     if saved_path.exists():
       saved = yaml.YAML(typ='safe').load(saved_path.read())
-      if 'env' in saved:
-        config = config.update({'env': saved['env']})
+      inherit = {k: saved[k] for k in ('agent', 'env') if k in saved}
+      if inherit:
+        config = config.update(inherit)
         config = elements.Flags(config).parse(other)  # re-apply CLI overrides
 
   config = config.update(logdir=(
@@ -51,7 +59,11 @@ def main(argv=None):
   print('Run script:', config.script)
   if not config.script.endswith(('_env', '_replay')):
     logdir.mkdir()
-    config.save(logdir / 'config.yaml')
+    # Do NOT let inference/analysis scripts overwrite the training config.yaml —
+    # that record is what those same scripts inherit from (above), and clobbering
+    # it with a partial rebuilt config corrupts the training provenance.
+    if config.script not in INFERENCE_SCRIPTS:
+      config.save(logdir / 'config.yaml')
 
   def init():
     elements.timer.global_timer.enabled = config.logger.timer

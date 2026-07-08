@@ -244,16 +244,27 @@ def plot_dream_probmaps(dream_proba, start_pos, metadata, save_dir,
 
 
 def plot_dream_vs_real(decoded_pos, start_pos, obs_pos, metadata,
-                        save_dir, tile_size=8):
-    """Side-by-side comparison of real observed trajectory and dream trajectory.
+                        save_dir, tile_size=8, real_label='observed',
+                        title='Dream vs Real'):
+    """Overlay the decoded dream trajectory against a reference trajectory.
+
+    The reference (white line, `obs_pos`) means different things per caller:
+      - dream_decode passes the observed PAST (the path into the dream start)
+        -> a plausibility check ("does the dream head off sensibly?").
+      - dream_vs_future passes the real FUTURE (where the agent actually went)
+        -> an accuracy check ("does the dream match reality?").
+    `real_label` / `title` let each caller say which one it is.
 
     Args:
         decoded_pos: (N, H, 2) decoded dream positions
         start_pos: (N, 2)
-        obs_pos: (N, T_obs, 2) observed positions before dreaming
+        obs_pos: (N, T_ref, 2) reference trajectory to overlay (observed past
+            for dream_decode, real future for dream_vs_future)
         metadata: dict
         save_dir: Path
         tile_size: pixel size per grid cell
+        real_label: legend label for the white reference line
+        title: figure suptitle prefix
     """
     _render_crafter_world = _get_render_world()
     world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
@@ -290,17 +301,18 @@ def plot_dream_vs_real(decoded_pos, start_pos, obs_pos, metadata,
         ax.set_facecolor('#1a1a1a')
         ax.imshow((world_img * 0.6).astype(np.uint8))
 
-        # Real trajectory (white)
+        # Reference trajectory (white) — observed past or real future per caller
         rpx, rpy = pos_to_px(obs_pos[idx])
         ax.plot(rpx, rpy, '-', color='white', linewidth=1.5, alpha=0.7,
-                zorder=3, label='observed' if idx == 0 else '')
+                zorder=3, label=real_label if idx == 0 else '')
 
-        # Dream trajectory (colored)
+        # Dream trajectory (colored by imagination step)
         dpx, dpy = pos_to_px(decoded_pos[idx])
         colors = plt.cm.plasma(np.linspace(0, 1, decoded_pos.shape[1]))
         for t in range(decoded_pos.shape[1] - 1):
             ax.plot([dpx[t], dpx[t+1]], [dpy[t], dpy[t+1]],
-                    '-', color=colors[t], linewidth=2.0, alpha=0.8, zorder=4)
+                    '-', color=colors[t], linewidth=2.0, alpha=0.8, zorder=4,
+                    label='dream (policy)' if (idx == 0 and t == 0) else '')
 
         # Start position
         spx, spy = pos_to_px(start_pos[idx:idx+1])
@@ -318,7 +330,7 @@ def plot_dream_vs_real(decoded_pos, start_pos, obs_pos, metadata,
             ax.legend(fontsize=7, loc='upper left',
                       facecolor='black', edgecolor='grey', labelcolor='white')
 
-    fig.suptitle(f'Dream vs Real (seed={env_seed})', fontsize=13, color='white')
+    fig.suptitle(f'{title} (seed={env_seed})', fontsize=13, color='white')
     fig.tight_layout()
     out = save_dir / 'dream_vs_real.png'
     fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='#1a1a1a')
@@ -491,7 +503,9 @@ def dream_decode(make_agent, make_env, make_replay, make_stream,
 
         if obs_pos is not None:
             plot_dream_vs_real(
-                decoded_pos, start_pos, obs_pos, metadata, save_dir)
+                decoded_pos, start_pos, obs_pos, metadata, save_dir,
+                real_label='observed past (context)',
+                title='Dream vs observed past — plausibility')
     else:
         print("  No start positions available — skipping world overlay plots")
 
