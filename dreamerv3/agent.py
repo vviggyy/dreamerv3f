@@ -423,6 +423,44 @@ class Agent(embodied.jax.Agent):
         metrics['dream/future_pos'] = obs['player_pos'][
             :RB, T // 2: T // 2 + dream_H]
 
+    # Four-condition dream seeding ablation (crossed 2x2: deter x stoch source).
+    # A: real deter + posterior(image)   B: real deter + prior
+    # C: noise deter + posterior(image)  D: noise deter + prior
+    # A/B share real_deter; C/D share the SAME matched-stats noise deter. Each
+    # seed is tiled Nseed times and rolled out with the policy, so per-condition
+    # cross-seed variability can be measured. See docs section 13.
+    if self.config.report_seed_ablation and 'player_pos' in obs:
+      Nseed = self.config.seed_ablation_nseeds
+      H = self.config.imag_length
+      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+
+      real_deter = dyn_carry['deter']                 # (RB, D) posterior deter @ seed
+      tokens_seed = outs['tokens'][:RB, T // 2 - 1]   # encoder tokens @ seed frame
+      # Matched-stats noise deter: per-dim Gaussian from real posterior deter.
+      rd = f32(outs['repfeat']['deter'])
+      mu, sd = rd.mean((0, 1)), rd.std((0, 1))
+      noise_deter = nn.cast(mu + sd * jax.random.normal(
+          nj.seed(), real_deter.shape, f32))
+
+      # (deter, seed stoch logits) per condition; stoch is sampled per tiled copy.
+      seed_specs = {
+          'A': (real_deter,  obsfeat['logit'][:, -1]),
+          'B': (real_deter,  self.dyn._prior(real_deter)),
+          'C': (noise_deter, self.dyn.post_from_deter(noise_deter, tokens_seed)),
+          'D': (noise_deter, self.dyn._prior(noise_deter)),
+      }
+      for name, (deter0, logit0) in seed_specs.items():
+        d_t = jnp.repeat(deter0, Nseed, axis=0)        # (RB*Nseed, D)
+        l_t = jnp.repeat(logit0, Nseed, axis=0)        # (RB*Nseed, S, C)
+        s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
+        carry0 = nn.cast(dict(deter=d_t, stoch=s_t))
+        _, feat, _ = self.dyn.imagine(carry0, policyfn, H, training=False)
+        # Prepend the seed state so step 0 = seed, steps 1..H = imagined.
+        deter_seq = jnp.concatenate([d_t[:, None], feat['deter']], 1)
+        metrics[f'seedabl/{name}/deter'] = deter_seq   # (RB*Nseed, H+1, D)
+      metrics['seedabl/start_pos'] = obs['player_pos'][:RB, T // 2 - 1]
+      metrics['seedabl/future_pos'] = obs['player_pos'][:RB, T // 2: T // 2 + H]
+
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
     return carry, metrics
 

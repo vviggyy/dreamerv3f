@@ -64,6 +64,13 @@ defaults:
     save_path: ''
     num_episodes: 3
 
+  dream_seed_ablation:
+    num_batches: 10
+    decoder_model: ''
+    save_path: ''
+    num_episodes: 3
+    n_seeds: 16
+
   replay_activations:
     source_data: ''
     save_path: ''
@@ -146,6 +153,8 @@ defaults:
     report: True
     report_gradnorms: False
     report_dream_feats: False
+    report_seed_ablation: False
+    seed_ablation_nseeds: 16
     record_activations: False
     mask_visual_k: 0
     mask_visual_invert: False

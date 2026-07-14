@@ -37,7 +37,7 @@ def main(argv=None):
   # priority (re-applied below), so explicit overrides win.
   INFERENCE_SCRIPTS = (
       'eval_trajectory', 'eval_only', 'dream_decode', 'dream_vs_future',
-      'replay_activations')
+      'dream_seed_ablation', 'replay_activations')
   if config.script in INFERENCE_SCRIPTS and '{timestamp}' not in config.logdir:
     saved_path = elements.Path(config.logdir) / 'config.yaml'
     if saved_path.exists():
@@ -91,6 +91,7 @@ def main(argv=None):
       eval_trajectory=config.eval_trajectory,
       dream_decode=config.dream_decode,
       dream_vs_future=config.dream_vs_future,
+      dream_seed_ablation=config.dream_seed_ablation,
       replay_activations=config.replay_activations,
   )
 
@@ -145,6 +146,20 @@ def main(argv=None):
     config = config.update({'agent.report_dream_feats': True})
     from . import dream_vs_future
     dream_vs_future.dream_vs_future(
+        bind(make_agent, config),
+        bind(make_env, config),
+        bind(make_replay, config, 'replay'),
+        bind(make_stream, config),
+        bind(make_logger, config),
+        args)
+
+  elif config.script == 'dream_seed_ablation':
+    config = config.update({
+        'agent.report_seed_ablation': True,
+        'agent.seed_ablation_nseeds': config.dream_seed_ablation.n_seeds,
+    })
+    from . import dream_seed_ablation
+    dream_seed_ablation.dream_seed_ablation(
         bind(make_agent, config),
         bind(make_env, config),
         bind(make_replay, config, 'replay'),

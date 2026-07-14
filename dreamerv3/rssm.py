@@ -267,6 +267,21 @@ class RSSM(nj.Module):
       x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))
     return self._logit('priorlogit', x)
 
+  def post_from_deter(self, deter, tokens):
+    # Posterior z logits from an arbitrary (e.g. injected / noise) deter plus
+    # encoder tokens, WITHOUT the _core advance that _observe runs first. Reuses
+    # the trained posterior obslayer params (identical sub-names to _observe), so
+    # this MUST stay in sync with the posterior path in _observe. Used to seed
+    # dreams for the four-condition seeding ablation (see
+    # docs/training_and_dream_loop.md sections 11 and 13).
+    deter, tokens = nn.cast((deter, tokens))
+    tokens = tokens.reshape((*deter.shape[:-1], -1))
+    x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
+    for i in range(self.obslayers):
+      x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+      x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+    return self._logit('obslogit', x)
+
   def _logit(self, name, x):
     kw = dict(**self.kw, outscale=self.outscale)
     x = self.sub(name, nn.Linear, self.stoch * self.classes, **kw)(x)
