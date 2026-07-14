@@ -143,7 +143,11 @@ def main(argv=None):
         args)
 
   elif config.script == 'dream_vs_future':
-    config = config.update({'agent.report_dream_feats': True})
+    config = config.update({
+        'agent.report_dream_feats': True,
+        'agent.dream_warmup': config.dream_vs_future.warmup,
+        'agent.dream_horizon': config.dream_vs_future.horizon,
+    })
     from . import dream_vs_future
     dream_vs_future.dream_vs_future(
         bind(make_agent, config),
@@ -157,6 +161,8 @@ def main(argv=None):
     config = config.update({
         'agent.report_seed_ablation': True,
         'agent.seed_ablation_nseeds': config.dream_seed_ablation.n_seeds,
+        'agent.dream_warmup': config.dream_seed_ablation.warmup,
+        'agent.dream_horizon': config.dream_seed_ablation.horizon,
     })
     from . import dream_seed_ablation
     dream_seed_ablation.dream_seed_ablation(

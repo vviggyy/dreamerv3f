@@ -398,30 +398,42 @@ class Agent(embodied.jax.Agent):
       video = jnp.where(mask, video, border[None, :, None, None, :])
       video = jnp.concatenate([video, 0 * video[:, :10]], 1)
 
-      B, T, H, W, C = video.shape
-      grid = video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
+      # NB: use local names here — unpacking into B, T, H, W would clobber the
+      # outer T (report_length) with the padded video length and poison every
+      # dream block below (they'd use T//2 of the video, not the sequence).
+      vB, vT, vH, vW, vC = video.shape
+      grid = video.transpose((1, 2, 0, 3, 4)).reshape((vT, vH, vB * vW, vC))
       metrics[f'openloop/{key}'] = grid
+
+    # Shared dream-seed setup for the report dream analyses. Warmup W (observed
+    # steps before the dream) and horizon H are configurable and decoupled from
+    # the openloop T//2 split. The seed is the posterior state after W observed
+    # steps, read from obsfeat (which spans the first T//2 steps). Requires
+    # 1 <= W <= T//2 and W + H <= T so a real future of length H exists. Defaults
+    # (dream_warmup=0 -> T//2, dream_horizon=0 -> imag_length) reproduce the
+    # original behavior. NB: T here is the sequence length (report_length); the
+    # openloop video loop above no longer clobbers it.
+    W = self.config.dream_warmup or (T // 2)
+    H = self.config.dream_horizon or self.config.imag_length
+    assert 1 <= W <= T // 2, (W, T)
+    assert W + H <= T, (W, H, T)
+    seed_carry = dict(
+        deter=obsfeat['deter'][:, W - 1], stoch=obsfeat['stoch'][:, W - 1])
+    dreamfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
 
     # Policy-based imagination (dream rollouts)
     if self.config.report_dream_feats:
-      dream_H = self.config.imag_length
-      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
       _, dream_feat, dream_act = self.dyn.imagine(
-          dyn_carry, policyfn, dream_H, training=False)
+          seed_carry, dreamfn, H, training=False)
       metrics['dream/deter'] = dream_feat['deter']   # (RB, H, deter_dim)
       metrics['dream/stoch'] = dream_feat['stoch']   # (RB, H, stoch_dim, classes)
       if 'player_pos' in obs:
-        metrics['dream/start_pos'] = obs['player_pos'][:RB, T // 2 - 1]
-        metrics['dream/obs_pos'] = obs['player_pos'][:RB, :T // 2]
-        # Real future trajectory aligned to the dream window. The dream starts
-        # from the state at index T//2 - 1 and imagines dream_H steps, so its
-        # steps map to real timesteps T//2 .. T//2 + dream_H - 1. Exporting this
-        # lets us measure how far the policy-driven dream diverges from where the
-        # agent actually went. player_pos is carried in obs for logging only and
-        # is never fed to the encoder/decoder (include_position gates that), so
-        # this adds no positional bias to the model.
-        metrics['dream/future_pos'] = obs['player_pos'][
-            :RB, T // 2: T // 2 + dream_H]
+        # Dream seeds from the state after W observed steps (real timestep W-1)
+        # and imagines H steps -> real timesteps W .. W+H-1. player_pos is carried
+        # for logging only (include_position gates encoding), so no model bias.
+        metrics['dream/start_pos'] = obs['player_pos'][:RB, W - 1]
+        metrics['dream/obs_pos'] = obs['player_pos'][:RB, :W]
+        metrics['dream/future_pos'] = obs['player_pos'][:RB, W: W + H]
 
     # Four-condition dream seeding ablation (crossed 2x2: deter x stoch source).
     # A: real deter + posterior(image)   B: real deter + prior
@@ -431,11 +443,8 @@ class Agent(embodied.jax.Agent):
     # cross-seed variability can be measured. See docs section 13.
     if self.config.report_seed_ablation and 'player_pos' in obs:
       Nseed = self.config.seed_ablation_nseeds
-      H = self.config.imag_length
-      policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
-
-      real_deter = dyn_carry['deter']                 # (RB, D) posterior deter @ seed
-      tokens_seed = outs['tokens'][:RB, T // 2 - 1]   # encoder tokens @ seed frame
+      real_deter = seed_carry['deter']                # (RB, D) posterior deter @ seed
+      tokens_seed = outs['tokens'][:RB, W - 1]        # encoder tokens @ seed frame
       # Matched-stats noise deter: per-dim Gaussian from real posterior deter.
       rd = f32(outs['repfeat']['deter'])
       mu, sd = rd.mean((0, 1)), rd.std((0, 1))
@@ -444,7 +453,7 @@ class Agent(embodied.jax.Agent):
 
       # (deter, seed stoch logits) per condition; stoch is sampled per tiled copy.
       seed_specs = {
-          'A': (real_deter,  obsfeat['logit'][:, -1]),
+          'A': (real_deter,  obsfeat['logit'][:, W - 1]),
           'B': (real_deter,  self.dyn._prior(real_deter)),
           'C': (noise_deter, self.dyn.post_from_deter(noise_deter, tokens_seed)),
           'D': (noise_deter, self.dyn._prior(noise_deter)),
@@ -454,12 +463,12 @@ class Agent(embodied.jax.Agent):
         l_t = jnp.repeat(logit0, Nseed, axis=0)        # (RB*Nseed, S, C)
         s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
         carry0 = nn.cast(dict(deter=d_t, stoch=s_t))
-        _, feat, _ = self.dyn.imagine(carry0, policyfn, H, training=False)
+        _, feat, _ = self.dyn.imagine(carry0, dreamfn, H, training=False)
         # Prepend the seed state so step 0 = seed, steps 1..H = imagined.
         deter_seq = jnp.concatenate([d_t[:, None], feat['deter']], 1)
         metrics[f'seedabl/{name}/deter'] = deter_seq   # (RB*Nseed, H+1, D)
-      metrics['seedabl/start_pos'] = obs['player_pos'][:RB, T // 2 - 1]
-      metrics['seedabl/future_pos'] = obs['player_pos'][:RB, T // 2: T // 2 + H]
+      metrics['seedabl/start_pos'] = obs['player_pos'][:RB, W - 1]
+      metrics['seedabl/future_pos'] = obs['player_pos'][:RB, W: W + H]
 
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
     return carry, metrics

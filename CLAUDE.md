@@ -165,7 +165,7 @@ python dreamerv3/main.py \
 ```
 Imagines policy-driven rollouts from replay states, decodes each latent step to (x,y), and compares to the agent's real future positions from the same start (`obs['player_pos'][T//2 : T//2+H]`, exported as `dream/future_pos`). Measures whether the dream stays spatially coherent or diverges. Uses **policy actions**, so divergence mixes dynamics drift + policy/behavior mismatch. N rollouts ≈ RB(=6) × num_batches. Does NOT need `include_position` (player_pos is logged but never encoded). Requires `report_length ≥ T//2 + imag_length` (default 32 ≥ 16+15 ✓). Prints step-0 calibration diagnostic (decoder error floor).
 Outputs: divergence_vs_horizon.png (mean±IQR dream-vs-real, shuffled-future chance baseline, real displacement), dream_vs_real.png, dream_vs_future_results.pkl.
-Additional configs: `--dream_vs_future.num_episodes N`, `--dream_vs_future.num_batches N`.
+Additional configs: `--dream_vs_future.num_episodes N`, `--dream_vs_future.num_batches N`, `--dream_vs_future.warmup W` (observed steps before dream, 0→report_length//2), `--dream_vs_future.horizon H` (dream length, 0→imag_length; W+H≤report_length). NOTE: results generated before the report() T-clobber fix (docs §13) were misaligned ~5 steps and should be regenerated.
 
 ### dream seed ablation (four-condition crossed 2×2)
 ```
@@ -181,7 +181,7 @@ python dreamerv3/main.py \
   --dream_seed_ablation.num_batches 10 --dream_seed_ablation.n_seeds 16 \
   --seed 42 --jax.platform cpu
 ```
-Seeds policy dreams four ways and decodes each: A=both (real deter+image, current), B=just-latent (real deter+prior), C=just-image (noise deter+real image), D=neither (noise deter+prior). A/B share the real deter; C/D share the same matched-stats noise deter. Each seed tiled `n_seeds` times for cross-seed variability. Requires `report_length ≥ T//2 + imag_length`. Does NOT need `include_position` (player_pos carried for logging only). Outputs: `seed_ablation_curves.png` (3 panels), `dream_seed_ablation_results.pkl`. Additional configs: `--dream_seed_ablation.num_episodes N`. Design/rationale: `docs/training_and_dream_loop.md` §11+§13.
+Seeds policy dreams four ways and decodes each: A=both (real deter+image, current), B=just-latent (real deter+prior), C=just-image (noise deter+real image), D=neither (noise deter+prior). A/B share the real deter; C/D share the same matched-stats noise deter. Each seed tiled `n_seeds` times for cross-seed variability. Does NOT need `include_position` (player_pos carried for logging only). Outputs: `seed_ablation_curves.png` (3 panels: displacement-from-own-start, distance-from-real-start, cross-seed variability), `dream_seed_ablation_results.pkl`. Additional configs: `--dream_seed_ablation.num_episodes N`, `--dream_seed_ablation.warmup W` (observed steps before dream, 0→report_length//2; 1≤W≤report_length//2), `--dream_seed_ablation.horizon H` (dream length, 0→imag_length; W+H≤report_length). Design/rationale: `docs/training_and_dream_loop.md` §11+§13.
 
 ### replay activations (untrained control)
 ```

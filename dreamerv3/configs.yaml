@@ -63,6 +63,8 @@ defaults:
     decoder_model: ''
     save_path: ''
     num_episodes: 3
+    warmup: 0    # observed steps before the dream (0 -> report_length//2)
+    horizon: 0   # dream rollout length (0 -> imag_length); warmup+horizon <= report_length
 
   dream_seed_ablation:
     num_batches: 10
@@ -70,6 +72,8 @@ defaults:
     save_path: ''
     num_episodes: 3
     n_seeds: 16
+    warmup: 0    # observed steps before the dream (0 -> report_length//2)
+    horizon: 0   # dream rollout length (0 -> imag_length); warmup+horizon <= report_length
 
   replay_activations:
     source_data: ''
@@ -155,6 +159,8 @@ defaults:
     report_dream_feats: False
     report_seed_ablation: False
     seed_ablation_nseeds: 16
+    dream_warmup: 0   # observed steps before a report dream (0 -> T//2). 1<=W<=T//2
+    dream_horizon: 0  # report dream rollout length (0 -> imag_length). W+H<=report_length
     record_activations: False
     mask_visual_k: 0
     mask_visual_invert: False
