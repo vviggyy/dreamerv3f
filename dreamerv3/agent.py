@@ -405,24 +405,21 @@ class Agent(embodied.jax.Agent):
       grid = video.transpose((1, 2, 0, 3, 4)).reshape((vT, vH, vB * vW, vC))
       metrics[f'openloop/{key}'] = grid
 
-    # Shared dream-seed setup for the report dream analyses. Warmup W (observed
-    # steps before the dream) and horizon H are configurable and decoupled from
-    # the openloop T//2 split. The seed is the posterior state after W observed
-    # steps, read from obsfeat (which spans the first T//2 steps). Requires
-    # 1 <= W <= T//2 and W + H <= T so a real future of length H exists. Defaults
-    # (dream_warmup=0 -> T//2, dream_horizon=0 -> imag_length) reproduce the
-    # original behavior. NB: T here is the sequence length (report_length); the
-    # openloop video loop above no longer clobbers it.
-    W = self.config.dream_warmup or (T // 2)
+    # Horizon H shared by the report dream analyses (0 -> imag_length). NB: T here
+    # is the sequence length (report_length); the openloop video loop above no
+    # longer clobbers it.
     H = self.config.dream_horizon or self.config.imag_length
-    assert 1 <= W <= T // 2, (W, T)
-    assert W + H <= T, (W, H, T)
-    seed_carry = dict(
-        deter=obsfeat['deter'][:, W - 1], stoch=obsfeat['stoch'][:, W - 1])
     dreamfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
 
-    # Policy-based imagination (dream rollouts)
+    # Policy-based imagination (dream rollouts) — single warmup W (observed steps
+    # before the dream), seeded from obsfeat (spans the first T//2 steps).
+    # dream_warmup=0 -> T//2; requires 1 <= W <= T//2 and W + H <= T.
     if self.config.report_dream_feats:
+      W = self.config.dream_warmup or (T // 2)
+      assert 1 <= W <= T // 2, (W, T)
+      assert W + H <= T, (W, H, T)
+      seed_carry = dict(
+          deter=obsfeat['deter'][:, W - 1], stoch=obsfeat['stoch'][:, W - 1])
       _, dream_feat, dream_act = self.dyn.imagine(
           seed_carry, dreamfn, H, training=False)
       metrics['dream/deter'] = dream_feat['deter']   # (RB, H, deter_dim)
@@ -435,40 +432,61 @@ class Agent(embodied.jax.Agent):
         metrics['dream/obs_pos'] = obs['player_pos'][:RB, :W]
         metrics['dream/future_pos'] = obs['player_pos'][:RB, W: W + H]
 
-    # Four-condition dream seeding ablation (crossed 2x2: deter x stoch source).
-    # A: real deter + posterior(image)   B: real deter + prior
-    # C: noise deter + posterior(image)  D: noise deter + prior
-    # A/B share real_deter; C/D share the SAME matched-stats noise deter. Each
-    # seed is tiled Nseed times and rolled out with the policy, so per-condition
-    # cross-seed variability can be measured. See docs section 13.
+    # Four-condition dream seeding ablation (crossed 2x2: deter x stoch source),
+    # seeded at MANY warmups to mirror training's dyn.starts (every timestep is a
+    # dream start, warmups spanning the sequence). A: real deter + posterior(image)
+    # B: real deter + prior   C: noise deter + posterior(image)   D: noise + prior.
+    # A/B share the real deter; C/D share the SAME matched-stats noise deter.
+    # dream_warmup=0 -> dense over all valid warmups W in [1, T-H] (stride
+    # seed_ablation_warmup_stride); dream_warmup=N>0 -> a single warmup N. Seeds
+    # come from the full-sequence posterior (outs['repfeat'], recomputed with the
+    # loaded weights == what training imagines from, and in the decoder's space).
+    # Each seed is tiled Nseed times for cross-seed variability. See docs 11+13.
     if self.config.report_seed_ablation and 'player_pos' in obs:
       Nseed = self.config.seed_ablation_nseeds
-      real_deter = seed_carry['deter']                # (RB, D) posterior deter @ seed
-      tokens_seed = outs['tokens'][:RB, W - 1]        # encoder tokens @ seed frame
-      # Matched-stats noise deter: per-dim Gaussian from real posterior deter.
-      rd = f32(outs['repfeat']['deter'])
-      mu, sd = rd.mean((0, 1)), rd.std((0, 1))
-      noise_deter = nn.cast(mu + sd * jax.random.normal(
-          nj.seed(), real_deter.shape, f32))
+      Wcfg = self.config.dream_warmup
+      stride = self.config.seed_ablation_warmup_stride or 1
+      Wlist = [Wcfg] if Wcfg > 0 else list(range(1, T - H + 1, stride))
+      assert Wlist and all(1 <= w and w + H <= T for w in Wlist), (Wlist, H, T)
+      Nw = len(Wlist)
+      idx = jnp.asarray([w - 1 for w in Wlist])            # seed indices (Nw,)
+      fut_idx = idx[:, None] + jnp.arange(1, H + 1)[None]  # (Nw, H)
 
-      # (deter, seed stoch logits) per condition; stoch is sampled per tiled copy.
-      seed_specs = {
-          'A': (real_deter,  obsfeat['logit'][:, W - 1]),
-          'B': (real_deter,  self.dyn._prior(real_deter)),
-          'C': (noise_deter, self.dyn.post_from_deter(noise_deter, tokens_seed)),
-          'D': (noise_deter, self.dyn._prior(noise_deter)),
+      rp = jax.tree.map(lambda x: x[:RB], outs['repfeat'])  # full-seq posterior
+      ppos = obs['player_pos'][:RB]
+      start_pos = ppos[:, idx]                              # (RB, Nw, 2)
+      future_pos = ppos[:, fut_idx]                         # (RB, Nw, H, 2)
+
+      f2 = lambda x: x[:, idx].reshape((RB * Nw, *x.shape[2:]))
+      rdf = f2(rp['deter'])                                 # (RB*Nw, Dt) real deter
+      tok = f2(outs['tokens'][:RB])                         # (RB*Nw, tok)
+      # Matched-stats noise deter (per-dim Gaussian from real posterior deter);
+      # C and D share this exact draw.
+      allrd = f32(outs['repfeat']['deter'])
+      mu, sd = allrd.mean((0, 1)), allrd.std((0, 1))
+      nd = nn.cast(mu + sd * jax.random.normal(nj.seed(), rdf.shape, f32))
+
+      logits = {
+          'A': f2(rp['logit']),
+          'B': self.dyn._prior(rdf),
+          'C': self.dyn.post_from_deter(nd, tok),
+          'D': self.dyn._prior(nd),
       }
-      for name, (deter0, logit0) in seed_specs.items():
-        d_t = jnp.repeat(deter0, Nseed, axis=0)        # (RB*Nseed, D)
-        l_t = jnp.repeat(logit0, Nseed, axis=0)        # (RB*Nseed, S, C)
+      deters = {'A': rdf, 'B': rdf, 'C': nd, 'D': nd}       # all (RB*Nw, Dt)
+      Dt = rdf.shape[-1]
+      for name in ('A', 'B', 'C', 'D'):
+        d_t = jnp.repeat(deters[name], Nseed, axis=0)        # (RB*Nw*Nseed, Dt)
+        l_t = jnp.repeat(logits[name], Nseed, axis=0)        # (RB*Nw*Nseed, S, C)
         s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
         carry0 = nn.cast(dict(deter=d_t, stoch=s_t))
         _, feat, _ = self.dyn.imagine(carry0, dreamfn, H, training=False)
         # Prepend the seed state so step 0 = seed, steps 1..H = imagined.
-        deter_seq = jnp.concatenate([d_t[:, None], feat['deter']], 1)
-        metrics[f'seedabl/{name}/deter'] = deter_seq   # (RB*Nseed, H+1, D)
-      metrics['seedabl/start_pos'] = obs['player_pos'][:RB, W - 1]
-      metrics['seedabl/future_pos'] = obs['player_pos'][:RB, W: W + H]
+        seq = jnp.concatenate([d_t[:, None], feat['deter']], 1)
+        metrics[f'seedabl/{name}/deter'] = seq.reshape(
+            (RB, Nw, Nseed, H + 1, Dt))
+      metrics['seedabl/start_pos'] = start_pos              # (RB, Nw, 2)
+      metrics['seedabl/future_pos'] = future_pos            # (RB, Nw, H, 2)
+      metrics['seedabl/warmups'] = jnp.asarray(Wlist, i32)  # (Nw,)
 
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
     return carry, metrics

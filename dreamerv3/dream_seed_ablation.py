@@ -7,30 +7,34 @@ Four conditions form a clean crossed 2x2 over the seed carry {deter, stoch}:
   real deter      A. both (current)          B. just-latent
   noise deter     C. just-image              D. neither
 
-  - deter is either the real posterior deter at the seed timestep, or a
-    matched-stats noise deter (per-dim Gaussian from real posterior deter stats).
-    A/B share the real deter; C/D share the SAME noise draw.
+  - deter is either the real posterior deter or a matched-stats noise deter
+    (per-dim Gaussian from real posterior deter stats). A/B share the real deter;
+    C/D share the SAME noise draw.
   - stoch is either the posterior inferred from the real seed frame
     (posterior(deter, image)) or the dynamics prior _prior(deter) (no image).
 
-All four are rolled out with identical policy imagination for the same horizon,
-each seed tiled Nseed times so per-condition cross-seed variability can be read
-off. Every dreamed latent step is decoded to (x, y) with a pretrained position
-decoder (Manhattan tiles).
+To MATCH THE TRAINING PROCESS, seeds are drawn at MANY warmups: by default the
+report block seeds a dream at *every* valid timestep W in [1, report_length -
+horizon] (mirroring training's dyn.starts, where every timestep is a dream
+start), and the curves pool over all warmups. Seeds come from the full-sequence
+posterior recomputed with the loaded checkpoint (== what training imagines from,
+and in the position decoder's space) — NOT the buffer's stored latents. Set
+--dream_seed_ablation.warmup N to pin a single warmup instead.
 
-Three plots, all conditions (+ the real trajectory on A and B) overlaid:
+Each seed is tiled Nseed times (stochastic rollouts) for cross-seed variability.
+Every dreamed latent step is decoded to (x, y) with a pretrained position decoder
+(Manhattan tiles). Plots (all conditions; real trajectory on A and B):
   A) displacement from each condition's own start (every curve starts at 0)
-  B) distance from the real start position (start_pos); A/B start near the
-     decoder error floor, C/D start displaced
-  C) cross-seed variability within each condition (no real curve)
+  B) distance from the real start position
+  C) cross-seed variability within each seed (no real curve)
+  + error_vs_warmup: final-step distance-from-real-start as a function of warmup
 
-The seed construction lives in agent.report() behind report_seed_ablation; this
-script drives it, decodes, and plots. See docs/training_and_dream_loop.md 11+13.
+Seed construction lives in agent.report() behind report_seed_ablation. See
+docs/training_and_dream_loop.md 11+13.
 
 Usage:
   python dreamerv3/main.py \
-    --configs crafter_small size25m \
-    --logdir ./logdir/my_run \
+    --configs crafter_small size25m --logdir ./logdir/my_run \
     --script dream_seed_ablation \
     --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
     --dream_seed_ablation.decoder_model ./logdir/my_run/decoder_results/classifier_deter.pkl \
@@ -75,14 +79,8 @@ def _band(ax, data, color, label, ls='-'):
 
 
 def plot_seed_ablation(dispA, distB, varC, realA, save_dir):
-    """Three-panel figure.
-
-    dispA/distB[cond]: (N, H+1) per-rollout curves. varC[cond]: (S, H+1)
-    per-start cross-seed dispersion. realA: (S, H+1) real displacement from start.
-    """
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.2))
 
-    # A) displacement from own start
     ax = axes[0]
     for c in CONDITIONS:
         _band(ax, dispA[c], COLORS[c], LABELS[c])
@@ -90,7 +88,6 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir):
     ax.set_title('A) displacement from own start')
     ax.set_ylabel('Manhattan distance from start (tiles)')
 
-    # B) distance from real start
     ax = axes[1]
     for c in CONDITIONS:
         _band(ax, distB[c], COLORS[c], LABELS[c])
@@ -98,7 +95,6 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir):
     ax.set_title('B) distance from real start')
     ax.set_ylabel('Manhattan distance from real start (tiles)')
 
-    # C) cross-seed variability (no real curve)
     ax = axes[2]
     for c in CONDITIONS:
         _band(ax, varC[c], COLORS[c], LABELS[c])
@@ -114,6 +110,25 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir):
 
     fig.tight_layout()
     out = save_dir / 'seed_ablation_curves.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
+def plot_error_vs_warmup(distB_by_w, warmups, save_dir):
+    """Final-step distance-from-real-start as a function of warmup length."""
+    fig, ax = plt.subplots(figsize=(7.5, 5.0))
+    for c in CONDITIONS:
+        ax.plot(warmups, distB_by_w[c], '-o', color=COLORS[c],
+                label=LABELS[c], markersize=3)
+    ax.set_xlabel('Warmup (observed steps before dream)')
+    ax.set_ylabel('Median final-step distance from real start (tiles)')
+    ax.set_title('Dream fidelity vs warmup length')
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    ax.set_ylim(bottom=0)
+    fig.tight_layout()
+    out = save_dir / 'error_vs_warmup.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out.name}")
@@ -138,7 +153,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         agent.load(_pickle.load(_f), regex=r'^(?!opt/)')
     print(f"Loaded checkpoint (params only): {args.from_checkpoint}")
 
-    # 2. Collect replay data (fixed_seed world, eval policy).
+    # 2. Collect fresh eval rollouts (fixed_seed world).
     print("Collecting replay data...")
     env = make_env(0, fixed_seed=True)
     try:
@@ -163,7 +178,6 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     episode_count = [0]
     driver.on_step(lambda tran, w: episode_count.__setitem__(
         0, episode_count[0] + int(tran['is_last'])))
-
     policy = lambda *a: agent.policy(*a, mode='eval')
     driver.reset(agent.init_policy)
     print(f"Running {cfg.num_episodes} eval episodes...")
@@ -171,92 +185,88 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         driver(policy, steps=100)
     print(f"  Collected {episode_count[0]} episodes, replay size: {len(replay)}")
 
-    # 3. Run report() to get per-condition dream latents.
-    print("Running report() to get four-condition dream rollouts...")
-    stream = iter(agent.stream(make_stream(replay, 'report')))
-    carry = agent.init_report(args.batch_size)
-
-    cond_deter = {c: [] for c in CONDITIONS}
-    starts, futures = [], []
-    for b in range(cfg.num_batches):
-        batch = next(stream)
-        carry, mets = agent.report(carry, batch)
-        if f'seedabl/A/deter' not in mets:
-            print("ERROR: seedabl/* missing from report metrics. "
-                  "Is agent.report_seed_ablation enabled? Does obs carry "
-                  "player_pos?")
-            return
-        for c in CONDITIONS:
-            cond_deter[c].append(np.array(mets[f'seedabl/{c}/deter']))
-        starts.append(np.array(mets['seedabl/start_pos']))
-        futures.append(np.array(mets['seedabl/future_pos']))
-        print(f"  Batch {b + 1}/{cfg.num_batches} done")
-
-    start_pos = np.concatenate(starts, axis=0)            # (S, 2)
-    future_pos = np.concatenate(futures, axis=0)          # (S, H, 2)
-    S = start_pos.shape[0]
-    RB = starts[0].shape[0]
-    # Each report batch gives (RB*Nseed, H+1, D); regroup to (RB, Nseed, H+1, D)
-    # then concat over batches on the start axis -> (S, Nseed, H+1, D).
-    for c in CONDITIONS:
-        per_batch = [a.reshape(RB, n_seeds, *a.shape[1:]) for a in cond_deter[c]]
-        cond_deter[c] = np.concatenate(per_batch, axis=0)  # (S, Nseed, H+1, D)
-    Hp1 = cond_deter['A'].shape[2]
-    D = cond_deter['A'].shape[3]
-    H = future_pos.shape[1]
-    print(f"Collected {S} start states x {n_seeds} seeds, H+1={Hp1}, deter={D}")
-
-    # 4. Decode every latent to (x, y) with the pretrained position decoder.
+    # 3. Load decoder up front (we decode each batch as it arrives to keep the
+    #    big (RB, Nw, Nseed, H+1, D) deter tensors from piling up in memory).
     print(f"\nLoading decoder from {cfg.decoder_model}...")
     from .decode_position import load_classifier_model
     clf, dec_meta = load_classifier_model(Path(cfg.decoder_model))
     width, height = dec_meta['width'], dec_meta['height']
     print(f"  Decoder: {dec_meta.get('repr_name', '?')}, grid={width}x{height}")
 
-    decoded = {}
-    for c in CONDITIONS:
-        flat = cond_deter[c].reshape(-1, D)
-        cls = clf.predict_proba(flat).argmax(axis=1)
+    def decode(deter):  # (..., D) -> (..., 2)
+        lead, D = deter.shape[:-1], deter.shape[-1]
+        cls = clf.predict_proba(deter.reshape(-1, D)).argmax(axis=1)
         xy = np.stack(np.unravel_index(cls, (width, height)), axis=1)
-        decoded[c] = xy.reshape(S, n_seeds, Hp1, 2).astype(float)
+        return xy.reshape(*lead, 2).astype(float)
 
-    # 5. Curves.
-    # Graph A: displacement from own (per-rollout) start.
-    dispA = {c: _manhattan(decoded[c], decoded[c][:, :, :1, :]).reshape(
-        S * n_seeds, Hp1) for c in CONDITIONS}
-    # Graph B: distance from the real start position.
-    rs = start_pos[:, None, None, :]                      # (S,1,1,2)
-    distB = {c: _manhattan(decoded[c], rs).reshape(S * n_seeds, Hp1)
-             for c in CONDITIONS}
-    # Graph C: within-start cross-seed dispersion (mean distance to seed centroid).
-    varC = {}
+    # 4. Run report() per batch; decode dreamed latents immediately.
+    print("Running report() for four-condition dense-warmup dreams...")
+    stream = iter(agent.stream(make_stream(replay, 'report')))
+    carry = agent.init_report(args.batch_size)
+
+    decoded = {c: [] for c in CONDITIONS}   # each: list of (RB, Nw, Nseed, H+1, 2)
+    starts, futures = [], []
+    warmups = None
+    for b in range(cfg.num_batches):
+        batch = next(stream)
+        carry, mets = agent.report(carry, batch)
+        if 'seedabl/A/deter' not in mets:
+            print("ERROR: seedabl/* missing. Is agent.report_seed_ablation on, "
+                  "and does obs carry player_pos?")
+            return
+        for c in CONDITIONS:
+            decoded[c].append(decode(np.array(mets[f'seedabl/{c}/deter'])))
+        starts.append(np.array(mets['seedabl/start_pos']))    # (RB, Nw, 2)
+        futures.append(np.array(mets['seedabl/future_pos']))  # (RB, Nw, H, 2)
+        if warmups is None:
+            warmups = np.array(mets['seedabl/warmups'])       # (Nw,)
+        print(f"  Batch {b + 1}/{cfg.num_batches} done")
+
     for c in CONDITIONS:
-        centroid = decoded[c].mean(axis=1, keepdims=True)  # (S,1,H+1,2)
-        varC[c] = _manhattan(decoded[c], centroid).mean(axis=1)  # (S,H+1)
-    # Real trajectory displacement from its start (aligned: step0=0, 1..H=future).
-    realA = np.concatenate([
-        np.zeros((S, 1)),
-        _manhattan(future_pos, start_pos[:, None, :]),     # (S, H)
-    ], axis=1)                                             # (S, H+1)
+        decoded[c] = np.concatenate(decoded[c], axis=0)  # (S, Nw, Nseed, H+1, 2)
+    start_pos = np.concatenate(starts, axis=0)           # (S, Nw, 2)
+    future_pos = np.concatenate(futures, axis=0)         # (S, Nw, H, 2)
+    S, Nw, Ns, Hp1, _ = decoded['A'].shape
+    H = future_pos.shape[2]
+    print(f"Pooled {S} start rows x {Nw} warmups {list(warmups)} x {Ns} seeds, "
+          f"H+1={Hp1}")
 
-    print("\n[summary] median final-step (H) values, per condition:")
+    # 5. Curves (pooled over start rows and warmups; Nseed drives variability).
+    rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
+    dispA, distB, varC, distB_by_w = {}, {}, {}, {}
+    for c in CONDITIONS:
+        pos = decoded[c]                                 # (S, Nw, Ns, H+1, 2)
+        dA = _manhattan(pos, pos[:, :, :, :1, :])        # (S, Nw, Ns, H+1)
+        dB = _manhattan(pos, rs)                         # (S, Nw, Ns, H+1)
+        dispA[c] = dA.reshape(S * Nw * Ns, Hp1)
+        distB[c] = dB.reshape(S * Nw * Ns, Hp1)
+        centroid = pos.mean(axis=2, keepdims=True)       # (S, Nw, 1, H+1, 2)
+        varC[c] = _manhattan(pos, centroid).mean(axis=2).reshape(S * Nw, Hp1)
+        distB_by_w[c] = np.nanmedian(dB[..., -1], axis=(0, 2))  # (Nw,)
+    realA = np.concatenate([
+        np.zeros((S, Nw, 1)),
+        _manhattan(future_pos, start_pos[:, :, None, :]),      # (S, Nw, H)
+    ], axis=2).reshape(S * Nw, Hp1)
+
+    print("\n[summary] median final-step (H) values, pooled over warmups:")
     for c in CONDITIONS:
         print(f"  {c}: own-disp={np.median(dispA[c][:, -1]):5.2f}  "
               f"real-dist={np.median(distB[c][:, -1]):5.2f}  "
               f"seed-var={np.median(varC[c][:, -1]):5.2f} tiles")
     print(f"  real: own-disp={np.median(realA[:, -1]):5.2f} tiles")
 
-    # 6. Plot.
+    # 6. Plots.
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir)
+    plot_error_vs_warmup(distB_by_w, warmups, save_dir)
 
     # 7. Save.
     results = {
-        'decoded': decoded,          # {cond: (S, Nseed, H+1, 2)}
-        'start_pos': start_pos,      # (S, 2)
-        'future_pos': future_pos,    # (S, H, 2)
+        'decoded': decoded,          # {cond: (S, Nw, Nseed, H+1, 2)}
+        'start_pos': start_pos, 'future_pos': future_pos, 'warmups': warmups,
         'dispA': dispA, 'distB': distB, 'varC': varC, 'realA': realA,
-        'S': S, 'n_seeds': n_seeds, 'H': H, 'Hp1': Hp1,
+        'distB_by_warmup': distB_by_w,
+        'S': S, 'Nw': Nw, 'n_seeds': Ns, 'H': H, 'Hp1': Hp1,
         'decoder_path': str(cfg.decoder_model), 'decoder_metadata': dec_meta,
         'metadata': metadata, 'conditions': CONDITIONS, 'labels': LABELS,
     }
@@ -270,10 +280,13 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
             save_dir, 'dream_seed_ablation',
             args={'decoder_model': str(cfg.decoder_model),
                   'num_batches': cfg.num_batches, 'num_episodes': cfg.num_episodes,
-                  'n_seeds': n_seeds, 'from_checkpoint': args.from_checkpoint},
-            outputs=['seed_ablation_curves.png',
+                  'n_seeds': n_seeds, 'warmup': cfg.warmup,
+                  'warmup_stride': cfg.warmup_stride, 'horizon': cfg.horizon,
+                  'from_checkpoint': args.from_checkpoint},
+            outputs=['seed_ablation_curves.png', 'error_vs_warmup.png',
                      'dream_seed_ablation_results.pkl'],
-            extra={'n_starts': int(S), 'horizon': int(H)})
+            extra={'n_start_rows': int(S), 'n_warmups': int(Nw),
+                   'warmups': [int(w) for w in warmups], 'horizon': int(H)})
     except Exception as e:
         print(f"  (run_info logging skipped: {e})")
 
