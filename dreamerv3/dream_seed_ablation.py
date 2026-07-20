@@ -28,6 +28,9 @@ Every dreamed latent step is decoded to (x, y) with a pretrained position decode
   B) distance from the real start position
   C) cross-seed variability within each seed (no real curve)
   + error_vs_warmup: final-step distance-from-real-start as a function of warmup
+  + decoded_dreams_by_condition: 4xN grid on the world map (rows = conditions
+    A/B/C/D, columns = distinct example dreams / seed frames), all seeds drawn
+    per cell, colored by dream step; columns share start/warmup across rows
 
 Seed construction lives in agent.report() behind report_seed_ablation. See
 docs/training_and_dream_loop.md 11+13.
@@ -73,6 +76,130 @@ COLORS = {'A': 'crimson', 'B': 'steelblue', 'C': 'darkorange', 'D': 'dimgray'}
 
 def _manhattan(a, b):
     return np.abs(a - b).sum(axis=-1)
+
+
+def _render_world(metadata, tile_size=8):
+    """Reconstruct the Crafter world map from metadata (env_seed/area).
+
+    Returns (world_img, env_seed, tile_size) or (None, None, tile_size)."""
+    try:
+        import sys
+        from pathlib import Path as _P
+        sys.path.insert(0, str(_P(__file__).parent))
+        from plot_trajectories import _render_crafter_world
+        return _render_crafter_world(metadata, tile_size)
+    except Exception as e:
+        print(f"  (world render unavailable: {e})")
+        return None, None, tile_size
+
+
+def _select_columns(S, Nw, ncol):
+    """Deterministic (start_row, warmup) picks spread across starts & warmups.
+
+    Columns vary warmup where possible (informative when Nw > 1) and start row,
+    so each column is a distinct seed frame / dream."""
+    if ncol <= 0:
+        return []
+    ws = (np.linspace(0, Nw - 1, ncol).round().astype(int)
+          if Nw > 1 else np.zeros(ncol, int))
+    ss = np.linspace(0, S - 1, ncol).round().astype(int)
+    return list(zip(ss.tolist(), ws.tolist()))
+
+
+def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
+                        n_cols=4):
+    """4xN grid of decoded dream trajectories: rows = conditions (A/B/C/D),
+    columns = distinct example dreams (each a different start/warmup seed frame).
+
+    Every cell draws all seeds for that (condition, start, warmup), colored by
+    dream step. Columns share their (start, warmup) across rows so conditions
+    are directly comparable within a column. Real future trajectory (shared
+    across conditions) is overlaid faintly. World-map overlay when available,
+    else tile coords.
+    """
+    S, Nw, Ns, Hp1, _ = decoded['A'].shape
+    cols = _select_columns(S, Nw, n_cols)
+    if not cols:
+        return
+    world_img, env_seed, tile_size = _render_world(metadata)
+
+    if world_img is not None:
+        img_h, img_w = world_img.shape[:2]
+        def to_px(p):
+            px = p[..., 0] * tile_size + tile_size // 2
+            py = img_h - (p[..., 1] * tile_size + tile_size // 2)
+            return np.stack([px, py], axis=-1)
+    else:
+        def to_px(p):
+            return p.astype(float)
+
+    # Shared zoom bounds over every position that will be drawn.
+    dream_xy = np.stack([decoded[c][s, w] for c in CONDITIONS
+                         for (s, w) in cols], axis=0)          # (C*ncol, Ns, Hp1, 2)
+    real_xy = np.stack([future_pos[s, w] for (s, w) in cols], axis=0)
+    allp = to_px(np.concatenate(
+        [dream_xy.reshape(-1, 2), real_xy.reshape(-1, 2)], axis=0))
+    pad = (tile_size * 4) if world_img is not None else 2
+    xlo, xhi = allp[:, 0].min() - pad, allp[:, 0].max() + pad
+    ylo, yhi = allp[:, 1].min() - pad, allp[:, 1].max() + pad
+
+    cmap = plt.cm.plasma
+    fc = '#1a1a1a' if world_img is not None else 'white'
+    txt = 'white' if world_img is not None else 'black'
+    nc = len(cols)
+
+    fig, axes = plt.subplots(4, nc, figsize=(4.2 * nc, 4.4 * 4), facecolor=fc,
+                             squeeze=False)
+    for ri, c in enumerate(CONDITIONS):
+        for ci, (s, w) in enumerate(cols):
+            ax = axes[ri, ci]
+            ax.set_facecolor(fc)
+            if world_img is not None:
+                ax.imshow((world_img * 0.6).astype(np.uint8))
+
+            fp = to_px(future_pos[s, w])
+            ax.plot(fp[:, 0], fp[:, 1], '--', color='0.5', linewidth=1.2,
+                    alpha=0.45, zorder=2)
+
+            for k in range(Ns):
+                tp = to_px(decoded[c][s, w, k])                # (Hp1, 2)
+                for t in range(Hp1 - 1):
+                    ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
+                            color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
+                            alpha=0.55, zorder=3)
+            sp = to_px(decoded[c][s, w, 0, 0][None])[0]
+            ax.plot(sp[0], sp[1], 'o', color='cyan', markersize=7,
+                    markeredgecolor='k', markeredgewidth=0.6, zorder=5)
+
+            ax.set_xlim(xlo, xhi)
+            ax.set_ylim(yhi, ylo)
+            if ri == 0:
+                ax.set_title(f'dream {ci + 1}  (start {s}, warmup {w})',
+                             fontsize=9, color=txt)
+            if ci == 0:
+                ax.set_ylabel(LABELS[c], fontsize=9, color=txt)
+            if world_img is not None:
+                ax.set_xticks([]); ax.set_yticks([])
+            else:
+                ax.set_aspect('equal')
+            for sp_ in ax.spines.values():
+                sp_.set_color('0.4')
+
+    ttl = 'Decoded dream trajectories (rows: conditions, cols: example dreams'
+    ttl += f'; all {Ns} seeds/cell'
+    ttl += f', seed={env_seed})' if env_seed is not None else ')'
+    fig.suptitle(ttl, fontsize=13, color=txt)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, Hp1 - 1))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, fraction=0.015, pad=0.02, aspect=40)
+    cbar.set_label('Dream step', color=txt, fontsize=10)
+    cbar.ax.yaxis.set_tick_params(color=txt)
+    cbar.ax.tick_params(labelcolor=txt)
+
+    out = save_dir / 'decoded_dreams_by_condition.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight', facecolor=fc)
+    plt.close(fig)
+    print(f"  Saved {out.name}")
 
 
 def _band(ax, data, color, label, ls='-', central='median', shading='band'):
@@ -137,7 +264,8 @@ def _print_summary(dispA, distB, varC, realA, central):
     print(f"  real: own-disp={_agg(realA[:, -1]):5.2f} tiles")
 
 
-def replot_from_pkl(pkl_path, save_dir, central='median', shading='band'):
+def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
+                    n_example_dreams=24):
     """Regenerate plots from a saved results pkl — no agent/rollouts/decode."""
     pkl_path = Path(pkl_path)
     save_dir = Path(save_dir)
@@ -153,6 +281,9 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band'):
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central=central, shading=shading)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
+    if n_example_dreams > 0:
+        plot_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
+                            r['metadata'], save_dir, n_cols=n_example_dreams)
     print(f"Done. Plots written to {save_dir}")
 
 
@@ -226,7 +357,8 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     # Fast path: replot from a saved results pkl (no agent/rollouts/decode).
     if cfg.from_pkl:
         save_dir = Path(cfg.save_path or str(Path(cfg.from_pkl).parent))
-        replot_from_pkl(cfg.from_pkl, save_dir, cfg.central, cfg.shading)
+        replot_from_pkl(cfg.from_pkl, save_dir, cfg.central, cfg.shading,
+                        cfg.n_example_dreams)
         return
 
     assert cfg.decoder_model, "Must provide --dream_seed_ablation.decoder_model"
@@ -334,6 +466,9 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central=central, shading=cfg.shading)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
+    if cfg.n_example_dreams > 0:
+        plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
+                            n_cols=cfg.n_example_dreams)
 
     # 7. Save.
     results = {
@@ -358,8 +493,10 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                   'n_seeds': n_seeds, 'warmup': cfg.warmup,
                   'warmup_stride': cfg.warmup_stride, 'horizon': cfg.horizon,
                   'central': cfg.central, 'shading': cfg.shading,
+                  'n_example_dreams': cfg.n_example_dreams,
                   'from_checkpoint': args.from_checkpoint},
             outputs=['seed_ablation_curves.png', 'error_vs_warmup.png',
+                     'decoded_dreams_by_condition.png',
                      'dream_seed_ablation_results.pkl'],
             extra={'n_start_rows': int(S), 'n_warmups': int(Nw),
                    'warmups': [int(w) for w in warmups], 'horizon': int(H)})

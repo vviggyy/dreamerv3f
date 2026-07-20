@@ -78,6 +78,7 @@ defaults:
     central: median   # curve central tendency: 'median' (spread=IQR) or 'mean' (spread=std)
     shading: band     # spread display: 'band' (filled), 'bars' (error bars), or 'none'
     from_pkl: ''      # replot only: path to a saved dream_seed_ablation_results.pkl (skips agent/rollouts/decode)
+    n_example_dreams: 4   # decoded_dreams_by_condition.png: # columns (distinct example dreams) in the 4xN grid; rows are conditions, all seeds drawn per cell (0 disables)
 
   replay_activations:
     source_data: ''
