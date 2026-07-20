@@ -68,36 +68,52 @@ def _manhattan(a, b):
     return np.abs(a - b).sum(axis=-1)
 
 
-def _band(ax, data, color, label, ls='-'):
-    """Median + IQR band over rollouts. data: (N, steps)."""
+def _band(ax, data, color, label, ls='-', central='median', shading='band'):
+    """Central-tendency curve + spread over rollouts. data: (N, steps).
+
+    central: 'median' (spread = IQR) or 'mean' (spread = +/-1 std).
+    shading: 'band' (filled region), 'bars' (error bars), or 'none' (line only).
+    """
     steps = np.arange(data.shape[1])
-    med = np.nanmedian(data, axis=0)
-    q1 = np.nanpercentile(data, 25, axis=0)
-    q3 = np.nanpercentile(data, 75, axis=0)
-    ax.plot(steps, med, ls, color=color, linewidth=2.0, label=label)
-    ax.fill_between(steps, q1, q3, color=color, alpha=0.15)
+    if central == 'mean':
+        mid = np.nanmean(data, axis=0)
+        sd = np.nanstd(data, axis=0)
+        lo, hi = mid - sd, mid + sd
+    else:
+        mid = np.nanmedian(data, axis=0)
+        lo = np.nanpercentile(data, 25, axis=0)
+        hi = np.nanpercentile(data, 75, axis=0)
+    if shading == 'bars':
+        ax.errorbar(steps, mid, yerr=[mid - lo, hi - mid], fmt=ls, color=color,
+                    linewidth=2.0, label=label, capsize=2, elinewidth=1.0)
+    else:
+        ax.plot(steps, mid, ls, color=color, linewidth=2.0, label=label)
+        if shading == 'band':
+            ax.fill_between(steps, lo, hi, color=color, alpha=0.15)
 
 
-def plot_seed_ablation(dispA, distB, varC, realA, save_dir):
+def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
+                       central='median', shading='band'):
+    band = bind(_band, central=central, shading=shading)
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.2))
 
     ax = axes[0]
     for c in CONDITIONS:
-        _band(ax, dispA[c], COLORS[c], LABELS[c])
-    _band(ax, realA, 'black', 'real trajectory', ls='--')
+        band(ax, dispA[c], COLORS[c], LABELS[c])
+    band(ax, realA, 'black', 'real trajectory', ls='--')
     ax.set_title('A) displacement from own start')
     ax.set_ylabel('Manhattan distance from start (tiles)')
 
     ax = axes[1]
     for c in CONDITIONS:
-        _band(ax, distB[c], COLORS[c], LABELS[c])
-    _band(ax, realA, 'black', 'real trajectory', ls='--')
+        band(ax, distB[c], COLORS[c], LABELS[c])
+    band(ax, realA, 'black', 'real trajectory', ls='--')
     ax.set_title('B) distance from real start')
     ax.set_ylabel('Manhattan distance from real start (tiles)')
 
     ax = axes[2]
     for c in CONDITIONS:
-        _band(ax, varC[c], COLORS[c], LABELS[c])
+        band(ax, varC[c], COLORS[c], LABELS[c])
     ax.set_title('C) cross-seed variability')
     ax.set_ylabel('Mean seed dispersion (tiles)')
 
@@ -115,14 +131,15 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir):
     print(f"  Saved {out.name}")
 
 
-def plot_error_vs_warmup(distB_by_w, warmups, save_dir):
+def plot_error_vs_warmup(distB_by_w, warmups, save_dir, central='median'):
     """Final-step distance-from-real-start as a function of warmup length."""
     fig, ax = plt.subplots(figsize=(7.5, 5.0))
     for c in CONDITIONS:
         ax.plot(warmups, distB_by_w[c], '-o', color=COLORS[c],
                 label=LABELS[c], markersize=3)
     ax.set_xlabel('Warmup (observed steps before dream)')
-    ax.set_ylabel('Median final-step distance from real start (tiles)')
+    ax.set_ylabel(f'{central.capitalize()} final-step distance from real start '
+                  '(tiles)')
     ax.set_title('Dream fidelity vs warmup length')
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
@@ -138,6 +155,10 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                         make_logger, args):
     cfg = args.dream_seed_ablation
     assert cfg.decoder_model, "Must provide --dream_seed_ablation.decoder_model"
+    assert cfg.central in ('median', 'mean'), \
+        f"central must be 'median' or 'mean', got {cfg.central!r}"
+    assert cfg.shading in ('band', 'bars', 'none'), \
+        f"shading must be 'band', 'bars', or 'none', got {cfg.shading!r}"
     n_seeds = cfg.n_seeds
 
     save_dir = Path(cfg.save_path or str(
@@ -232,6 +253,8 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
           f"H+1={Hp1}")
 
     # 5. Curves (pooled over start rows and warmups; Nseed drives variability).
+    central = cfg.central
+    _agg = np.nanmean if central == 'mean' else np.nanmedian
     rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
     dispA, distB, varC, distB_by_w = {}, {}, {}, {}
     for c in CONDITIONS:
@@ -242,23 +265,24 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         distB[c] = dB.reshape(S * Nw * Ns, Hp1)
         centroid = pos.mean(axis=2, keepdims=True)       # (S, Nw, 1, H+1, 2)
         varC[c] = _manhattan(pos, centroid).mean(axis=2).reshape(S * Nw, Hp1)
-        distB_by_w[c] = np.nanmedian(dB[..., -1], axis=(0, 2))  # (Nw,)
+        distB_by_w[c] = _agg(dB[..., -1], axis=(0, 2))   # (Nw,)
     realA = np.concatenate([
         np.zeros((S, Nw, 1)),
         _manhattan(future_pos, start_pos[:, :, None, :]),      # (S, Nw, H)
     ], axis=2).reshape(S * Nw, Hp1)
 
-    print("\n[summary] median final-step (H) values, pooled over warmups:")
+    print(f"\n[summary] {central} final-step (H) values, pooled over warmups:")
     for c in CONDITIONS:
-        print(f"  {c}: own-disp={np.median(dispA[c][:, -1]):5.2f}  "
-              f"real-dist={np.median(distB[c][:, -1]):5.2f}  "
-              f"seed-var={np.median(varC[c][:, -1]):5.2f} tiles")
-    print(f"  real: own-disp={np.median(realA[:, -1]):5.2f} tiles")
+        print(f"  {c}: own-disp={_agg(dispA[c][:, -1]):5.2f}  "
+              f"real-dist={_agg(distB[c][:, -1]):5.2f}  "
+              f"seed-var={_agg(varC[c][:, -1]):5.2f} tiles")
+    print(f"  real: own-disp={_agg(realA[:, -1]):5.2f} tiles")
 
     # 6. Plots.
     print("\nGenerating plots...")
-    plot_seed_ablation(dispA, distB, varC, realA, save_dir)
-    plot_error_vs_warmup(distB_by_w, warmups, save_dir)
+    plot_seed_ablation(dispA, distB, varC, realA, save_dir,
+                       central=central, shading=cfg.shading)
+    plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
 
     # 7. Save.
     results = {
@@ -282,6 +306,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                   'num_batches': cfg.num_batches, 'num_episodes': cfg.num_episodes,
                   'n_seeds': n_seeds, 'warmup': cfg.warmup,
                   'warmup_stride': cfg.warmup_stride, 'horizon': cfg.horizon,
+                  'central': cfg.central, 'shading': cfg.shading,
                   'from_checkpoint': args.from_checkpoint},
             outputs=['seed_ablation_curves.png', 'error_vs_warmup.png',
                      'dream_seed_ablation_results.pkl'],
