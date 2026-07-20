@@ -167,7 +167,7 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                     ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
                             color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
                             alpha=0.55, zorder=3)
-            sp = to_px(decoded[c][s, w, 0, 0][None])[0]
+            sp = to_px(start_pos[s, w][None])[0]   # real start (ground truth)
             ax.plot(sp[0], sp[1], 'o', color='cyan', markersize=7,
                     markeredgecolor='k', markeredgewidth=0.6, zorder=5)
 
