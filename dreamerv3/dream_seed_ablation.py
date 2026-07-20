@@ -32,6 +32,13 @@ Every dreamed latent step is decoded to (x, y) with a pretrained position decode
 Seed construction lives in agent.report() behind report_seed_ablation. See
 docs/training_and_dream_loop.md 11+13.
 
+Rollouts and decoding are the expensive part; results (raw decoded dream
+positions + start/future positions) are saved to
+dream_seed_ablation_results.pkl. To re-render plots with a different central
+tendency / shading WITHOUT rerunning the agent, pass
+--dream_seed_ablation.from_pkl <that pkl> (no checkpoint/decoder needed).
+Extending the dream horizon still requires a fresh run.
+
 Usage:
   python dreamerv3/main.py \
     --configs crafter_small size25m --logdir ./logdir/my_run \
@@ -90,6 +97,63 @@ def _band(ax, data, color, label, ls='-', central='median', shading='band'):
         ax.plot(steps, mid, ls, color=color, linewidth=2.0, label=label)
         if shading == 'band':
             ax.fill_between(steps, lo, hi, color=color, alpha=0.15)
+
+
+def compute_curves(decoded, start_pos, future_pos, central='median'):
+    """Derive plot curves from raw decoded dream positions (pure, no I/O).
+
+    decoded: {cond: (S, Nw, Nseed, H+1, 2)}, start_pos: (S, Nw, 2),
+    future_pos: (S, Nw, H, 2). Returns dispA, distB, varC, realA, distB_by_w.
+    distB_by_w uses `central` (median/mean); dispA/distB/varC/realA are raw
+    per-rollout matrices (central tendency applied later at plot time).
+    """
+    S, Nw, Ns, Hp1, _ = decoded['A'].shape
+    _agg = np.nanmean if central == 'mean' else np.nanmedian
+    rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
+    dispA, distB, varC, distB_by_w = {}, {}, {}, {}
+    for c in CONDITIONS:
+        pos = decoded[c]                                 # (S, Nw, Ns, H+1, 2)
+        dA = _manhattan(pos, pos[:, :, :, :1, :])        # (S, Nw, Ns, H+1)
+        dB = _manhattan(pos, rs)                         # (S, Nw, Ns, H+1)
+        dispA[c] = dA.reshape(S * Nw * Ns, Hp1)
+        distB[c] = dB.reshape(S * Nw * Ns, Hp1)
+        centroid = pos.mean(axis=2, keepdims=True)       # (S, Nw, 1, H+1, 2)
+        varC[c] = _manhattan(pos, centroid).mean(axis=2).reshape(S * Nw, Hp1)
+        distB_by_w[c] = _agg(dB[..., -1], axis=(0, 2))   # (Nw,)
+    realA = np.concatenate([
+        np.zeros((S, Nw, 1)),
+        _manhattan(future_pos, start_pos[:, :, None, :]),      # (S, Nw, H)
+    ], axis=2).reshape(S * Nw, Hp1)
+    return dispA, distB, varC, realA, distB_by_w
+
+
+def _print_summary(dispA, distB, varC, realA, central):
+    _agg = np.nanmean if central == 'mean' else np.nanmedian
+    print(f"\n[summary] {central} final-step (H) values, pooled over warmups:")
+    for c in CONDITIONS:
+        print(f"  {c}: own-disp={_agg(dispA[c][:, -1]):5.2f}  "
+              f"real-dist={_agg(distB[c][:, -1]):5.2f}  "
+              f"seed-var={_agg(varC[c][:, -1]):5.2f} tiles")
+    print(f"  real: own-disp={_agg(realA[:, -1]):5.2f} tiles")
+
+
+def replot_from_pkl(pkl_path, save_dir, central='median', shading='band'):
+    """Regenerate plots from a saved results pkl — no agent/rollouts/decode."""
+    pkl_path = Path(pkl_path)
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Replotting from {pkl_path} (central={central}, shading={shading})")
+    with open(pkl_path, 'rb') as f:
+        r = pickle.load(f)
+    dispA, distB, varC, realA, distB_by_w = compute_curves(
+        r['decoded'], r['start_pos'], r['future_pos'], central)
+    warmups = r['warmups']
+    _print_summary(dispA, distB, varC, realA, central)
+    print("\nGenerating plots...")
+    plot_seed_ablation(dispA, distB, varC, realA, save_dir,
+                       central=central, shading=shading)
+    plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
+    print(f"Done. Plots written to {save_dir}")
 
 
 def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
@@ -154,11 +218,18 @@ def plot_error_vs_warmup(distB_by_w, warmups, save_dir, central='median'):
 def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                         make_logger, args):
     cfg = args.dream_seed_ablation
-    assert cfg.decoder_model, "Must provide --dream_seed_ablation.decoder_model"
     assert cfg.central in ('median', 'mean'), \
         f"central must be 'median' or 'mean', got {cfg.central!r}"
     assert cfg.shading in ('band', 'bars', 'none'), \
         f"shading must be 'band', 'bars', or 'none', got {cfg.shading!r}"
+
+    # Fast path: replot from a saved results pkl (no agent/rollouts/decode).
+    if cfg.from_pkl:
+        save_dir = Path(cfg.save_path or str(Path(cfg.from_pkl).parent))
+        replot_from_pkl(cfg.from_pkl, save_dir, cfg.central, cfg.shading)
+        return
+
+    assert cfg.decoder_model, "Must provide --dream_seed_ablation.decoder_model"
     n_seeds = cfg.n_seeds
 
     save_dir = Path(cfg.save_path or str(
@@ -254,29 +325,9 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
 
     # 5. Curves (pooled over start rows and warmups; Nseed drives variability).
     central = cfg.central
-    _agg = np.nanmean if central == 'mean' else np.nanmedian
-    rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
-    dispA, distB, varC, distB_by_w = {}, {}, {}, {}
-    for c in CONDITIONS:
-        pos = decoded[c]                                 # (S, Nw, Ns, H+1, 2)
-        dA = _manhattan(pos, pos[:, :, :, :1, :])        # (S, Nw, Ns, H+1)
-        dB = _manhattan(pos, rs)                         # (S, Nw, Ns, H+1)
-        dispA[c] = dA.reshape(S * Nw * Ns, Hp1)
-        distB[c] = dB.reshape(S * Nw * Ns, Hp1)
-        centroid = pos.mean(axis=2, keepdims=True)       # (S, Nw, 1, H+1, 2)
-        varC[c] = _manhattan(pos, centroid).mean(axis=2).reshape(S * Nw, Hp1)
-        distB_by_w[c] = _agg(dB[..., -1], axis=(0, 2))   # (Nw,)
-    realA = np.concatenate([
-        np.zeros((S, Nw, 1)),
-        _manhattan(future_pos, start_pos[:, :, None, :]),      # (S, Nw, H)
-    ], axis=2).reshape(S * Nw, Hp1)
-
-    print(f"\n[summary] {central} final-step (H) values, pooled over warmups:")
-    for c in CONDITIONS:
-        print(f"  {c}: own-disp={_agg(dispA[c][:, -1]):5.2f}  "
-              f"real-dist={_agg(distB[c][:, -1]):5.2f}  "
-              f"seed-var={_agg(varC[c][:, -1]):5.2f} tiles")
-    print(f"  real: own-disp={_agg(realA[:, -1]):5.2f} tiles")
+    dispA, distB, varC, realA, distB_by_w = compute_curves(
+        decoded, start_pos, future_pos, central)
+    _print_summary(dispA, distB, varC, realA, central)
 
     # 6. Plots.
     print("\nGenerating plots...")

@@ -77,6 +77,7 @@ defaults:
     horizon: 0        # dream rollout length (0 -> imag_length); warmup+horizon <= report_length
     central: median   # curve central tendency: 'median' (spread=IQR) or 'mean' (spread=std)
     shading: band     # spread display: 'band' (filled), 'bars' (error bars), or 'none'
+    from_pkl: ''      # replot only: path to a saved dream_seed_ablation_results.pkl (skips agent/rollouts/decode)
 
   replay_activations:
     source_data: ''
