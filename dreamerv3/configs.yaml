@@ -79,6 +79,9 @@ defaults:
     shading: band     # spread display: 'band' (filled), 'bars' (error bars), or 'none'
     from_pkl: ''      # replot only: path to a saved dream_seed_ablation_results.pkl (skips agent/rollouts/decode)
     n_example_dreams: 4   # decoded_dreams_by_condition.png: # columns (distinct example dreams) in the 4xN grid; rows are conditions, all seeds drawn per cell (0 disables)
+    make_gif: True        # also emit decoded_dreams_animation.gif: 1x4 conditions, one seed (dream) at a time over the real trajectory
+    gif_col: 0            # which example column (start/warmup) to animate in the gif (0-indexed into the selected columns)
+    gif_fps: 2            # gif frame rate (frames = n_seeds)
 
   replay_activations:
     source_data: ''

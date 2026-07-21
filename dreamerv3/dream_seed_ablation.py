@@ -31,6 +31,9 @@ Every dreamed latent step is decoded to (x, y) with a pretrained position decode
   + decoded_dreams_by_condition: 4xN grid on the world map (rows = conditions
     A/B/C/D, columns = distinct example dreams / seed frames), all seeds drawn
     per cell, colored by dream step; columns share start/warmup across rows
+  + decoded_dreams_animation.gif: 1x4 conditions for ONE example (start,warmup),
+    stepping through seeds one dream at a time over the real trajectory
+    (uncluttered counterpart to the all-seeds grid)
 
 Seed construction lives in agent.report() behind report_seed_ablation. See
 docs/training_and_dream_loop.md 11+13.
@@ -107,8 +110,35 @@ def _select_columns(S, Nw, ncol):
     return list(zip(ss.tolist(), ws.tolist()))
 
 
+def _to_px_fn(world_img, tile_size):
+    """Return a (x, y)-tile -> pixel mapper for the rendered world (or identity
+    in tile coords when no world image is available)."""
+    if world_img is not None:
+        img_h = world_img.shape[0]
+        def to_px(p):
+            px = p[..., 0] * tile_size + tile_size // 2
+            py = img_h - (p[..., 1] * tile_size + tile_size // 2)
+            return np.stack([px, py], axis=-1)
+    else:
+        def to_px(p):
+            return p.astype(float)
+    return to_px
+
+
+def _draw_real_traj(ax, start_xy2, future_xy, to_px):
+    """Bold cyan real trajectory (start prepended) + cyan start marker."""
+    real_path = np.concatenate([start_xy2[None], future_xy])
+    fp = to_px(real_path)
+    ax.plot(fp[:, 0], fp[:, 1], '-', color='#00e5ff', linewidth=2.6,
+            alpha=0.95, zorder=4,
+            path_effects=[pe.Stroke(linewidth=4.6, foreground='black'),
+                          pe.Normal()])
+    ax.plot(fp[0, 0], fp[0, 1], 'o', color='#00e5ff', markersize=9,
+            markeredgecolor='white', markeredgewidth=1.4, zorder=6)
+
+
 def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
-                        n_cols=4):
+                        n_cols=4, warmups=None):
     """4xN grid of decoded dream trajectories: rows = conditions (A/B/C/D),
     columns = distinct example dreams (each a different start/warmup seed frame).
 
@@ -123,16 +153,7 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     if not cols:
         return
     world_img, env_seed, tile_size = _render_world(metadata)
-
-    if world_img is not None:
-        img_h, img_w = world_img.shape[:2]
-        def to_px(p):
-            px = p[..., 0] * tile_size + tile_size // 2
-            py = img_h - (p[..., 1] * tile_size + tile_size // 2)
-            return np.stack([px, py], axis=-1)
-    else:
-        def to_px(p):
-            return p.astype(float)
+    to_px = _to_px_fn(world_img, tile_size)
 
     # Shared zoom bounds over every position that will be drawn.
     dream_xy = np.stack([decoded[c][s, w] for c in CONDITIONS
@@ -166,22 +187,14 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                             color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
                             alpha=0.55, zorder=3)
 
-            # Real trajectory (ground truth): prepend the real start so the line
-            # begins exactly at the marker. Bold cyan with a dark stroke to stand
-            # out against both the warm plasma dreams and the world map.
-            real_path = np.concatenate([start_pos[s, w][None], future_pos[s, w]])
-            fp = to_px(real_path)
-            ax.plot(fp[:, 0], fp[:, 1], '-', color='#00e5ff', linewidth=2.6,
-                    alpha=0.95, zorder=4,
-                    path_effects=[pe.Stroke(linewidth=4.6, foreground='black'),
-                                  pe.Normal()])
-            ax.plot(fp[0, 0], fp[0, 1], 'o', color='#00e5ff', markersize=9,
-                    markeredgecolor='white', markeredgewidth=1.4, zorder=6)
+            # Real trajectory (ground truth): bold cyan starting at the marker.
+            _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px)
 
             ax.set_xlim(xlo, xhi)
             ax.set_ylim(yhi, ylo)
             if ri == 0:
-                ax.set_title(f'dream {ci + 1}  (start {s}, warmup {w})',
+                wlab = int(warmups[w]) if warmups is not None else w
+                ax.set_title(f'dream {ci + 1}  (start {s}, warmup {wlab})',
                              fontsize=9, color=txt)
             if ci == 0:
                 ax.set_ylabel(LABELS[c], fontsize=9, color=txt)
@@ -207,6 +220,80 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     fig.savefig(out, dpi=150, bbox_inches='tight', facecolor=fc)
     plt.close(fig)
     print(f"  Saved {out.name}")
+
+
+def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
+                           col_idx=0, fps=2, warmups=None):
+    """GIF: 1x4 condition panels for ONE example (start, warmup), stepping
+    through the seeds one dream at a time over the bold cyan real trajectory.
+
+    Uncluttered counterpart to the all-seeds grid — each frame is a single
+    stochastic dream so its shape vs the real path is legible. col_idx picks
+    which selected column (start/warmup) to animate.
+    """
+    try:
+        import io
+        from PIL import Image
+    except Exception as e:
+        print(f"  (gif skipped, Pillow unavailable: {e})")
+        return
+    S, Nw, Ns, Hp1, _ = decoded['A'].shape
+    cols = _select_columns(S, Nw, max(col_idx + 1, 1))
+    s, w = cols[min(col_idx, len(cols) - 1)]
+    wlab = int(warmups[w]) if warmups is not None else w
+    world_img, env_seed, tile_size = _render_world(metadata)
+    to_px = _to_px_fn(world_img, tile_size)
+
+    # Fixed bounds over all seeds of this example (across conditions) + real path.
+    dxy = np.concatenate([decoded[c][s, w].reshape(-1, 2) for c in CONDITIONS])
+    real_path = np.concatenate([start_pos[s, w][None], future_pos[s, w]])
+    allp = to_px(np.concatenate([dxy, real_path], axis=0))
+    pad = (tile_size * 4) if world_img is not None else 2
+    xlo, xhi = allp[:, 0].min() - pad, allp[:, 0].max() + pad
+    ylo, yhi = allp[:, 1].min() - pad, allp[:, 1].max() + pad
+
+    cmap = plt.cm.plasma
+    fc = '#1a1a1a' if world_img is not None else 'white'
+    txt = 'white' if world_img is not None else 'black'
+
+    frames = []
+    for k in range(Ns):
+        # Fixed figure size + dpi (no tight bbox) so every frame is identical px.
+        fig, axes = plt.subplots(1, 4, figsize=(16.8, 4.7), facecolor=fc)
+        for ax, c in zip(axes, CONDITIONS):
+            ax.set_facecolor(fc)
+            if world_img is not None:
+                ax.imshow((world_img * 0.6).astype(np.uint8))
+            _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px)
+            tp = to_px(decoded[c][s, w, k])                    # (Hp1, 2)
+            for t in range(Hp1 - 1):
+                ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
+                        color=cmap(t / max(Hp1 - 1, 1)), linewidth=2.2,
+                        alpha=0.95, zorder=3)
+            ax.plot(tp[-1, 0], tp[-1, 1], 's', color=cmap(1.0), markersize=7,
+                    markeredgecolor='white', markeredgewidth=0.8, zorder=5)
+            ax.set_title(LABELS[c], fontsize=9, color=txt)
+            ax.set_xlim(xlo, xhi)
+            ax.set_ylim(yhi, ylo)
+            if world_img is not None:
+                ax.set_xticks([]); ax.set_yticks([])
+            else:
+                ax.set_aspect('equal')
+        st = f'Dream seed {k + 1}/{Ns}  —  start {s}, warmup {wlab}'
+        st += f'  (world seed={env_seed})' if env_seed is not None else ''
+        fig.suptitle(st, fontsize=13, color=txt)
+        fig.subplots_adjust(left=0.01, right=0.99, top=0.90, bottom=0.02,
+                            wspace=0.05)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=110, facecolor=fc)
+        plt.close(fig)
+        buf.seek(0)
+        frames.append(Image.open(buf).convert('RGB'))
+
+    out = save_dir / 'decoded_dreams_animation.gif'
+    frames[0].save(out, save_all=True, append_images=frames[1:],
+                   duration=int(1000 / max(fps, 1)), loop=0)
+    print(f"  Saved {out.name} ({Ns} frames, start {s}/warmup {wlab})")
 
 
 def _band(ax, data, color, label, ls='-', central='median', shading='band'):
@@ -272,7 +359,7 @@ def _print_summary(dispA, distB, varC, realA, central):
 
 
 def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
-                    n_example_dreams=24):
+                    n_example_dreams=24, make_gif=True, gif_col=0, gif_fps=2):
     """Regenerate plots from a saved results pkl — no agent/rollouts/decode."""
     pkl_path = Path(pkl_path)
     save_dir = Path(save_dir)
@@ -290,7 +377,12 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if n_example_dreams > 0:
         plot_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
-                            r['metadata'], save_dir, n_cols=n_example_dreams)
+                            r['metadata'], save_dir, n_cols=n_example_dreams,
+                            warmups=warmups)
+    if make_gif:
+        animate_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
+                               r['metadata'], save_dir, col_idx=gif_col,
+                               fps=gif_fps, warmups=warmups)
     print(f"Done. Plots written to {save_dir}")
 
 
@@ -365,7 +457,8 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     if cfg.from_pkl:
         save_dir = Path(cfg.save_path or str(Path(cfg.from_pkl).parent))
         replot_from_pkl(cfg.from_pkl, save_dir, cfg.central, cfg.shading,
-                        cfg.n_example_dreams)
+                        cfg.n_example_dreams, cfg.make_gif, cfg.gif_col,
+                        cfg.gif_fps)
         return
 
     assert cfg.decoder_model, "Must provide --dream_seed_ablation.decoder_model"
@@ -475,7 +568,11 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if cfg.n_example_dreams > 0:
         plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
-                            n_cols=cfg.n_example_dreams)
+                            n_cols=cfg.n_example_dreams, warmups=warmups)
+    if cfg.make_gif:
+        animate_decoded_dreams(decoded, start_pos, future_pos, metadata,
+                               save_dir, col_idx=cfg.gif_col, fps=cfg.gif_fps,
+                               warmups=warmups)
 
     # 7. Save.
     results = {
