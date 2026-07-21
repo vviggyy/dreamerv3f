@@ -60,6 +60,7 @@ from pathlib import Path
 import elements
 import embodied
 import matplotlib
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -113,9 +114,9 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
 
     Every cell draws all seeds for that (condition, start, warmup), colored by
     dream step. Columns share their (start, warmup) across rows so conditions
-    are directly comparable within a column. Real future trajectory (shared
-    across conditions) is overlaid faintly. World-map overlay when available,
-    else tile coords.
+    are directly comparable within a column. The real trajectory (shared across
+    conditions) is drawn as a bold cyan line starting at the cyan start marker.
+    World-map overlay when available, else tile coords.
     """
     S, Nw, Ns, Hp1, _ = decoded['A'].shape
     cols = _select_columns(S, Nw, n_cols)
@@ -137,8 +138,9 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     dream_xy = np.stack([decoded[c][s, w] for c in CONDITIONS
                          for (s, w) in cols], axis=0)          # (C*ncol, Ns, Hp1, 2)
     real_xy = np.stack([future_pos[s, w] for (s, w) in cols], axis=0)
+    start_xy = np.stack([start_pos[s, w] for (s, w) in cols], axis=0)
     allp = to_px(np.concatenate(
-        [dream_xy.reshape(-1, 2), real_xy.reshape(-1, 2)], axis=0))
+        [dream_xy.reshape(-1, 2), real_xy.reshape(-1, 2), start_xy], axis=0))
     pad = (tile_size * 4) if world_img is not None else 2
     xlo, xhi = allp[:, 0].min() - pad, allp[:, 0].max() + pad
     ylo, yhi = allp[:, 1].min() - pad, allp[:, 1].max() + pad
@@ -157,19 +159,24 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
             if world_img is not None:
                 ax.imshow((world_img * 0.6).astype(np.uint8))
 
-            fp = to_px(future_pos[s, w])
-            ax.plot(fp[:, 0], fp[:, 1], '--', color='0.5', linewidth=1.2,
-                    alpha=0.45, zorder=2)
-
             for k in range(Ns):
                 tp = to_px(decoded[c][s, w, k])                # (Hp1, 2)
                 for t in range(Hp1 - 1):
                     ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
                             color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
                             alpha=0.55, zorder=3)
-            sp = to_px(start_pos[s, w][None])[0]   # real start (ground truth)
-            ax.plot(sp[0], sp[1], 'o', color='cyan', markersize=7,
-                    markeredgecolor='k', markeredgewidth=0.6, zorder=5)
+
+            # Real trajectory (ground truth): prepend the real start so the line
+            # begins exactly at the marker. Bold cyan with a dark stroke to stand
+            # out against both the warm plasma dreams and the world map.
+            real_path = np.concatenate([start_pos[s, w][None], future_pos[s, w]])
+            fp = to_px(real_path)
+            ax.plot(fp[:, 0], fp[:, 1], '-', color='#00e5ff', linewidth=2.6,
+                    alpha=0.95, zorder=4,
+                    path_effects=[pe.Stroke(linewidth=4.6, foreground='black'),
+                                  pe.Normal()])
+            ax.plot(fp[0, 0], fp[0, 1], 'o', color='#00e5ff', markersize=9,
+                    markeredgecolor='white', markeredgewidth=1.4, zorder=6)
 
             ax.set_xlim(xlo, xhi)
             ax.set_ylim(yhi, ylo)
