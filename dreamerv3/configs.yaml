@@ -90,6 +90,11 @@ defaults:
     load_checkpoint: True
     max_episodes: 0
 
+  inspect_replay:
+    save_path: ''
+    num_episodes: 5
+    num_batches: 2
+
   run:
     steps: 1e10
     duration: 0
@@ -167,6 +172,7 @@ defaults:
     report_gradnorms: False
     report_dream_feats: False
     report_seed_ablation: False
+    report_dump_batch: False   # emit dump/{deter,mu,sd,player_pos,image} for inspect_replay
     seed_ablation_nseeds: 16
     seed_ablation_warmup_stride: 1  # dense-warmup stride for the seed ablation
     seed_ablation_noise_mode: matched  # noise-deter null for C/D: matched (mu+sd*N), matched_relu (clip>=0), truncnorm (N>=0), shuffle (per-dim bootstrap of real deter; preserves marginal+nonneg)

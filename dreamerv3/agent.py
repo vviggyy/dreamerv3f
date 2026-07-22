@@ -355,6 +355,19 @@ class Agent(embodied.jax.Agent):
         carry, obs, prevact, training=False)
     mets.update(mets)
 
+    # Faithful report-batch dump: recomputed posterior deter (with the loaded
+    # checkpoint), the actual replay images, and the per-dim noise stats used by
+    # the seed ablation. Consumed by inspect_replay.py -> inspect_replay_deter nb.
+    if self.config.report_dump_batch:
+      rd = outs['repfeat']['deter']                    # (B, T, Dt)
+      metrics['dump/deter'] = rd
+      metrics['dump/mu'] = rd.mean((0, 1))
+      metrics['dump/sd'] = rd.std((0, 1))
+      if 'player_pos' in obs:
+        metrics['dump/player_pos'] = obs['player_pos']
+      if 'image' in obs:
+        metrics['dump/image'] = obs['image']
+
     # Grad norms
     if self.config.report_gradnorms:
       for key in self.scales:

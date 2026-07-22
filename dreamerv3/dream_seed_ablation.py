@@ -140,6 +140,18 @@ def _draw_real_traj(ax, start_xy2, future_xy, to_px):
             markeredgecolor='white', markeredgewidth=1.4, zorder=6)
 
 
+def _marker_handles(cmap):
+    """Legend proxies: real start (cyan), decoded start (plasma-0), decoded end
+    (plasma-max)."""
+    from matplotlib.lines import Line2D
+    mk = lambda m, fc, lab: Line2D([0], [0], marker=m, linestyle='none',
+                                   markerfacecolor=fc, markeredgecolor='white',
+                                   markersize=9, label=lab)
+    return [mk('o', '#00e5ff', 'real start'),
+            mk('o', cmap(0.0), 'decoded start'),
+            mk('s', cmap(1.0), 'decoded end')]
+
+
 def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                         n_cols=4, warmups=None):
     """4xN grid of decoded dream trajectories: rows = conditions (A/B/C/D),
@@ -190,6 +202,11 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                             color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
                             alpha=0.55, zorder=3)
 
+            # Decoded start (step 0) — shared across seeds; dark-purple circle.
+            ds = to_px(decoded[c][s, w, 0, 0][None])[0]
+            ax.plot(ds[0], ds[1], 'o', color=cmap(0.0), markersize=7,
+                    markeredgecolor='white', markeredgewidth=1.0, zorder=5)
+
             # Real trajectory (ground truth): bold cyan starting at the marker.
             _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px)
 
@@ -218,6 +235,9 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     cbar.set_label('Dream step', color=txt, fontsize=10)
     cbar.ax.yaxis.set_tick_params(color=txt)
     cbar.ax.tick_params(labelcolor=txt)
+    fig.legend(handles=_marker_handles(cmap), loc='lower center', ncol=3,
+               fontsize=9, facecolor='black', edgecolor='0.4', labelcolor=txt,
+               framealpha=0.6, bbox_to_anchor=(0.5, -0.01))
 
     out = save_dir / 'decoded_dreams_by_condition.png'
     fig.savefig(out, dpi=150, bbox_inches='tight', facecolor=fc)
@@ -273,8 +293,14 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                 ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
                         color=cmap(t / max(Hp1 - 1, 1)), linewidth=2.2,
                         alpha=0.95, zorder=3)
-            ax.plot(tp[-1, 0], tp[-1, 1], 's', color=cmap(1.0), markersize=7,
+            ax.plot(tp[0, 0], tp[0, 1], 'o', color=cmap(0.0), markersize=8,
+                    markeredgecolor='white', markeredgewidth=1.0, zorder=5)
+            ax.plot(tp[-1, 0], tp[-1, 1], 's', color=cmap(1.0), markersize=8,
                     markeredgecolor='white', markeredgewidth=0.8, zorder=5)
+            if c == CONDITIONS[0]:
+                ax.legend(handles=_marker_handles(cmap), loc='upper left',
+                          fontsize=7, facecolor='black', edgecolor='0.4',
+                          labelcolor=txt, framealpha=0.5)
             ax.set_title(LABELS[c], fontsize=9, color=txt)
             ax.set_xlim(xlo, xhi)
             ax.set_ylim(yhi, ylo)

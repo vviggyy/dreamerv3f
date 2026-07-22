@@ -11,6 +11,8 @@
 - `dreamerv3/dream_vs_future.py` — decodes policy-driven dream rollouts with a saved position decoder and compares them against the agent's *real future* trajectory from the same replay start (exported as `dream/future_pos` in report). Produces a divergence-vs-horizon curve (Manhattan tiles) with shuffled-future chance baseline. Uses policy actions (not real actions), so divergence conflates dynamics drift + policy/behavior mismatch — by design. Does NOT require `include_position` (player_pos is carried in obs for logging, never fed to the encoder)
 - `dreamerv3/dream_seed_ablation.py` — four-condition dream **seeding** ablation (crossed 2×2: `deter ∈ {real, noise}` × `stoch ∈ {posterior(image), prior}`). A=both (current), B=just-latent, C=just-image (noise deter+real image), D=neither (noise). Seed construction lives in `agent.report()` behind `agent.report_seed_ablation`; uses `RSSM.post_from_deter` to inject an arbitrary deter into the posterior. Each seed tiled `seed_ablation_nseeds` times → cross-seed variability. Decodes every dreamed latent with the saved position decoder. Produces `seed_ablation_curves.png` (3 panels: displacement-from-own-start, distance-from-real-start, cross-seed variability). Full walkthrough in `docs/training_and_dream_loop.md` §11+§13
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
+- `dreamerv3/inspect_replay.py` — dumps a **faithful** report-batch from the actual replay buffer (fresh eval rollouts → `make_stream('report')`): recomputed posterior deter (with the loaded checkpoint), the real replay images, player_pos, and the exact per-dim `mu`/`sd` the seed ablation's noise deter is built from. Emitted via `agent.report_dump_batch` as `dump/{deter,mu,sd,player_pos,image}`. Saves `replay_batch.pkl` for `inspect_replay_deter.ipynb` (set `SOURCE='replay_dump'`). Distinct from reusing saved trajectories (which record deter from eval_trajectory's own rollout)
+- `dreamerv3/inspect_replay_deter.ipynb` — notebook to sample a report-style batch (from saved trajectories OR the faithful `replay_batch.pkl` via `SOURCE`), inspect the 16 sequence start locations + start frames on the world map, the per-dim deter `mu`/`sd`, the noise-null decode comparison (matched/matched_relu/truncnorm/shuffle/zero-mean), and per-sequence deter histograms
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
 - `dreamerv3/analyze_tuning.py` — tuning curve analysis: clustering, metric-space embedding, distributions. Three modes: `autocorr` (PCA/t-SNE/UMAP on autocorrelation maps + HDBSCAN), `metrics` (Isomap on per-neuron feature vectors), `distributions` (per-metric histogram + example tuning curves at quantile positions). Loads `tuning_results.pkl`. Requires `umap-learn` and `hdbscan` for full autocorr pipeline (graceful fallback to PCA+t-SNE if missing)
 - `dreamerv3/manifold_analysis.py` — neural manifold analysis: sRSA (spatial structure in reps), Isomap (2D manifold visualization), SW distance (dream-to-wake proximity). Compares wake vs dream activations on dyn/deter and dyn/stoch layers
@@ -206,6 +208,19 @@ python dreamerv3/main.py \
   --jax.platform cpu
 ```
 Output format is identical to eval_trajectory — run decode_position/tuning_curve on the output as usual. Key args: `--replay_activations.max_episodes N` (0=all), `--replay_activations.load_checkpoint {True,False}`.
+
+### inspect replay (faithful report-batch dump)
+```
+python dreamerv3/main.py \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
+  --script inspect_replay \
+  --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
+  --inspect_replay.save_path ./logdir/my_run/replay_inspection \
+  --inspect_replay.num_episodes 5 --inspect_replay.num_batches 2 \
+  --seed 45 --jax.platform cpu
+```
+Dumps `replay_batch.pkl` (recomputed posterior deter + real replay images + player_pos + per-dim mu/sd) from the actual replay report stream. Load it in `inspect_replay_deter.ipynb` with `SOURCE='replay_dump'`. Match the training run's activations (pass `--agent.*.act` from `hyperparams.txt`) and env flags, same as the seed-ablation runner. Needs the same agent-block inheritance as other INFERENCE_SCRIPTS.
 
 ### plot training progress
 ```
