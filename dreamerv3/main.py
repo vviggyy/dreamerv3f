@@ -162,6 +162,7 @@ def main(argv=None):
         'agent.report_seed_ablation': True,
         'agent.seed_ablation_nseeds': config.dream_seed_ablation.n_seeds,
         'agent.seed_ablation_warmup_stride': config.dream_seed_ablation.warmup_stride,
+        'agent.seed_ablation_noise_mode': config.dream_seed_ablation.noise_mode,
         'agent.dream_warmup': config.dream_seed_ablation.warmup,
         'agent.dream_horizon': config.dream_seed_ablation.horizon,
     })

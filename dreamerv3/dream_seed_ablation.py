@@ -7,9 +7,12 @@ Four conditions form a clean crossed 2x2 over the seed carry {deter, stoch}:
   real deter      A. both (current)          B. just-latent
   noise deter     C. just-image              D. neither
 
-  - deter is either the real posterior deter or a matched-stats noise deter
-    (per-dim Gaussian from real posterior deter stats). A/B share the real deter;
-    C/D share the SAME noise draw.
+  - deter is either the real posterior deter or a noise deter. A/B share the
+    real deter; C/D share the SAME noise draw. The noise null is set by
+    --dream_seed_ablation.noise_mode: matched (mu+sd*N, default; can go negative,
+    off the relu manifold), matched_relu (clipped >=0), truncnorm (N(mu,sd)>=0),
+    or shuffle (per-dim bootstrap of real deter — exact marginal + non-negative,
+    correlations destroyed). Requires a fresh run (baked into the rollout).
   - stoch is either the posterior inferred from the real seed frame
     (posterior(deter, image)) or the dynamics prior _prior(deter) (no image).
 
@@ -583,6 +586,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         'S': S, 'Nw': Nw, 'n_seeds': Ns, 'H': H, 'Hp1': Hp1,
         'decoder_path': str(cfg.decoder_model), 'decoder_metadata': dec_meta,
         'metadata': metadata, 'conditions': CONDITIONS, 'labels': LABELS,
+        'noise_mode': cfg.noise_mode,
     }
     with open(save_dir / 'dream_seed_ablation_results.pkl', 'wb') as f:
         pickle.dump(results, f)
@@ -598,6 +602,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                   'warmup_stride': cfg.warmup_stride, 'horizon': cfg.horizon,
                   'central': cfg.central, 'shading': cfg.shading,
                   'n_example_dreams': cfg.n_example_dreams,
+                  'noise_mode': cfg.noise_mode,
                   'from_checkpoint': args.from_checkpoint},
             outputs=['seed_ablation_curves.png', 'error_vs_warmup.png',
                      'decoded_dreams_by_condition.png',

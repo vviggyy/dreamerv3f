@@ -82,6 +82,7 @@ defaults:
     make_gif: True        # also emit decoded_dreams_animation.gif: 1x4 conditions, one seed (dream) at a time over the real trajectory
     gif_col: 0            # which example column (start/warmup) to animate in the gif (0-indexed into the selected columns)
     gif_fps: 2            # gif frame rate (frames = n_seeds)
+    noise_mode: matched   # noise-deter null for conditions C/D: matched | matched_relu | truncnorm | shuffle
 
   replay_activations:
     source_data: ''
@@ -168,6 +169,7 @@ defaults:
     report_seed_ablation: False
     seed_ablation_nseeds: 16
     seed_ablation_warmup_stride: 1  # dense-warmup stride for the seed ablation
+    seed_ablation_noise_mode: matched  # noise-deter null for C/D: matched (mu+sd*N), matched_relu (clip>=0), truncnorm (N>=0), shuffle (per-dim bootstrap of real deter; preserves marginal+nonneg)
     dream_warmup: 0   # dream_vs_future: observed steps before dream (0->T//2). seed ablation: 0->dense over all warmups, N>0->single warmup N
     dream_horizon: 0  # report dream rollout length (0 -> imag_length). W+H<=report_length
     record_activations: False

@@ -460,11 +460,30 @@ class Agent(embodied.jax.Agent):
       f2 = lambda x: x[:, idx].reshape((RB * Nw, *x.shape[2:]))
       rdf = f2(rp['deter'])                                 # (RB*Nw, Dt) real deter
       tok = f2(outs['tokens'][:RB])                         # (RB*Nw, tok)
-      # Matched-stats noise deter (per-dim Gaussian from real posterior deter);
-      # C and D share this exact draw.
-      allrd = f32(outs['repfeat']['deter'])
+      # Noise deter null for C/D (they share this exact draw). Four modes:
+      #  matched     : mu + sd*N  (per-dim Gaussian; can go negative, off relu manifold)
+      #  matched_relu: relu(mu + sd*N)  (clipped non-negative)
+      #  truncnorm   : N(mu, sd) truncated to >=0  (non-negative, per-dim marginal-ish)
+      #  shuffle     : per-dim bootstrap of real deter values  (exact marginal + nonneg,
+      #                correlations destroyed)
+      allrd = f32(outs['repfeat']['deter'])                # (B, T, Dt)
       mu, sd = allrd.mean((0, 1)), allrd.std((0, 1))
-      nd = nn.cast(mu + sd * jax.random.normal(nj.seed(), rdf.shape, f32))
+      mode = self.config.seed_ablation_noise_mode
+      if mode == 'matched':
+        nd = mu + sd * jax.random.normal(nj.seed(), rdf.shape, f32)
+      elif mode == 'matched_relu':
+        nd = jnp.maximum(mu + sd * jax.random.normal(nj.seed(), rdf.shape, f32), 0.0)
+      elif mode == 'truncnorm':
+        lo = (0.0 - mu) / (sd + 1e-8)                       # per-dim lower in std units
+        zt = jax.random.truncated_normal(nj.seed(), lo, 1e9, rdf.shape, f32)
+        nd = mu + sd * zt
+      elif mode == 'shuffle':
+        pool = allrd.reshape((-1, allrd.shape[-1]))         # (B*T, Dt)
+        idx = jax.random.randint(nj.seed(), rdf.shape, 0, pool.shape[0])
+        nd = jnp.take_along_axis(pool, idx, axis=0)         # per-dim resample
+      else:
+        raise ValueError(f'unknown seed_ablation_noise_mode: {mode}')
+      nd = nn.cast(nd)
 
       logits = {
           'A': f2(rp['logit']),
