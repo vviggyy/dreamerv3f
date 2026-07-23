@@ -147,9 +147,19 @@ def _marker_handles(cmap):
     mk = lambda m, fc, lab: Line2D([0], [0], marker=m, linestyle='none',
                                    markerfacecolor=fc, markeredgecolor='white',
                                    markersize=9, label=lab)
-    return [mk('o', '#00e5ff', 'real start'),
-            mk('o', cmap(0.0), 'decoded start'),
-            mk('s', cmap(1.0), 'decoded end')]
+    ring = Line2D([0], [0], marker='o', linestyle='none', markerfacecolor='none',
+                  markeredgecolor='magenta', markeredgewidth=2.2, markersize=12,
+                  label='decoded start')  # hollow ring (sits over real start for A/B)
+    return [mk('o', '#00e5ff', 'real start'), ring, mk('s', cmap(1.0), 'decoded end')]
+
+
+def _draw_decoded_start(ax, xy2, to_px):
+    """Decoded seed position as a hollow ring on top — visible even when it lands
+    exactly on the cyan real-start marker (the A/B case)."""
+    p = to_px(xy2[None])[0]
+    ax.plot(p[0], p[1], 'o', markerfacecolor='none', markeredgecolor='magenta',
+            markersize=13, markeredgewidth=2.2, zorder=7,
+            path_effects=[pe.Stroke(linewidth=3.6, foreground='black'), pe.Normal()])
 
 
 def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
@@ -202,13 +212,10 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                             color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
                             alpha=0.55, zorder=3)
 
-            # Decoded start (step 0) — shared across seeds; dark-purple circle.
-            ds = to_px(decoded[c][s, w, 0, 0][None])[0]
-            ax.plot(ds[0], ds[1], 'o', color=cmap(0.0), markersize=7,
-                    markeredgecolor='white', markeredgewidth=1.0, zorder=5)
-
             # Real trajectory (ground truth): bold cyan starting at the marker.
             _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px)
+            # Decoded start (step 0, shared across seeds) as a magenta ring on top.
+            _draw_decoded_start(ax, decoded[c][s, w, 0, 0], to_px)
 
             ax.set_xlim(xlo, xhi)
             ax.set_ylim(yhi, ylo)
@@ -293,10 +300,9 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                 ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
                         color=cmap(t / max(Hp1 - 1, 1)), linewidth=2.2,
                         alpha=0.95, zorder=3)
-            ax.plot(tp[0, 0], tp[0, 1], 'o', color=cmap(0.0), markersize=8,
-                    markeredgecolor='white', markeredgewidth=1.0, zorder=5)
             ax.plot(tp[-1, 0], tp[-1, 1], 's', color=cmap(1.0), markersize=8,
                     markeredgecolor='white', markeredgewidth=0.8, zorder=5)
+            _draw_decoded_start(ax, decoded[c][s, w, k, 0], to_px)
             if c == CONDITIONS[0]:
                 ax.legend(handles=_marker_handles(cmap), loc='upper left',
                           fontsize=7, facecolor='black', edgecolor='0.4',
