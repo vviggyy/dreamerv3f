@@ -128,16 +128,23 @@ def _to_px_fn(world_img, tile_size):
     return to_px
 
 
-def _draw_real_traj(ax, start_xy2, future_xy, to_px):
-    """Bold cyan real trajectory (start prepended) + cyan start marker."""
+def _draw_real_traj(ax, start_xy2, future_xy, to_px, style='ghost'):
+    """Real trajectory + cyan start marker. style:
+      'bold'  — thick cyan on top (can occlude the dream when they track closely),
+      'ghost' — thin dashed cyan *under* the dream (default; dream stays visible),
+      'none'  — start marker only, no line."""
     real_path = np.concatenate([start_xy2[None], future_xy])
     fp = to_px(real_path)
-    ax.plot(fp[:, 0], fp[:, 1], '-', color='#00e5ff', linewidth=2.6,
-            alpha=0.95, zorder=4,
-            path_effects=[pe.Stroke(linewidth=4.6, foreground='black'),
-                          pe.Normal()])
-    ax.plot(fp[0, 0], fp[0, 1], 'o', color='#00e5ff', markersize=9,
-            markeredgecolor='white', markeredgewidth=1.4, zorder=6)
+    if style == 'bold':
+        ax.plot(fp[:, 0], fp[:, 1], '-', color='#00e5ff', linewidth=2.6,
+                alpha=0.95, zorder=4,
+                path_effects=[pe.Stroke(linewidth=4.6, foreground='black'),
+                              pe.Normal()])
+    elif style == 'ghost':
+        ax.plot(fp[:, 0], fp[:, 1], '--', color='#00e5ff', linewidth=1.4,
+                alpha=0.6, zorder=2)
+    ax.plot(fp[0, 0], fp[0, 1], 'o', color='#00e5ff', markersize=8,
+            markeredgecolor='white', markeredgewidth=1.2, zorder=6)
 
 
 def _marker_handles(cmap):
@@ -163,7 +170,7 @@ def _draw_decoded_start(ax, xy2, to_px):
 
 
 def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
-                        n_cols=4, warmups=None):
+                        n_cols=4, warmups=None, real_style='ghost'):
     """4xN grid of decoded dream trajectories: rows = conditions (A/B/C/D),
     columns = distinct example dreams (each a different start/warmup seed frame).
 
@@ -212,8 +219,8 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                             color=cmap(t / max(Hp1 - 1, 1)), linewidth=1.4,
                             alpha=0.55, zorder=3)
 
-            # Real trajectory (ground truth): bold cyan starting at the marker.
-            _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px)
+            # Real trajectory (ground truth): style set by real_style.
+            _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px, real_style)
             # Decoded start (step 0, shared across seeds) as a magenta ring on top.
             _draw_decoded_start(ax, decoded[c][s, w, 0, 0], to_px)
 
@@ -253,7 +260,7 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
 
 
 def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
-                           col_idx=0, fps=2, warmups=None):
+                           col_idx=0, fps=2, warmups=None, real_style='ghost'):
     """GIF: 1x4 condition panels for ONE example (start, warmup), stepping
     through the seeds one dream at a time over the bold cyan real trajectory.
 
@@ -294,7 +301,7 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
             ax.set_facecolor(fc)
             if world_img is not None:
                 ax.imshow((world_img * 0.6).astype(np.uint8))
-            _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px)
+            _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px, real_style)
             tp = to_px(decoded[c][s, w, k])                    # (Hp1, 2)
             for t in range(Hp1 - 1):
                 ax.plot(tp[t:t + 2, 0], tp[t:t + 2, 1], '-',
@@ -394,7 +401,8 @@ def _print_summary(dispA, distB, varC, realA, central):
 
 
 def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
-                    n_example_dreams=24, make_gif=True, gif_col=0, gif_fps=2):
+                    n_example_dreams=24, make_gif=True, gif_col=0, gif_fps=2,
+                    real_style='ghost'):
     """Regenerate plots from a saved results pkl — no agent/rollouts/decode."""
     pkl_path = Path(pkl_path)
     save_dir = Path(save_dir)
@@ -413,11 +421,11 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
     if n_example_dreams > 0:
         plot_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
                             r['metadata'], save_dir, n_cols=n_example_dreams,
-                            warmups=warmups)
+                            warmups=warmups, real_style=real_style)
     if make_gif:
         animate_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
                                r['metadata'], save_dir, col_idx=gif_col,
-                               fps=gif_fps, warmups=warmups)
+                               fps=gif_fps, warmups=warmups, real_style=real_style)
     print(f"Done. Plots written to {save_dir}")
 
 
@@ -493,7 +501,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         save_dir = Path(cfg.save_path or str(Path(cfg.from_pkl).parent))
         replot_from_pkl(cfg.from_pkl, save_dir, cfg.central, cfg.shading,
                         cfg.n_example_dreams, cfg.make_gif, cfg.gif_col,
-                        cfg.gif_fps)
+                        cfg.gif_fps, cfg.real_style)
         return
 
     assert cfg.decoder_model, "Must provide --dream_seed_ablation.decoder_model"
@@ -603,11 +611,12 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if cfg.n_example_dreams > 0:
         plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
-                            n_cols=cfg.n_example_dreams, warmups=warmups)
+                            n_cols=cfg.n_example_dreams, warmups=warmups,
+                            real_style=cfg.real_style)
     if cfg.make_gif:
         animate_decoded_dreams(decoded, start_pos, future_pos, metadata,
                                save_dir, col_idx=cfg.gif_col, fps=cfg.gif_fps,
-                               warmups=warmups)
+                               warmups=warmups, real_style=cfg.real_style)
 
     # 7. Save.
     results = {
