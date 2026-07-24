@@ -511,6 +511,14 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         elements.Path(args.logdir) / 'dream_seed_ablation'))
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Optional: dump raw dream deter per condition for manifold_analysis.py.
+    # We stream each batch to disk (per-condition .npy) so peak RAM is one batch,
+    # then concatenate into dream_deter_{cond}.pkl at the end. NOT subsampled.
+    act_dir = None
+    if cfg.save_activations:
+        act_dir = save_dir / 'dream_activations_tmp'
+        act_dir.mkdir(parents=True, exist_ok=True)
+
     # 1. Agent + checkpoint (params only, skipping opt/ — see dream_vs_future).
     print("Creating agent...")
     agent = make_agent()
@@ -582,7 +590,12 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                   "and does obs carry player_pos?")
             return
         for c in CONDITIONS:
-            decoded[c].append(decode(np.array(mets[f'seedabl/{c}/deter'])))
+            raw = np.array(mets[f'seedabl/{c}/deter'])  # (RB, Nw, Nseed, H+1, Dt)
+            decoded[c].append(decode(raw))
+            if act_dir is not None:
+                # collapse the start axes -> (N, H+1, Dt), N = RB*Nw*Nseed
+                flat = raw.reshape(-1, *raw.shape[3:]).astype(np.float32)
+                np.save(act_dir / f'{c}_b{b}.npy', flat)
         starts.append(np.array(mets['seedabl/start_pos']))    # (RB, Nw, 2)
         futures.append(np.array(mets['seedabl/future_pos']))  # (RB, Nw, H, 2)
         if warmups is None:
@@ -595,6 +608,35 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     future_pos = np.concatenate(futures, axis=0)         # (S, Nw, H, 2)
     S, Nw, Ns, Hp1, _ = decoded['A'].shape
     H = future_pos.shape[2]
+
+    # Finalize raw-deter dumps: concat per-batch .npy -> dream_deter_{cond}.pkl
+    # (one condition in RAM at a time). Format matches manifold_analysis.py's
+    # loader (key 'dream_deter', shape (N, H+1, D) flattened to (N*(H+1), D)).
+    if act_dir is not None:
+        print("Saving raw dream deter per condition (for manifold analysis)...")
+        for c in CONDITIONS:
+            parts = [np.load(act_dir / f'{c}_b{b}.npy')
+                     for b in range(cfg.num_batches)]
+            arr = np.concatenate(parts, axis=0)  # (N_total, H+1, Dt)
+            del parts
+            out = save_dir / f'dream_deter_{c}.pkl'
+            with open(out, 'wb') as f:
+                pickle.dump({
+                    'dream_deter': arr,
+                    'dream_deter_shape': arr.shape,
+                    'condition': c, 'label': LABELS.get(c, c),
+                    'horizon': int(H), 'warmups': warmups,
+                    'metadata': metadata, 'decoder_path': str(cfg.decoder_model),
+                }, f)
+            print(f"  {c} ({LABELS.get(c, c)}): {out.name}  "
+                  f"shape={arr.shape}  {arr.nbytes / 1e9:.1f} GB")
+            del arr
+            for b in range(cfg.num_batches):
+                (act_dir / f'{c}_b{b}.npy').unlink()
+        try:
+            act_dir.rmdir()
+        except OSError:
+            pass
     print(f"Pooled {S} start rows x {Nw} warmups {list(warmups)} x {Ns} seeds, "
           f"H+1={Hp1}")
 

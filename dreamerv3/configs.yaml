@@ -84,6 +84,7 @@ defaults:
     gif_fps: 2            # gif frame rate (frames = n_seeds)
     noise_mode: matched   # noise-deter null for conditions C/D: matched | matched_relu | truncnorm | shuffle
     real_style: ghost     # real trajectory in decoded-dream plots: bold (on top) | ghost (thin dashed under dream) | none
+    save_activations: False  # also dump raw dream deter per condition -> dream_deter_{A,B,C,D}.pkl (key 'dream_deter', shape (N,H+1,D)) for manifold_analysis.py. streams per-batch to disk (bounded RAM)
 
   replay_activations:
     source_data: ''
