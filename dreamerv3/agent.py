@@ -347,7 +347,7 @@ class Agent(embodied.jax.Agent):
     carry, obs, prevact, _ = self._apply_replay_context(carry, data)
     (enc_carry, dyn_carry, dec_carry) = carry
     B, T = obs['is_first'].shape
-    RB = min(6, B)
+    RB = min(self.config.report_batch_size, B)
     metrics = {}
 
     # Train metrics
@@ -379,44 +379,52 @@ class Agent(embodied.jax.Agent):
         except KeyError:
           print(f'Skipping gradnorm summary for missing loss: {key}')
 
-    # Open loop
-    firsthalf = lambda xs: jax.tree.map(lambda x: x[:RB, :T // 2], xs)
-    secondhalf = lambda xs: jax.tree.map(lambda x: x[:RB, T // 2:], xs)
-    dyn_carry = jax.tree.map(lambda x: x[:RB], dyn_carry)
-    dec_carry = jax.tree.map(lambda x: x[:RB], dec_carry)
-    dyn_carry, _, obsfeat = self.dyn.observe(
-        dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact),
-        firsthalf(obs['is_first']), training=False)
-    _, imgfeat, _ = self.dyn.imagine(
-        dyn_carry, secondhalf(prevact), length=T - T // 2, training=False)
-    dec_carry, _, obsrecons = self.dec(
-        dec_carry, obsfeat, firsthalf(obs['is_first']), training=False)
-    dec_carry, _, imgrecons = self.dec(
-        dec_carry, imgfeat, jnp.zeros_like(secondhalf(obs['is_first'])),
-        training=False)
+    # Open loop. obsfeat (posterior over the first half) both feeds the openloop
+    # reconstruction video AND seeds the report_dream_feats block below, so
+    # compute it whenever either is requested. The second-half imagine, the two
+    # decodes, and the video assembly are openloop-only — skip them
+    # (report_openloop=False) for the pure seed-ablation pipeline, which discards
+    # the video and never touches obsfeat (it seeds from outs['repfeat']).
+    if self.config.report_openloop or self.config.report_dream_feats:
+      firsthalf = lambda xs: jax.tree.map(lambda x: x[:RB, :T // 2], xs)
+      secondhalf = lambda xs: jax.tree.map(lambda x: x[:RB, T // 2:], xs)
+      dyn_carry = jax.tree.map(lambda x: x[:RB], dyn_carry)
+      dec_carry = jax.tree.map(lambda x: x[:RB], dec_carry)
+      dyn_carry, _, obsfeat = self.dyn.observe(
+          dyn_carry, firsthalf(outs['tokens']), firsthalf(prevact),
+          firsthalf(obs['is_first']), training=False)
 
-    # Video preds
-    for key in self.dec.imgkeys:
-      assert obs[key].dtype == jnp.uint8
-      true = obs[key][:RB]
-      pred = jnp.concatenate([obsrecons[key].pred(), imgrecons[key].pred()], 1)
-      pred = jnp.clip(pred * 255, 0, 255).astype(jnp.uint8)
-      error = ((i32(pred) - i32(true) + 255) / 2).astype(np.uint8)
-      video = jnp.concatenate([true, pred, error], 2)
+    if self.config.report_openloop:
+      _, imgfeat, _ = self.dyn.imagine(
+          dyn_carry, secondhalf(prevact), length=T - T // 2, training=False)
+      dec_carry, _, obsrecons = self.dec(
+          dec_carry, obsfeat, firsthalf(obs['is_first']), training=False)
+      dec_carry, _, imgrecons = self.dec(
+          dec_carry, imgfeat, jnp.zeros_like(secondhalf(obs['is_first'])),
+          training=False)
 
-      video = jnp.pad(video, [[0, 0], [0, 0], [2, 2], [2, 2], [0, 0]])
-      mask = jnp.zeros(video.shape, bool).at[:, :, 2:-2, 2:-2, :].set(True)
-      border = jnp.full((T, 3), jnp.array([0, 255, 0]), jnp.uint8)
-      border = border.at[T // 2:].set(jnp.array([255, 0, 0], jnp.uint8))
-      video = jnp.where(mask, video, border[None, :, None, None, :])
-      video = jnp.concatenate([video, 0 * video[:, :10]], 1)
+      # Video preds
+      for key in self.dec.imgkeys:
+        assert obs[key].dtype == jnp.uint8
+        true = obs[key][:RB]
+        pred = jnp.concatenate([obsrecons[key].pred(), imgrecons[key].pred()], 1)
+        pred = jnp.clip(pred * 255, 0, 255).astype(jnp.uint8)
+        error = ((i32(pred) - i32(true) + 255) / 2).astype(np.uint8)
+        video = jnp.concatenate([true, pred, error], 2)
 
-      # NB: use local names here — unpacking into B, T, H, W would clobber the
-      # outer T (report_length) with the padded video length and poison every
-      # dream block below (they'd use T//2 of the video, not the sequence).
-      vB, vT, vH, vW, vC = video.shape
-      grid = video.transpose((1, 2, 0, 3, 4)).reshape((vT, vH, vB * vW, vC))
-      metrics[f'openloop/{key}'] = grid
+        video = jnp.pad(video, [[0, 0], [0, 0], [2, 2], [2, 2], [0, 0]])
+        mask = jnp.zeros(video.shape, bool).at[:, :, 2:-2, 2:-2, :].set(True)
+        border = jnp.full((T, 3), jnp.array([0, 255, 0]), jnp.uint8)
+        border = border.at[T // 2:].set(jnp.array([255, 0, 0], jnp.uint8))
+        video = jnp.where(mask, video, border[None, :, None, None, :])
+        video = jnp.concatenate([video, 0 * video[:, :10]], 1)
+
+        # NB: use local names here — unpacking into B, T, H, W would clobber the
+        # outer T (report_length) with the padded video length and poison every
+        # dream block below (they'd use T//2 of the video, not the sequence).
+        vB, vT, vH, vW, vC = video.shape
+        grid = video.transpose((1, 2, 0, 3, 4)).reshape((vT, vH, vB * vW, vC))
+        metrics[f'openloop/{key}'] = grid
 
     # Horizon H shared by the report dream analyses (0 -> imag_length). NB: T here
     # is the sequence length (report_length); the openloop video loop above no

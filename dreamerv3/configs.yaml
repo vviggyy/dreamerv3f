@@ -170,6 +170,8 @@ defaults:
     repval_loss: True
     repval_grad: True
     report: True
+    report_batch_size: 6  # # replay sequences dreamed from in report() (dream/seed-ablation blocks); memory ~ linear in this. min'd against batch_size
+    report_openloop: True  # compute the openloop reconstruction video in report(). auto-disabled for the dream pipelines (main.py) — video is discarded there
     report_gradnorms: False
     report_dream_feats: False
     report_seed_ablation: False

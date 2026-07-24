@@ -133,7 +133,10 @@ def main(argv=None):
         args)
 
   elif config.script == 'dream_decode':
-    config = config.update({'agent.report_dream_feats': True})
+    config = config.update({
+        'agent.report_dream_feats': True,
+        'agent.report_openloop': False,  # discard the reconstruction video
+    })
     from . import dream_decode
     dream_decode.dream_decode(
         bind(make_agent, config),
@@ -146,6 +149,7 @@ def main(argv=None):
   elif config.script == 'dream_vs_future':
     config = config.update({
         'agent.report_dream_feats': True,
+        'agent.report_openloop': False,  # discard the reconstruction video
         'agent.dream_warmup': config.dream_vs_future.warmup,
         'agent.dream_horizon': config.dream_vs_future.horizon,
     })
@@ -161,6 +165,7 @@ def main(argv=None):
   elif config.script == 'dream_seed_ablation':
     config = config.update({
         'agent.report_seed_ablation': True,
+        'agent.report_openloop': False,  # discard the reconstruction video
         'agent.seed_ablation_nseeds': config.dream_seed_ablation.n_seeds,
         'agent.seed_ablation_warmup_stride': config.dream_seed_ablation.warmup_stride,
         'agent.seed_ablation_noise_mode': config.dream_seed_ablation.noise_mode,
