@@ -445,28 +445,34 @@ def plot_sw_histogram(min_dists, median_sw, neural_bins, layer_name, save_dir):
     if n_nan > 0:
         print(f"  WARNING: {n_nan}/{len(min_dists)} SW distances are NaN (zero-vector cosine)")
 
+    # Cosine distance on non-negative (relu) activations is bounded to [0, 1];
+    # fix the distance axis + bins there so plots are comparable across runs.
+    sw_bins = np.linspace(0.0, 1.0, 51)
+
     # Left panel: thin vertical column (pRNN sleepdistPanel style)
     ax = axes[0]
     if len(finite_dists) > 0:
-        n, bins = np.histogram(finite_dists, bins=neural_bins)
+        n, bins = np.histogram(finite_dists, bins=sw_bins)
         n_total = n.sum()
         n = n / n_total if n_total > 0 else n
         ax.imshow(np.expand_dims(n, axis=1), origin='lower', aspect='auto',
-                  extent=(0, 0.1, neural_bins[0], neural_bins[-1]),
+                  extent=(0, 0.1, 0.0, 1.0),
                   cmap='binary', interpolation='none')
     ax.set_xlabel('S-W', fontsize=9)
     ax.set_ylabel('Neural distance (cosine)', fontsize=10)
+    ax.set_ylim(0.0, 1.0)
     ax.xaxis.set_ticklabels([])
 
     # Right panel: regular histogram with median line
     ax = axes[1]
     if len(finite_dists) > 0:
-        ax.hist(finite_dists, bins=50, color='#ff6666', edgecolor='#cc3333', alpha=0.8,
-                orientation='horizontal')
+        ax.hist(finite_dists, bins=sw_bins, color='#ff6666', edgecolor='#cc3333',
+                alpha=0.8, orientation='horizontal')
     ax.axhline(median_sw, color='cyan', linestyle='--', linewidth=2,
                label=f'median = {median_sw:.4f}')
     ax.set_xlabel('Count', fontsize=10)
     ax.set_ylabel('')
+    ax.set_ylim(0.0, 1.0)
     ax.legend(fontsize=9, facecolor='#333333', edgecolor='grey',
               labelcolor='white')
 
@@ -510,16 +516,18 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
     ax.set_xlabel('Spatial dist', fontsize=9)
     ax.set_ylabel('Neural dist (cosine)', fontsize=9)
 
-    # Panel 2: SW distance column
+    # Panel 2: SW distance column (cosine dist on relu activations is in [0, 1])
     ax = axes[1]
     min_dists = r['sw_min_dists']
     finite_dists = min_dists[np.isfinite(min_dists)]
-    n, bins = np.histogram(finite_dists, bins=neural_bins) if len(finite_dists) > 0 else (np.zeros(len(neural_bins)-1), neural_bins)
+    sw_bins = np.linspace(0.0, 1.0, 51)
+    n, bins = np.histogram(finite_dists, bins=sw_bins) if len(finite_dists) > 0 else (np.zeros(len(sw_bins)-1), sw_bins)
     n_norm = n / max(n.sum(), 1)
     ax.imshow(np.expand_dims(n_norm, axis=1), origin='lower', aspect='auto',
-              extent=(0, 0.1, neural_bins[0], neural_bins[-1]),
+              extent=(0, 0.1, 0.0, 1.0),
               cmap='binary', interpolation='none')
     ax.set_xlabel('S-W', fontsize=9)
+    ax.set_ylim(0.0, 1.0)
     ax.yaxis.set_ticklabels([])
     ax.xaxis.set_ticklabels([])
 
