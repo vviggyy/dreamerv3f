@@ -26,10 +26,14 @@ and in the position decoder's space) — NOT the buffer's stored latents. Set
 
 Each seed is tiled Nseed times (stochastic rollouts) for cross-seed variability.
 Every dreamed latent step is decoded to (x, y) with a pretrained position decoder
-(Manhattan tiles). Plots (all conditions; real trajectory on A and B):
+(Manhattan tiles). Plots (all conditions; real trajectory on A, B and D):
   A) displacement from each condition's own start (every curve starts at 0)
   B) distance from the real start position
   C) cross-seed variability within each seed (no real curve)
+  D) step-to-step displacement (continuity): decoded Manhattan distance from the
+     previous tile at each dream step. Low + flat = spatially continuous dream;
+     large early values = teleporting/incoherent decode. Best read with
+     central=mean (median collapses to 0 since most steps move 0-1 tiles).
   + error_vs_warmup: final-step distance-from-real-start as a function of warmup
   + decoded_dreams_by_condition: 4xN grid on the world map (rows = conditions
     A/B/C/D, columns = distinct example dreams / seed frames), all seeds drawn
@@ -60,6 +64,7 @@ Usage:
 """
 
 import pickle
+import warnings
 from functools import partial as bind
 from pathlib import Path
 
@@ -345,14 +350,18 @@ def _band(ax, data, color, label, ls='-', central='median', shading='band'):
     shading: 'band' (filled region), 'bars' (error bars), or 'none' (line only).
     """
     steps = np.arange(data.shape[1])
-    if central == 'mean':
-        mid = np.nanmean(data, axis=0)
-        sd = np.nanstd(data, axis=0)
-        lo, hi = mid - sd, mid + sd
-    else:
-        mid = np.nanmedian(data, axis=0)
-        lo = np.nanpercentile(data, 25, axis=0)
-        hi = np.nanpercentile(data, 75, axis=0)
+    # Continuity panels pass an all-NaN step-0 column (no predecessor); nan-agg
+    # over it is intentional and yields NaN (skipped by plot). Silence the noise.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        if central == 'mean':
+            mid = np.nanmean(data, axis=0)
+            sd = np.nanstd(data, axis=0)
+            lo, hi = mid - sd, mid + sd
+        else:
+            mid = np.nanmedian(data, axis=0)
+            lo = np.nanpercentile(data, 25, axis=0)
+            hi = np.nanpercentile(data, 75, axis=0)
     if shading == 'bars':
         ax.errorbar(steps, mid, yerr=[mid - lo, hi - mid], fmt=ls, color=color,
                     linewidth=2.0, label=label, capsize=2, elinewidth=1.0)
@@ -373,7 +382,7 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
     S, Nw, Ns, Hp1, _ = decoded['A'].shape
     _agg = np.nanmean if central == 'mean' else np.nanmedian
     rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
-    dispA, distB, varC, distB_by_w = {}, {}, {}, {}
+    dispA, distB, varC, distB_by_w, stepD = {}, {}, {}, {}, {}
     for c in CONDITIONS:
         pos = decoded[c]                                 # (S, Nw, Ns, H+1, 2)
         dA = _manhattan(pos, pos[:, :, :, :1, :])        # (S, Nw, Ns, H+1)
@@ -383,21 +392,37 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
         centroid = pos.mean(axis=2, keepdims=True)       # (S, Nw, 1, H+1, 2)
         varC[c] = _manhattan(pos, centroid).mean(axis=2).reshape(S * Nw, Hp1)
         distB_by_w[c] = _agg(dB[..., -1], axis=(0, 2))   # (Nw,)
+        # Step-to-step decoded displacement (continuity): distance from previous
+        # tile at each dream step. Step 0 has no predecessor -> NaN (keeps x-axis
+        # aligned 0..H with the other panels; nan-aggregation skips it).
+        step = _manhattan(pos[:, :, :, 1:, :], pos[:, :, :, :-1, :])  # (S,Nw,Ns,H)
+        stepD[c] = np.concatenate([
+            np.full((S, Nw, Ns, 1), np.nan), step], axis=3).reshape(S * Nw * Ns, Hp1)
     realA = np.concatenate([
         np.zeros((S, Nw, 1)),
         _manhattan(future_pos, start_pos[:, :, None, :]),      # (S, Nw, H)
     ], axis=2).reshape(S * Nw, Hp1)
-    return dispA, distB, varC, realA, distB_by_w
+    # Real ground-truth step distance for the continuity panel: consecutive
+    # Manhattan along [start, future_1..future_H]. No decoder jitter -> a floor.
+    real_path = np.concatenate([start_pos[:, :, None, :], future_pos], axis=2)  # (S,Nw,H+1,2)
+    realStep = np.concatenate([
+        np.full((S, Nw, 1), np.nan),
+        _manhattan(real_path[:, :, 1:, :], real_path[:, :, :-1, :]),  # (S, Nw, H)
+    ], axis=2).reshape(S * Nw, Hp1)
+    return dispA, distB, varC, realA, distB_by_w, stepD, realStep
 
 
-def _print_summary(dispA, distB, varC, realA, central):
+def _print_summary(dispA, distB, varC, realA, central, stepD=None, realStep=None):
     _agg = np.nanmean if central == 'mean' else np.nanmedian
     print(f"\n[summary] {central} final-step (H) values, pooled over warmups:")
     for c in CONDITIONS:
+        # step-dist pooled over ALL steps (continuity), not just the final step
+        sd = f"  step-dist={_agg(stepD[c]):5.2f}" if stepD is not None else ""
         print(f"  {c}: own-disp={_agg(dispA[c][:, -1]):5.2f}  "
               f"real-dist={_agg(distB[c][:, -1]):5.2f}  "
-              f"seed-var={_agg(varC[c][:, -1]):5.2f} tiles")
-    print(f"  real: own-disp={_agg(realA[:, -1]):5.2f} tiles")
+              f"seed-var={_agg(varC[c][:, -1]):5.2f}{sd} tiles")
+    rstep = f"  step-dist={_agg(realStep):5.2f}" if realStep is not None else ""
+    print(f"  real: own-disp={_agg(realA[:, -1]):5.2f}{rstep} tiles")
 
 
 def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
@@ -410,13 +435,14 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
     print(f"Replotting from {pkl_path} (central={central}, shading={shading})")
     with open(pkl_path, 'rb') as f:
         r = pickle.load(f)
-    dispA, distB, varC, realA, distB_by_w = compute_curves(
+    dispA, distB, varC, realA, distB_by_w, stepD, realStep = compute_curves(
         r['decoded'], r['start_pos'], r['future_pos'], central)
     warmups = r['warmups']
-    _print_summary(dispA, distB, varC, realA, central)
+    _print_summary(dispA, distB, varC, realA, central, stepD, realStep)
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
-                       central=central, shading=shading)
+                       central=central, shading=shading,
+                       stepD=stepD, realStep=realStep)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if n_example_dreams > 0:
         plot_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
@@ -430,9 +456,10 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
 
 
 def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
-                       central='median', shading='band'):
+                       central='median', shading='band', stepD=None, realStep=None):
     band = bind(_band, central=central, shading=shading)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2))
+    ncol = 4 if stepD is not None else 3
+    fig, axes = plt.subplots(1, ncol, figsize=(6 * ncol, 5.2))
 
     ax = axes[0]
     for c in CONDITIONS:
@@ -453,6 +480,15 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
         band(ax, varC[c], COLORS[c], LABELS[c])
     ax.set_title('C) cross-seed variability')
     ax.set_ylabel('Mean seed dispersion (tiles)')
+
+    if stepD is not None:
+        ax = axes[3]
+        for c in CONDITIONS:
+            band(ax, stepD[c], COLORS[c], LABELS[c])
+        if realStep is not None:
+            band(ax, realStep, 'black', 'real trajectory', ls='--')
+        ax.set_title('D) step-to-step displacement (continuity)')
+        ax.set_ylabel('Manhattan distance from previous tile (tiles)')
 
     for ax in axes:
         ax.set_xlabel('Dream step (0 = seed)')
@@ -642,14 +678,15 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
 
     # 5. Curves (pooled over start rows and warmups; Nseed drives variability).
     central = cfg.central
-    dispA, distB, varC, realA, distB_by_w = compute_curves(
+    dispA, distB, varC, realA, distB_by_w, stepD, realStep = compute_curves(
         decoded, start_pos, future_pos, central)
-    _print_summary(dispA, distB, varC, realA, central)
+    _print_summary(dispA, distB, varC, realA, central, stepD, realStep)
 
     # 6. Plots.
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
-                       central=central, shading=cfg.shading)
+                       central=central, shading=cfg.shading,
+                       stepD=stepD, realStep=realStep)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if cfg.n_example_dreams > 0:
         plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
