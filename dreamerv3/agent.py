@@ -197,12 +197,19 @@ class Agent(embodied.jax.Agent):
     else:
       enc_carry, enc_entries, tokens = self.enc(
           enc_carry, obs, reset, training)
-    # Visual input masking: on masked steps, use prior instead of posterior
+    # Visual input masking: on masked steps, use prior instead of posterior.
+    # `hit` marks the distinguished step; `invert` flips whether hit=image or
+    # hit=mask. Deterministic: hit every k steps (t%k==0). Probabilistic
+    # (mask_visual_prob): hit i.i.d. per step with P=1/(k+1), so under invert
+    # each step gets an image with probability 1/(k+1) (mask otherwise).
     mask_k = self.config.mask_visual_k
     if training and mask_k > 0:
-      visual_mask = (jnp.arange(T) % mask_k == 0)[None].repeat(B, axis=0)
-      if self.config.mask_visual_invert:
-        visual_mask = ~visual_mask
+      if self.config.mask_visual_prob:
+        p_hit = 1.0 / (mask_k + 1)
+        hit = jax.random.uniform(nj.seed(), (B, T)) < p_hit
+      else:
+        hit = (jnp.arange(T) % mask_k == 0)[None].repeat(B, axis=0)
+      visual_mask = ~hit if self.config.mask_visual_invert else hit
     else:
       visual_mask = None
     dyn_carry, dyn_entries, los, repfeat, mets = self.dyn.loss(

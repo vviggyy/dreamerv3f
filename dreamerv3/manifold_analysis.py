@@ -87,6 +87,9 @@ def load_dream_activations(dream_path, layer_name):
 
     Returns:
         X: (M, D) activations (flattened from (N, H, D) if from dream pkl)
+        t_idx: (M,) dream-timestep index of each row (0..H) when the source has a
+            time axis, else None. Row-major reshape means t = flat_index % T, so
+            this survives later row subsampling as long as we index it in lockstep.
     """
     dream_path = Path(dream_path)
 
@@ -102,20 +105,23 @@ def load_dream_activations(dream_path, layer_name):
                 f"Layer '{layer_name}' not found in dream pkl. "
                 f"Available: {[k for k in data if k.startswith('dream_') and not k.endswith('shape')]}")
         arr = np.array(data[pkl_key], dtype=np.float32)
-        # Reshape from (N, H, D) or (N, H, S, C) to (N*H, D)
+        # Reshape from (N, H, D) or (N, H, S, C) to (N*H, D); H is the time axis.
+        t_idx = None
         if arr.ndim == 4:
             N, H = arr.shape[:2]
             arr = arr.reshape(N * H, -1)
+            t_idx = np.tile(np.arange(H), N)
         elif arr.ndim == 3:
             N, H, D = arr.shape
             arr = arr.reshape(N * H, D)
-        return arr
+            t_idx = np.tile(np.arange(H), N)
+        return arr, t_idx
 
-    # Case 2: directory — treat as second wake trajectory set
+    # Case 2: directory — treat as second wake trajectory set (no dream time axis)
     if dream_path.is_dir():
         episodes, _ = load_episodes(dream_path)
         X, _pos, _groups = _prepare_single_layer(episodes, layer_name)
-        return X.astype(np.float32)
+        return X.astype(np.float32), None
 
     raise ValueError(f"dream_data path not found or unrecognized: {dream_path}")
 
@@ -485,6 +491,47 @@ def plot_sw_histogram(min_dists, median_sw, neural_bins, layer_name, save_dir):
     print(f"  Saved {out.name}")
 
 
+def plot_sw_over_time(min_dists, t_idx, layer_name, save_dir):
+    """SW distance (dream -> nearest wake point) as a function of dream timestep.
+
+    t=0 is the seed latent; t=1..H are the imagined steps. A rising curve = the
+    dream drifts off the wake manifold as it rolls out; flat/falling = it stays
+    on (or relaxes onto) the manifold. Bounded to [0, 1] (cosine distance on
+    non-negative activations), matching the other SW panels.
+    """
+    _setup_dark_style()
+    finite = np.isfinite(min_dists) & np.isfinite(t_idx)
+    md, ti = min_dists[finite], t_idx[finite].astype(int)
+    if len(md) == 0:
+        print("  WARNING: no finite SW/timestep pairs; skipping sw_over_time")
+        return
+    T = int(ti.max()) + 1
+    steps = np.arange(T)
+    med = np.full(T, np.nan); q25 = np.full(T, np.nan); q75 = np.full(T, np.nan)
+    for t in steps:
+        v = md[ti == t]
+        if len(v):
+            med[t] = np.median(v)
+            q25[t] = np.percentile(v, 25)
+            q75[t] = np.percentile(v, 75)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.fill_between(steps, q25, q75, color='#ff6666', alpha=0.2, label='IQR')
+    ax.plot(steps, med, color='#ff6666', linewidth=2, label='median SW (dream→wake)')
+    ax.set_xlabel('Dream step (0 = seed)', fontsize=10)
+    ax.set_ylabel('SW distance (cosine)', fontsize=10)
+    ax.set_xlim(0, T - 1)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(f'{layer_name} — SW distance over dream time',
+                 fontsize=11, fontweight='bold')
+    ax.legend(fontsize=9, facecolor='#333333', edgecolor='grey', labelcolor='white')
+    fig.tight_layout()
+    out = save_dir / f'{layer_name.replace("/", "_")}_sw_over_time.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
 def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
     """Combined WakeSleep figure (pRNN WakeSleepFigure style).
 
@@ -717,7 +764,7 @@ def main():
         # --- Load dream data ---
         print("Loading dream activations...")
         try:
-            X_dream = load_dream_activations(args.dream_data, layer_name)
+            X_dream, t_dream = load_dream_activations(args.dream_data, layer_name)
         except (ValueError, KeyError) as e:
             print(f"  SKIP {layer_name}: {e}")
             continue
@@ -726,6 +773,8 @@ def main():
             rng = np.random.RandomState(43)
             idx = rng.choice(len(X_dream), args.max_dream_samples, replace=False)
             X_dream = X_dream[idx]
+            if t_dream is not None:
+                t_dream = t_dream[idx]  # keep timestep labels aligned with rows
         print(f"  Dream: {X_dream.shape[0]} samples, dim={X_dream.shape[1]}")
 
         # --- EV threshold neuron filtering ---
@@ -791,6 +840,7 @@ def main():
             'sw_mean': float(min_dists.mean()),
             'sw_std': float(min_dists.std()),
             'sw_min_dists': min_dists,
+            'sw_t_idx': t_dream,  # per-row dream timestep (None if no time axis)
             'n_wake': len(X_wake),
             'n_dream': len(X_dream),
         }
@@ -807,6 +857,10 @@ def main():
         plot_srsa(hist2, neural_bins, spatial_bins, rho, layer_name, save_dir)
         plot_sw_histogram(min_dists, median_sw, neural_bins, layer_name, save_dir)
         output_files.extend([f'{slug}_srsa.png', f'{slug}_swdist.png'])
+
+        if t_dream is not None:
+            plot_sw_over_time(min_dists, t_dream, layer_name, save_dir)
+            output_files.append(f'{slug}_sw_over_time.png')
 
         if hill_fit:
             plot_hill_fit(hill_fit, layer_name, save_dir)

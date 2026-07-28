@@ -185,6 +185,7 @@ defaults:
     record_activations: False
     mask_visual_k: 0
     mask_visual_invert: False
+    mask_visual_prob: False
     mask_recon_loss: True
     rollout_k: 0
     rollout_dyn_scale: 1.0
