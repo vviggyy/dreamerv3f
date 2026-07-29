@@ -56,6 +56,18 @@ from decode_position import load_episodes, _prepare_single_layer, filter_stuck_e
 
 DREAM_LAYERS = ['dyn/deter', 'dyn/stoch']
 
+# Seed-ablation conditions (mirrors dream_seed_ablation.py). D is lightened from
+# the seed-ablation 'dimgray' to 'silver' so it reads on the dark manifold theme.
+SEED_ABLATION_CONDITIONS = ['A', 'B', 'C', 'D']
+SEED_ABLATION_LABELS = {
+    'A': 'A: both (real deter + image)',
+    'B': 'B: just-latent (real deter + prior)',
+    'C': 'C: just-image (noise deter + image)',
+    'D': 'D: neither (noise deter + prior)',
+}
+SEED_ABLATION_COLORS = {'A': 'crimson', 'B': 'steelblue',
+                        'C': 'darkorange', 'D': 'silver'}
+
 
 def load_wake_activations(data_path, layer_name, max_samples, min_bbox=0):
     """Load wake activations and positions for a single layer.
@@ -532,6 +544,67 @@ def plot_sw_over_time(min_dists, t_idx, layer_name, save_dir):
     print(f"  Saved {out.name}")
 
 
+def _sw_time_profile(min_dists, t_idx):
+    """Per-timestep median + IQR of SW distances. Returns (steps, med, q25, q75).
+    Mirrors the aggregation in plot_sw_over_time so both stay comparable."""
+    finite = np.isfinite(min_dists) & np.isfinite(t_idx)
+    md, ti = min_dists[finite], t_idx[finite].astype(int)
+    if len(md) == 0:
+        return None
+    T = int(ti.max()) + 1
+    steps = np.arange(T)
+    med = np.full(T, np.nan); q25 = np.full(T, np.nan); q75 = np.full(T, np.nan)
+    for t in steps:
+        v = md[ti == t]
+        if len(v):
+            med[t] = np.median(v)
+            q25[t] = np.percentile(v, 25)
+            q75[t] = np.percentile(v, 75)
+    return steps, med, q25, q75
+
+
+def plot_sw_over_time_by_condition(cond_results, layer_name, save_dir,
+                                   shading='band'):
+    """Overlay SW-distance-over-time curves for seed-ablation conditions A/B/C/D.
+
+    cond_results: {cond: {'min_dists': (M,), 't_idx': (M,)}} against a SHARED wake
+    manifold. Rising curve = that condition's dream drifts off the wake manifold as
+    it rolls out; flat/low = stays on it. Conditions share one axis so real-deter
+    (A/B) vs noise-deter (C/D) drift is directly comparable. Bounded to [0, 1]
+    (cosine distance on non-negative activations)."""
+    _setup_dark_style()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    Tmax = 1
+    for c in SEED_ABLATION_CONDITIONS:
+        if c not in cond_results:
+            continue
+        prof = _sw_time_profile(cond_results[c]['min_dists'],
+                                cond_results[c]['t_idx'])
+        if prof is None:
+            print(f"  WARNING: no finite SW/timestep pairs for condition {c}")
+            continue
+        steps, med, q25, q75 = prof
+        Tmax = max(Tmax, len(steps))
+        color = SEED_ABLATION_COLORS[c]
+        if shading == 'band':
+            ax.fill_between(steps, q25, q75, color=color, alpha=0.15)
+        ax.plot(steps, med, color=color, linewidth=2,
+                label=SEED_ABLATION_LABELS[c])
+    ax.set_xlabel('Dream step (0 = seed)', fontsize=10)
+    ax.set_ylabel('SW distance to wake manifold (cosine)', fontsize=10)
+    ax.set_xlim(0, Tmax - 1)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title(f'{layer_name} — SW distance over dream time by condition',
+                 fontsize=11, fontweight='bold')
+    ax.legend(fontsize=8, facecolor='#333333', edgecolor='grey',
+              labelcolor='white', loc='upper left')
+    fig.tight_layout()
+    out = save_dir / f'{layer_name.replace("/", "_")}_sw_over_time_by_condition.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
 def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
     """Combined WakeSleep figure (pRNN WakeSleepFigure style).
 
@@ -693,6 +766,107 @@ def plot_summary(results, save_dir):
 
 
 # ---------------------------------------------------------------------------
+# Seed-ablation condition overlay (SW-over-time for A/B/C/D vs shared wake)
+# ---------------------------------------------------------------------------
+
+def run_seed_ablation_overlay(args, save_dir, tuning_data):
+    """SW-distance-over-time for the four seed-ablation conditions against one
+    shared wake manifold. Consumes a dream_seed_ablation folder holding
+    dream_deter_{A,B,C,D}.pkl (from a --save_activations run). One condition is
+    held in memory at a time (dumps are 8-16 GB); only the small per-point
+    min_dists + timestep labels are retained for plotting."""
+    sa_dir = Path(args.seed_ablation_dir)
+    all_results = {}
+    output_files = []
+
+    for layer_name in args.layers:
+        print(f"\n{'='*60}\nLayer: {layer_name}\n{'='*60}")
+
+        # Wake manifold — loaded ONCE, reused for every condition so the
+        # comparison is against an identical reference.
+        print("Loading wake activations...")
+        try:
+            X_wake, pos_wake, _meta = load_wake_activations(
+                args.data, layer_name, args.max_wake_samples,
+                min_bbox=args.min_bbox)
+        except (ValueError, KeyError) as e:
+            print(f"  SKIP {layer_name}: {e}")
+            continue
+        print(f"  Wake: {X_wake.shape[0]} samples, dim={X_wake.shape[1]}")
+
+        # Optional EV neuron subset (same neuron_idx applied to wake + every
+        # condition so all live in the same neural subspace).
+        neuron_idx = None
+        tl = (tuning_data.get('layers', tuning_data)
+              if tuning_data is not None else None)
+        if tl is not None and layer_name in tl:
+            evs = np.asarray(tl[layer_name]['metrics']['EVs'], dtype=float)
+            ev_mask = np.isfinite(evs) & (evs > args.ev_thresh)
+            if ev_mask.sum() < 10:
+                print(f"  SKIP {layer_name}: only {ev_mask.sum()} neurons "
+                      f"above EV > {args.ev_thresh}")
+                continue
+            neuron_idx = np.where(ev_mask)[0]
+            print(f"  EV filter: {len(neuron_idx)}/{len(evs)} neurons")
+            X_wake = X_wake[:, neuron_idx]
+
+        cond_results = {}
+        for c in SEED_ABLATION_CONDITIONS:
+            pkl = sa_dir / f'dream_deter_{c}.pkl'
+            if not pkl.exists():
+                print(f"  condition {c}: {pkl.name} not found, skipping")
+                continue
+            print(f"  condition {c}: loading {pkl.name} ...")
+            X_dream, t_dream = load_dream_activations(pkl, layer_name)
+            if t_dream is None:
+                print(f"    no time axis in {pkl.name}, skipping")
+                continue
+            if args.max_dream_samples > 0 and len(X_dream) > args.max_dream_samples:
+                rng = np.random.RandomState(43)
+                idx = rng.choice(len(X_dream), args.max_dream_samples, replace=False)
+                X_dream, t_dream = X_dream[idx], t_dream[idx]
+            if neuron_idx is not None:
+                X_dream = X_dream[:, neuron_idx]
+            median_sw, min_dists = compute_sw_distance(X_wake, X_dream)
+            print(f"    {X_dream.shape[0]} dream pts, median SW={median_sw:.4f}")
+            cond_results[c] = {
+                'min_dists': min_dists, 't_idx': t_dream,
+                'median_sw': float(median_sw), 'n_dream': int(len(min_dists)),
+            }
+            del X_dream  # free the big array before the next condition
+
+        if not cond_results:
+            print(f"  No conditions found for {layer_name}; skipping.")
+            continue
+
+        print("Generating condition overlay...")
+        plot_sw_over_time_by_condition(cond_results, layer_name, save_dir,
+                                       shading=args.shading)
+        slug = layer_name.replace('/', '_')
+        output_files.append(f'{slug}_sw_over_time_by_condition.png')
+        all_results[layer_name] = {
+            'n_wake': int(len(X_wake)),
+            'conditions': {c: {k: v for k, v in cr.items()}
+                           for c, cr in cond_results.items()},
+        }
+
+    if not all_results:
+        print("\nNo layers/conditions successfully analyzed.")
+        return
+
+    results_file = save_dir / 'manifold_condition_results.pkl'
+    with open(results_file, 'wb') as f:
+        pickle.dump(all_results, f)
+    output_files.append('manifold_condition_results.pkl')
+    print(f"\nResults saved to {results_file}")
+
+    log_run_info(
+        save_dir=save_dir, stage='manifold_analysis_conditions',
+        args=vars(args), outputs=output_files,
+        extra={'seed_ablation_dir': str(sa_dir), 'layers': args.layers})
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -701,9 +875,20 @@ def main():
         description='Neural manifold analysis (sRSA, Isomap, SW distance)')
     parser.add_argument('--data', required=True,
                         help='Wake trajectory directory (eval_trajectory output)')
-    parser.add_argument('--dream_data', required=True,
+    parser.add_argument('--dream_data', default=None,
                         help='Dream results pkl (from dream_decode) or second '
-                             'wake trajectory directory')
+                             'wake trajectory directory. Mutually exclusive with '
+                             '--seed_ablation_dir')
+    parser.add_argument('--seed_ablation_dir', default=None,
+                        help='dream_seed_ablation folder with dream_deter_'
+                             '{A,B,C,D}.pkl (from a --save_activations run). '
+                             'Switches to condition-overlay mode: one SW-over-'
+                             'time figure per layer overlaying A/B/C/D against '
+                             'the shared wake manifold. Only SW-over-time is '
+                             'produced in this mode.')
+    parser.add_argument('--shading', default='band', choices=['band', 'none'],
+                        help='Condition overlay spread: filled IQR band or line '
+                             'only (default: band)')
     parser.add_argument('--save', required=True,
                         help='Output directory')
     parser.add_argument('--layers', nargs='+', default=DREAM_LAYERS,
@@ -730,6 +915,8 @@ def main():
 
     if args.ev_thresh is not None and args.tuning_pkl is None:
         parser.error('--ev_thresh requires --tuning_pkl')
+    if bool(args.dream_data) == bool(args.seed_ablation_dir):
+        parser.error('provide exactly one of --dream_data or --seed_ablation_dir')
 
     save_dir = Path(args.save)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -741,6 +928,11 @@ def main():
         with open(args.tuning_pkl, 'rb') as f:
             tuning_data = pickle.load(f)
         print(f"  EV threshold: {args.ev_thresh}")
+
+    # Condition-overlay mode: SW-over-time for A/B/C/D vs a shared wake manifold.
+    if args.seed_ablation_dir:
+        run_seed_ablation_overlay(args, save_dir, tuning_data)
+        return
 
     all_results = {}
     output_files = []
