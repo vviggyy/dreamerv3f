@@ -34,6 +34,12 @@ Every dreamed latent step is decoded to (x, y) with a pretrained position decode
      previous tile at each dream step. Low + flat = spatially continuous dream;
      large early values = teleporting/incoherent decode. Best read with
      central=mean (median collapses to 0 since most steps move 0-1 tiles).
+  E) P[dx=0] (stay probability): fraction of rollouts whose decoded position did
+     not change from the previous step (agent acted but stayed on the same tile).
+     Always mean-aggregated (a probability), independent of --central.
+  F) E[dx | dx>0] (jump size when moving): mean decoded displacement over the
+     steps that DID move (dx==0 steps excluded). Always mean-aggregated.
+     D factorizes as E[dx] = P[dx>0] * E[dx | dx>0]; E and F split those apart.
   + error_vs_warmup: final-step distance-from-real-start as a function of warmup
   + decoded_dreams_by_condition: 4xN grid on the world map (rows = conditions
     A/B/C/D, columns = distinct example dreams / seed frames), all seeds drawn
@@ -371,6 +377,19 @@ def _band(ax, data, color, label, ls='-', central='median', shading='band'):
             ax.fill_between(steps, lo, hi, color=color, alpha=0.15)
 
 
+def _pzero(stepD):
+    """Per-step stay indicator from step displacement (N, H+1): 1.0 where the
+    decoded position didn't change (dx==0), 0.0 where it moved, NaN at step 0
+    (no predecessor). nanmean over rollouts -> P[dx=0] at each step."""
+    return np.where(np.isnan(stepD), np.nan, (stepD == 0).astype(float))
+
+
+def _moved(stepD):
+    """Step displacement masked to moving steps only (dx>0); dx==0 and step 0
+    become NaN. nanmean over rollouts -> E[dx | dx>0] at each step."""
+    return np.where(stepD > 0, stepD, np.nan)
+
+
 def compute_curves(decoded, start_pos, future_pos, central='median'):
     """Derive plot curves from raw decoded dream positions (pure, no I/O).
 
@@ -416,12 +435,23 @@ def _print_summary(dispA, distB, varC, realA, central, stepD=None, realStep=None
     _agg = np.nanmean if central == 'mean' else np.nanmedian
     print(f"\n[summary] {central} final-step (H) values, pooled over warmups:")
     for c in CONDITIONS:
-        # step-dist pooled over ALL steps (continuity), not just the final step
-        sd = f"  step-dist={_agg(stepD[c]):5.2f}" if stepD is not None else ""
+        # step-dist / P[dx=0] / E[dx|dx>0] pooled over ALL steps (continuity),
+        # not just the final step. P and conditional-mean always use nanmean.
+        if stepD is not None:
+            sd = (f"  step-dist={_agg(stepD[c]):5.2f}"
+                  f"  P[dx=0]={np.nanmean(_pzero(stepD[c])):4.2f}"
+                  f"  E[dx|dx>0]={np.nanmean(_moved(stepD[c])):5.2f}")
+        else:
+            sd = ""
         print(f"  {c}: own-disp={_agg(dispA[c][:, -1]):5.2f}  "
               f"real-dist={_agg(distB[c][:, -1]):5.2f}  "
               f"seed-var={_agg(varC[c][:, -1]):5.2f}{sd} tiles")
-    rstep = f"  step-dist={_agg(realStep):5.2f}" if realStep is not None else ""
+    if realStep is not None:
+        rstep = (f"  step-dist={_agg(realStep):5.2f}"
+                 f"  P[dx=0]={np.nanmean(_pzero(realStep)):4.2f}"
+                 f"  E[dx|dx>0]={np.nanmean(_moved(realStep)):5.2f}")
+    else:
+        rstep = ""
     print(f"  real: own-disp={_agg(realA[:, -1]):5.2f}{rstep} tiles")
 
 
@@ -458,7 +488,10 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
 def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central='median', shading='band', stepD=None, realStep=None):
     band = bind(_band, central=central, shading=shading)
-    ncol = 4 if stepD is not None else 3
+    # P[dx=0] and E[dx|dx>0] are expectations: always mean-aggregated over
+    # rollouts, regardless of `central` (median of a 0/1 indicator is meaningless).
+    band_mean = bind(_band, central='mean', shading=shading)
+    ncol = 6 if stepD is not None else 3
     fig, axes = plt.subplots(1, ncol, figsize=(6 * ncol, 5.2))
 
     ax = axes[0]
@@ -490,12 +523,30 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
         ax.set_title('D) step-to-step displacement (continuity)')
         ax.set_ylabel('Manhattan distance from previous tile (tiles)')
 
+        ax = axes[4]
+        for c in CONDITIONS:
+            band_mean(ax, _pzero(stepD[c]), COLORS[c], LABELS[c])
+        if realStep is not None:
+            band_mean(ax, _pzero(realStep), 'black', 'real trajectory', ls='--')
+        ax.set_title('E) P[dx=0] (stay probability)')
+        ax.set_ylabel('P(no move to a new tile)')
+
+        ax = axes[5]
+        for c in CONDITIONS:
+            band_mean(ax, _moved(stepD[c]), COLORS[c], LABELS[c])
+        if realStep is not None:
+            band_mean(ax, _moved(realStep), 'black', 'real trajectory', ls='--')
+        ax.set_title('F) E[dx | dx>0] (jump size when moving)')
+        ax.set_ylabel('Mean displacement over moving steps (tiles)')
+
     for ax in axes:
         ax.set_xlabel('Dream step (0 = seed)')
         ax.grid(alpha=0.3)
         ax.set_xlim(0, dispA['A'].shape[1] - 1)
         ax.set_ylim(bottom=0)
         ax.legend(loc='upper left', fontsize=8)
+    if stepD is not None:
+        axes[4].set_ylim(0, 1)  # P[dx=0] is a probability
 
     fig.tight_layout()
     out = save_dir / 'seed_ablation_curves.png'
