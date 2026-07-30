@@ -31,6 +31,7 @@ class RSSM(nj.Module):
   blocks: int = 8
   free_nats: float = 1.0
   gru_act: str = 'tanh'
+  train_noise_std: float = 0.0  # post-gate Gaussian noise on deter, TRAINING only
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -93,7 +94,7 @@ class RSSM(nj.Module):
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
-    deter = self._core(deter, stoch, action)  # new h from GRU
+    deter = self._core(deter, stoch, action, training=training)  # new h from GRU
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     for i in range(self.obslayers):
@@ -118,7 +119,7 @@ class RSSM(nj.Module):
     if single:
       action = policy(sg(carry)) if callable(policy) else policy
       actemb = nn.DictConcat(self.act_space, 1)(action)
-      deter = self._core(carry['deter'], carry['stoch'], actemb)  # new h
+      deter = self._core(carry['deter'], carry['stoch'], actemb, training=training)  # new h
       logit = self._prior(deter)  # prior logits from h only (no obs)
       stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))  # sample z
       carry = nn.cast(dict(deter=deter, stoch=stoch))
@@ -192,7 +193,7 @@ class RSSM(nj.Module):
       rs = rolled_stoch[:, :valid_T].reshape(-1, *rolled_stoch.shape[2:])
 
       # Roll forward one step: GRU + prior
-      new_deter = self._core(rd, rs, actemb)
+      new_deter = self._core(rd, rs, actemb, training=training)
       prior_logit = self._prior(new_deter)
       new_stoch = nn.cast(self._dist(prior_logit).sample(seed=nj.seed()))
 
@@ -230,7 +231,7 @@ class RSSM(nj.Module):
     rollout_dyn = jnp.where(count > 0, total_kl / count, 0.0)
     return rollout_dyn, metrics
 
-  def _core(self, deter, stoch, action):
+  def _core(self, deter, stoch, action, training=False):
     # Block-wise GRU: computes new h from (old_h, old_z, action).
     # Splits h into 8 blocks and applies independent gated updates per block.
     stoch = stoch.reshape((stoch.shape[0], -1))
@@ -256,6 +257,15 @@ class RSSM(nj.Module):
     cand = nn.act(self.gru_act)(reset * cand)
     update = jax.nn.sigmoid(update - 1)  # bias toward 0 → default is to remember
     deter = update * cand + (1 - update) * deter  # GRU update: blend new candidate with old h
+    # Train-noise injection: additive Gaussian on the post-gate deter, mirroring
+    # pRNN's internal-noise sleep drive but placed AFTER the gated blend so it
+    # perturbs the state that actually carries forward (matching the dream-seed
+    # test distribution). Training only — forces the network to learn dynamics
+    # that contract off-manifold deter back onto the wake manifold, the
+    # "sufficient conditions for offline reactivation" mechanism.
+    if training and self.train_noise_std:
+      deter = deter + self.train_noise_std * jax.random.normal(
+          nj.seed(), deter.shape, dtype=deter.dtype)
     return deter
 
   def _prior(self, feat):

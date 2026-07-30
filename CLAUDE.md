@@ -35,7 +35,7 @@
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
 - `run_Clustering.sh` — tuning curve analysis via PCA/t-SNE/UMAP + HDBSCAN / metric distributions (CPU, day partition). Settings: FROM_PKL, n_components, perplexity, umap_neighbors, min_cluster_size
-- `run_Manifold.sh` — neural manifold analysis (CPU, day partition). Settings: LOGDIR, DREAM_DATA, LAYERS, MAX_WAKE_SAMPLES, N_NEIGHBORS, NO_ISOMAP
+- `run_Manifold.sh` — neural manifold analysis (CPU, day partition). Settings: LOGDIR, DREAM_DATA, LAYERS, MAX_WAKE_SAMPLES, N_NEIGHBORS, NO_ISOMAP, SEED_ABLATION_DIR (set → condition-overlay SW-over-time mode)
 
 ## run provenance
 Every analysis script appends to `<save_dir>/run_info.json` via `dreamerv3/run_info.py`:
@@ -282,10 +282,16 @@ MPLBACKEND=Agg python dreamerv3/manifold_analysis.py \
   --data ./logdir/my_run/trajectories \
   --dream_data ./logdir/my_run/dream_results/dream_results.pkl \
   --save ./logdir/my_run/manifold_results
-```
-Compares wake (real trajectory) and dream (imagination) activations on the neural manifold, following pRNN's `representationalGeometryAnalysis.py`. Four metrics: sRSA (Spearman rank correlation of spatial vs neural distances on wake, shown as P[neural|spatial] conditional histogram), Hill fit (saturating Hill function fitted to binned neural-vs-spatial distance, extracting dh_0/dh_inf/dx_1/2), Isomap (2D manifold visualization of wake+dream), SW distance (median min cosine distance from dream to nearest wake point, shown as pRNN-style vertical column). `--dream_data` accepts either a `dream_results.pkl` (from dream_decode with `save_activations=True`) or a second trajectory directory (for wake-vs-wake control). Key args: `--layers dyn/deter dyn/stoch` (default), `--max_wake_samples 4000`, `--n_neighbors 150` (Isomap), `--no_isomap` (skip Isomap for speed), `--no_hill` (skip Hill fit), `--min_bbox N`.
 
-Outputs: `{layer}_srsa.png`, `{layer}_hillfit.png`, `{layer}_swdist.png` (SW-distance histogram, distance axis fixed to [0,1] — cosine dist on relu activations), `{layer}_sw_over_time.png` (median SW±IQR vs dream timestep; only when the dream source has a time axis, i.e. dream_deter dumps — shows drift onto/off the wake manifold as the dream rolls out), `{layer}_isomap_position.png`, `{layer}_isomap_wakedream.png`, `{layer}_wakesleep.png` (combined pRNN-style figure), `manifold_summary.png`, `manifold_results.pkl` (stores `sw_t_idx` per-row dream timestep for replotting the over-time curve).
+# Condition-overlay mode: SW-over-time for seed-ablation A/B/C/D vs shared wake
+MPLBACKEND=Agg python dreamerv3/manifold_analysis.py \
+  --data ./logdir/my_run/trajectories \
+  --seed_ablation_dir ./logdir/my_run/dream_seed_ablation_16_manifold \
+  --save ./logdir/my_run/manifold_conditions --layers dyn/deter
+```
+Compares wake (real trajectory) and dream (imagination) activations on the neural manifold, following pRNN's `representationalGeometryAnalysis.py`. Four metrics: sRSA (Spearman rank correlation of spatial vs neural distances on wake, shown as P[neural|spatial] conditional histogram), Hill fit (saturating Hill function fitted to binned neural-vs-spatial distance, extracting dh_0/dh_inf/dx_1/2), Isomap (2D manifold visualization of wake+dream), SW distance (median min cosine distance from dream to nearest wake point, shown as pRNN-style vertical column). `--dream_data` accepts either a `dream_results.pkl` (from dream_decode with `save_activations=True`) or a second trajectory directory (for wake-vs-wake control). Key args: `--layers dyn/deter dyn/stoch` (default), `--max_wake_samples 4000`, `--n_neighbors 150` (Isomap), `--no_isomap` (skip Isomap for speed), `--no_hill` (skip Hill fit), `--min_bbox N`. **Condition-overlay mode** (`--seed_ablation_dir <dream_seed_ablation folder with dream_deter_{A,B,C,D}.pkl>`, mutually exclusive with `--dream_data`): instead of the full suite, produces one `{layer}_sw_over_time_by_condition.png` per layer overlaying SW-distance-vs-dream-step for the four seed-ablation conditions A/B/C/D against a **single shared wake manifold** (loaded once, so the comparison is against an identical reference). Conditions are processed one at a time (dumps are 8–16 GB), retaining only the per-point min-dists + timestep labels; results saved to `manifold_condition_results.pkl`. Requires the seed-ablation run to have been done with `--dream_seed_ablation.save_activations True`. `--shading {band,none}` controls the IQR band.
+
+Outputs: `{layer}_srsa.png`, `{layer}_hillfit.png`, `{layer}_swdist.png` (SW-distance histogram, distance axis fixed to [0,1] — cosine dist on relu activations), `{layer}_sw_over_time.png` (median SW±IQR vs dream timestep; only when the dream source has a time axis, i.e. dream_deter dumps — shows drift onto/off the wake manifold as the dream rolls out), `{layer}_isomap_position.png`, `{layer}_isomap_wakedream.png`, `{layer}_wakesleep.png` (combined pRNN-style figure), `manifold_summary.png`, `manifold_results.pkl` (stores `sw_t_idx` per-row dream timestep for replotting the over-time curve). Condition-overlay mode instead emits `{layer}_sw_over_time_by_condition.png` + `manifold_condition_results.pkl` (per-condition min-dists + timestep labels).
 
 ### interactive tuning viewer (from precomputed pkl)
 ```
