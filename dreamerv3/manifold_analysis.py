@@ -69,6 +69,26 @@ SEED_ABLATION_COLORS = {'A': 'crimson', 'B': 'steelblue',
                         'C': 'darkorange', 'D': 'silver'}
 
 
+def _assert_relu_space(X, layer_name, source):
+    """Guard: wake/dream activations must be in relu (non-negative) space.
+
+    deter/stoch/enc layers are all relu (or one-hot) and therefore non-negative.
+    A signed array means the run was generated with a non-relu gru_act (e.g. the
+    stock tanh default) — wake recorded with relu vs dream generated with tanh
+    live in different activation spaces, so their cosine SW distances / isomap
+    embeddings are meaningless (this is exactly the tanh-vs-relu mismatch that
+    made vanilla dreams look off-manifold). Fail loudly rather than plot garbage.
+    """
+    mn = float(np.min(X))
+    if mn < -1e-4:
+        frac_neg = float((X < 0).mean())
+        raise AssertionError(
+            f"{source} activations for '{layer_name}' contain negative values "
+            f"(min={mn:.3f}, {frac_neg:.1%} negative) -> NOT relu space. This run "
+            f"was likely generated with gru_act=tanh; regenerate it with "
+            f"gru_act=relu so wake and dream share one activation space.")
+
+
 def load_wake_activations(data_path, layer_name, max_samples, min_bbox=0):
     """Load wake activations and positions for a single layer.
 
@@ -87,7 +107,9 @@ def load_wake_activations(data_path, layer_name, max_samples, min_bbox=0):
         idx = rng.choice(len(X), max_samples, replace=False)
         X, pos = X[idx], pos[idx]
 
-    return X.astype(np.float32), pos.astype(np.float32), metadata
+    X = X.astype(np.float32)
+    _assert_relu_space(X, layer_name, source='WAKE')
+    return X, pos.astype(np.float32), metadata
 
 
 def load_dream_activations(dream_path, layer_name):
@@ -127,13 +149,16 @@ def load_dream_activations(dream_path, layer_name):
             N, H, D = arr.shape
             arr = arr.reshape(N * H, D)
             t_idx = np.tile(np.arange(H), N)
+        _assert_relu_space(arr, layer_name, source='DREAM')
         return arr, t_idx
 
     # Case 2: directory — treat as second wake trajectory set (no dream time axis)
     if dream_path.is_dir():
         episodes, _ = load_episodes(dream_path)
         X, _pos, _groups = _prepare_single_layer(episodes, layer_name)
-        return X.astype(np.float32), None
+        X = X.astype(np.float32)
+        _assert_relu_space(X, layer_name, source='DREAM')
+        return X, None
 
     raise ValueError(f"dream_data path not found or unrecognized: {dream_path}")
 

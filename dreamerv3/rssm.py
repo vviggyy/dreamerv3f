@@ -32,9 +32,24 @@ class RSSM(nj.Module):
   free_nats: float = 1.0
   gru_act: str = 'tanh'
   train_noise_std: float = 0.0  # post-gate Gaussian noise on deter, TRAINING only
+  require_relu_deter: bool = True  # enforce gru_act='relu' so recorded wake AND
+  #   dream deter share one (non-negative) activation space — see below
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
+    # gru_act gates the deter candidate (see _core), so it alone determines the
+    # deter activation space for BOTH wake (observe) and dream (imagine): relu ->
+    # deter >= 0, tanh -> signed. If a dream run silently defaults to tanh while
+    # wake was recorded with relu, the two live in different spaces and every
+    # downstream wake-vs-dream comparison (cosine SW distance, isomap) is garbage.
+    # Guard it at construction so no rollout is wasted. Relax with
+    # `--dyn.rssm.require_relu_deter False` if a non-relu run is truly intended.
+    if self.require_relu_deter:
+      assert self.gru_act == 'relu', (
+          f"gru_act={self.gru_act!r} but require_relu_deter=True: wake and dream "
+          f"deter must be in relu (non-negative) space to be comparable. Pass "
+          f"gru_act=relu (e.g. --dyn.rssm.gru_act relu), or set "
+          f"--dyn.rssm.require_relu_deter False to allow another activation.")
     self.act_space = act_space
     self.kw = kw
 
