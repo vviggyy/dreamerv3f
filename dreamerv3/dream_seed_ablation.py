@@ -44,8 +44,11 @@ Every dreamed latent step is decoded to (x, y) with a pretrained position decode
      real_t| (tracking-fidelity, cf. dream_vs_future — distinct from panel B's
      distance from the real *start*), grouped into DEFAULT_N_WARMUP_BINS (=5)
      equal-count warmup bins derived from the actual warmups (covers the full
-     range on any horizon). Color = warmup group (light=short -> dark=long),
-     linestyle = condition (A solid, B dotted; A/B only by default).
+     range on any horizon). A/B are drawn per warmup bin (color = warmup group
+     light->dark, linestyle A '-' / B ':'); C/D are drawn as a single POOLED
+     gray line each (C '--', D '-.'), since their warmup axis is meaningless
+     (noise deter is warmup-independent and the decoder reads position from the
+     deter, so C/D start ~4 tiles off regardless of W) — flat null baselines.
   The 7 panels are laid out in 2 rows.
   + error_vs_warmup: final-step distance-from-real-start as a function of warmup
   + decoded_dreams_by_condition: 4xN grid on the world map (rows = conditions
@@ -639,11 +642,16 @@ def plot_error_vs_warmup(distB_by_w, warmups, save_dir, central='median'):
     print(f"  Saved {out.name}")
 
 
+# Gray shades for the pooled (warmup-independent) reference conditions in
+# panel G. Kept off the viridis ramp so they read as baselines, not warmup bins.
+POOLED_GRAY = {'C': '0.55', 'D': '0.3'}
+
+
 def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
-                              conditions=('A', 'B'), central='median',
+                              bin_conditions=('A', 'B'),
+                              pooled_conditions=('C', 'D'), central='median',
                               shading='none', bins=None, n_bins=None):
-    """Draw panel G onto `ax`: per-step deviation from the REAL trajectory,
-    grouped by warmup length.
+    """Draw panel G onto `ax`: per-step deviation from the REAL trajectory.
 
     Deviation at dream step t = |decoded_dream_t - real_t| (Manhattan tiles),
     with real_0 = start and real_t = future[t-1] (same alignment as
@@ -652,15 +660,17 @@ def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
     a tracking-fidelity metric: it rises as the dream drifts off the real path,
     and should sit LOWER at longer warmups if warmup helps seed the dream.
 
-    Warmups are split into `n_bins` equal-count groups over the ACTUAL warmups
-    present (default DEFAULT_N_WARMUP_BINS=5), so every bin is non-empty and the
-    full range is covered on any horizon. Pass `bins` as an explicit list of
-    (lo, hi, label) inclusive ranges to override. Color encodes the warmup group
-    (light=short -> dark=long); linestyle encodes the condition (A solid, B
-    dotted). Only conditions in `conditions` are drawn (A/B share the real
-    deter, isolating the image-vs-prior stoch effect across warmup). Returns
-    True if anything was drawn (so the caller can manage its bespoke two-part
-    legend), else False.
+    `bin_conditions` (A/B) are split by warmup: `n_bins` equal-count groups over
+    the ACTUAL warmups present (default DEFAULT_N_WARMUP_BINS=5, so every bin is
+    non-empty and the full range is covered on any horizon). Color = warmup
+    group (light=short -> dark=long), linestyle = condition (A '-', B ':').
+    `pooled_conditions` (C/D) are drawn as a SINGLE gray line each, pooled over
+    all warmups — their warmup axis is meaningless (noise deter is warmup-
+    independent, and the position decoder reads from the deter, so C/D start
+    ~4 tiles off regardless of W), so they serve as flat null baselines rather
+    than a warmup story. Pass `bins` to override the auto ranges. Returns True
+    if anything was drawn (caller manages the bespoke two-part legend), else
+    False.
     """
     from matplotlib.lines import Line2D
     warmups = np.asarray(warmups)
@@ -670,6 +680,9 @@ def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
     real_path = np.concatenate([start_pos[:, :, None, :], future_pos], axis=2)
     Hp1 = real_path.shape[2]
 
+    def dev_of(c):  # (S, Nw, Ns, H+1) per-step deviation from the real path
+        return _manhattan(decoded[c], real_path[:, :, None, :, :])
+
     # Populate bins with the warmup indices whose warmup value falls in range.
     groups = []
     for lo, hi, lab in bins:
@@ -678,34 +691,50 @@ def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
             groups.append((lab, idx))
         else:
             print(f"  (warmup bin '{lab}' [{lo},{hi}] empty, skipped)")
-    if not groups:
-        print("  (no warmup groups populated; deviation panel left blank)")
-        return False
 
+    drew = False
     cmap = plt.cm.viridis
     fracs = (np.linspace(0.12, 0.88, len(groups)) if len(groups) > 1
              else np.array([0.5]))
 
+    # A/B: one warmup-colored line per (bin, condition).
     for gi, (lab, idx) in enumerate(groups):
         color = cmap(fracs[gi])
-        for c in conditions:
-            # (S, Nw, Ns, H+1) deviation, then keep only this bin's warmups.
-            dev = _manhattan(decoded[c], real_path[:, :, None, :, :])
-            dev_bin = dev[:, idx].reshape(-1, Hp1)
+        for c in bin_conditions:
+            dev_bin = dev_of(c)[:, idx].reshape(-1, Hp1)
             _band(ax, dev_bin, color, None, ls=COND_LS.get(c, '-'),
                   central=central, shading=shading)
+            drew = True
+
+    # C/D: single gray line each, pooled over ALL warmups (warmup-independent).
+    for c in pooled_conditions:
+        dev_all = dev_of(c).reshape(-1, Hp1)
+        _band(ax, dev_all, POOLED_GRAY.get(c, '0.4'), None,
+              ls=COND_LS.get(c, '-'), central=central, shading=shading)
+        drew = True
+
+    if not drew:
+        print("  (nothing to draw; deviation panel left blank)")
+        return False
 
     ax.set_title('G) deviation from real trajectory by warmup')
     ax.set_ylabel('Manhattan deviation from real trajectory (tiles)')
 
-    # Two-part legend: warmup group (color) and condition (linestyle).
+    # Two-part legend: warmup group (color, A/B) + condition (linestyle). A/B
+    # entries are neutral gray (color carried by the warmup legend); C/D entries
+    # use their pooled gray and are marked "(pooled)".
     grp_handles = [Line2D([0], [0], color=cmap(fracs[gi]), lw=2.5, label=lab)
                    for gi, (lab, _) in enumerate(groups)]
     cond_handles = [Line2D([0], [0], color='0.3', lw=2.0, ls=COND_LS.get(c, '-'),
-                           label=LABELS[c]) for c in conditions]
-    leg1 = ax.legend(handles=grp_handles, title='Warmup group',
-                     loc='upper left', fontsize=7, title_fontsize=8)
-    ax.add_artist(leg1)
+                           label=LABELS[c]) for c in bin_conditions]
+    cond_handles += [Line2D([0], [0], color=POOLED_GRAY.get(c, '0.4'), lw=2.0,
+                            ls=COND_LS.get(c, '-'),
+                            label=LABELS[c] + ' [pooled]')
+                     for c in pooled_conditions]
+    if grp_handles:
+        leg1 = ax.legend(handles=grp_handles, title='Warmup group (A/B)',
+                         loc='upper left', fontsize=7, title_fontsize=8)
+        ax.add_artist(leg1)
     ax.legend(handles=cond_handles, title='Condition', loc='lower right',
               fontsize=7, title_fontsize=8)
     return True
