@@ -40,6 +40,13 @@ Every dreamed latent step is decoded to (x, y) with a pretrained position decode
   F) E[dx | dx>0] (jump size when moving): mean decoded displacement over the
      steps that DID move (dx==0 steps excluded). Always mean-aggregated.
      D factorizes as E[dx] = P[dx>0] * E[dx | dx>0]; E and F split those apart.
+  G) deviation from the REAL trajectory by warmup: per-step |decoded_dream_t -
+     real_t| (tracking-fidelity, cf. dream_vs_future — distinct from panel B's
+     distance from the real *start*), grouped into DEFAULT_N_WARMUP_BINS (=5)
+     equal-count warmup bins derived from the actual warmups (covers the full
+     range on any horizon). Color = warmup group (light=short -> dark=long),
+     linestyle = condition (A solid, B dotted; A/B only by default).
+  The 7 panels are laid out in 2 rows.
   + error_vs_warmup: final-step distance-from-real-start as a function of warmup
   + decoded_dreams_by_condition: 4xN grid on the world map (rows = conditions
     A/B/C/D, columns = distinct example dreams / seed frames), all seeds drawn
@@ -90,6 +97,33 @@ LABELS = {
     'D': 'D: neither (noise deter + prior)',
 }
 COLORS = {'A': 'crimson', 'B': 'steelblue', 'C': 'darkorange', 'D': 'dimgray'}
+
+# Linestyle per condition for the warmup-grouped deviation plot (color there
+# encodes the warmup group, so the condition must be carried by linestyle).
+COND_LS = {'A': '-', 'B': ':', 'C': '--', 'D': '-.'}
+
+# Panel G groups warmups into this many equal-count bins by default. Bins are
+# derived from the ACTUAL warmups present (see _auto_warmup_bins), so they cover
+# the full [1, report_length - horizon] range on any horizon — no warmup is ever
+# dropped, unlike a fixed range list.
+DEFAULT_N_WARMUP_BINS = 5
+
+
+def _auto_warmup_bins(warmups, n_bins=DEFAULT_N_WARMUP_BINS):
+    """Split the observed warmups into <= n_bins equal-count (quantile) groups.
+
+    Returns a list of (lo, hi, label) inclusive ranges over the distinct warmup
+    values, so every bin is guaranteed non-empty and the whole range is covered
+    regardless of horizon. Labels read 'w{lo}' or 'w{lo}-{hi}'."""
+    uniq = np.unique(np.asarray(warmups))
+    bins = []
+    for ch in np.array_split(uniq, min(n_bins, len(uniq))):
+        if not len(ch):
+            continue
+        lo, hi = int(ch[0]), int(ch[-1])
+        lab = f'w{lo}' if lo == hi else f'w{lo}-{hi}'
+        bins.append((lo, hi, lab))
+    return bins
 
 
 def _manhattan(a, b):
@@ -472,7 +506,9 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central=central, shading=shading,
-                       stepD=stepD, realStep=realStep)
+                       stepD=stepD, realStep=realStep,
+                       decoded=r['decoded'], start_pos=r['start_pos'],
+                       future_pos=r['future_pos'], warmups=warmups)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if n_example_dreams > 0:
         plot_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
@@ -486,36 +522,50 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
 
 
 def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
-                       central='median', shading='band', stepD=None, realStep=None):
+                       central='median', shading='band', stepD=None,
+                       realStep=None, decoded=None, start_pos=None,
+                       future_pos=None, warmups=None):
     band = bind(_band, central=central, shading=shading)
     # P[dx=0] and E[dx|dx>0] are expectations: always mean-aggregated over
     # rollouts, regardless of `central` (median of a 0/1 indicator is meaningless).
     band_mean = bind(_band, central='mean', shading=shading)
-    ncol = 6 if stepD is not None else 3
-    fig, axes = plt.subplots(1, ncol, figsize=(6 * ncol, 5.2))
 
-    ax = axes[0]
+    # Panel G (deviation-by-warmup) is included when the raw decoded positions
+    # are available (live run or --from_pkl). It carries its own two-part legend
+    # and lines-only styling, so it's excluded from the shared legend loop below.
+    have_G = decoded is not None and start_pos is not None \
+        and future_pos is not None and warmups is not None
+    n_panels = (6 if stepD is not None else 3) + (1 if have_G else 0)
+    # Reflow into 2 rows once we exceed 4 panels so the figure isn't absurdly wide.
+    ncol = int(np.ceil(n_panels / 2)) if n_panels > 4 else n_panels
+    nrow = int(np.ceil(n_panels / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(6 * ncol, 5.2 * nrow),
+                             squeeze=False)
+    flat = axes.ravel()
+
+    ax = flat[0]
     for c in CONDITIONS:
         band(ax, dispA[c], COLORS[c], LABELS[c])
     band(ax, realA, 'black', 'real trajectory', ls='--')
     ax.set_title('A) displacement from own start')
     ax.set_ylabel('Manhattan distance from start (tiles)')
 
-    ax = axes[1]
+    ax = flat[1]
     for c in CONDITIONS:
         band(ax, distB[c], COLORS[c], LABELS[c])
     band(ax, realA, 'black', 'real trajectory', ls='--')
     ax.set_title('B) distance from real start')
     ax.set_ylabel('Manhattan distance from real start (tiles)')
 
-    ax = axes[2]
+    ax = flat[2]
     for c in CONDITIONS:
         band(ax, varC[c], COLORS[c], LABELS[c])
     ax.set_title('C) cross-seed variability')
     ax.set_ylabel('Mean seed dispersion (tiles)')
 
+    pzero_ax = None
     if stepD is not None:
-        ax = axes[3]
+        ax = flat[3]
         for c in CONDITIONS:
             band(ax, stepD[c], COLORS[c], LABELS[c])
         if realStep is not None:
@@ -523,7 +573,8 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
         ax.set_title('D) step-to-step displacement (continuity)')
         ax.set_ylabel('Manhattan distance from previous tile (tiles)')
 
-        ax = axes[4]
+        ax = flat[4]
+        pzero_ax = ax
         for c in CONDITIONS:
             band_mean(ax, _pzero(stepD[c]), COLORS[c], LABELS[c])
         if realStep is not None:
@@ -531,7 +582,7 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
         ax.set_title('E) P[dx=0] (stay probability)')
         ax.set_ylabel('P(no move to a new tile)')
 
-        ax = axes[5]
+        ax = flat[5]
         for c in CONDITIONS:
             band_mean(ax, _moved(stepD[c]), COLORS[c], LABELS[c])
         if realStep is not None:
@@ -539,14 +590,27 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
         ax.set_title('F) E[dx | dx>0] (jump size when moving)')
         ax.set_ylabel('Mean displacement over moving steps (tiles)')
 
-    for ax in axes:
+    # Panel G: deviation-from-real-trajectory by warmup (bespoke legend).
+    dev_ax = None
+    if have_G:
+        dev_ax = flat[n_panels - 1]
+        drew = _draw_deviation_by_warmup(
+            dev_ax, decoded, start_pos, future_pos, warmups, central=central)
+        if not drew:
+            dev_ax = None  # nothing drawn -> treat like a normal (empty) axis
+
+    for i, ax in enumerate(flat):
+        if i >= n_panels:
+            ax.set_visible(False)  # hide unused slots in the 2-row grid
+            continue
         ax.set_xlabel('Dream step (0 = seed)')
         ax.grid(alpha=0.3)
         ax.set_xlim(0, dispA['A'].shape[1] - 1)
         ax.set_ylim(bottom=0)
-        ax.legend(loc='upper left', fontsize=8)
-    if stepD is not None:
-        axes[4].set_ylim(0, 1)  # P[dx=0] is a probability
+        if ax is not dev_ax:  # panel G manages its own two-part legend
+            ax.legend(loc='upper left', fontsize=8)
+    if pzero_ax is not None:
+        pzero_ax.set_ylim(0, 1)  # P[dx=0] is a probability
 
     fig.tight_layout()
     out = save_dir / 'seed_ablation_curves.png'
@@ -573,6 +637,78 @@ def plot_error_vs_warmup(distB_by_w, warmups, save_dir, central='median'):
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out.name}")
+
+
+def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
+                              conditions=('A', 'B'), central='median',
+                              shading='none', bins=None, n_bins=None):
+    """Draw panel G onto `ax`: per-step deviation from the REAL trajectory,
+    grouped by warmup length.
+
+    Deviation at dream step t = |decoded_dream_t - real_t| (Manhattan tiles),
+    with real_0 = start and real_t = future[t-1] (same alignment as
+    dream_vs_future). Unlike panel B (distance from the real *start*, which
+    grows simply because both dream and agent walk away from the seed), this is
+    a tracking-fidelity metric: it rises as the dream drifts off the real path,
+    and should sit LOWER at longer warmups if warmup helps seed the dream.
+
+    Warmups are split into `n_bins` equal-count groups over the ACTUAL warmups
+    present (default DEFAULT_N_WARMUP_BINS=5), so every bin is non-empty and the
+    full range is covered on any horizon. Pass `bins` as an explicit list of
+    (lo, hi, label) inclusive ranges to override. Color encodes the warmup group
+    (light=short -> dark=long); linestyle encodes the condition (A solid, B
+    dotted). Only conditions in `conditions` are drawn (A/B share the real
+    deter, isolating the image-vs-prior stoch effect across warmup). Returns
+    True if anything was drawn (so the caller can manage its bespoke two-part
+    legend), else False.
+    """
+    from matplotlib.lines import Line2D
+    warmups = np.asarray(warmups)
+    if bins is None:
+        bins = _auto_warmup_bins(warmups, n_bins or DEFAULT_N_WARMUP_BINS)
+    # Real trajectory as (S, Nw, H+1, 2): [start, future_1..future_H].
+    real_path = np.concatenate([start_pos[:, :, None, :], future_pos], axis=2)
+    Hp1 = real_path.shape[2]
+
+    # Populate bins with the warmup indices whose warmup value falls in range.
+    groups = []
+    for lo, hi, lab in bins:
+        idx = np.where((warmups >= lo) & (warmups <= hi))[0]
+        if len(idx):
+            groups.append((lab, idx))
+        else:
+            print(f"  (warmup bin '{lab}' [{lo},{hi}] empty, skipped)")
+    if not groups:
+        print("  (no warmup groups populated; deviation panel left blank)")
+        return False
+
+    cmap = plt.cm.viridis
+    fracs = (np.linspace(0.12, 0.88, len(groups)) if len(groups) > 1
+             else np.array([0.5]))
+
+    for gi, (lab, idx) in enumerate(groups):
+        color = cmap(fracs[gi])
+        for c in conditions:
+            # (S, Nw, Ns, H+1) deviation, then keep only this bin's warmups.
+            dev = _manhattan(decoded[c], real_path[:, :, None, :, :])
+            dev_bin = dev[:, idx].reshape(-1, Hp1)
+            _band(ax, dev_bin, color, None, ls=COND_LS.get(c, '-'),
+                  central=central, shading=shading)
+
+    ax.set_title('G) deviation from real trajectory by warmup')
+    ax.set_ylabel('Manhattan deviation from real trajectory (tiles)')
+
+    # Two-part legend: warmup group (color) and condition (linestyle).
+    grp_handles = [Line2D([0], [0], color=cmap(fracs[gi]), lw=2.5, label=lab)
+                   for gi, (lab, _) in enumerate(groups)]
+    cond_handles = [Line2D([0], [0], color='0.3', lw=2.0, ls=COND_LS.get(c, '-'),
+                           label=LABELS[c]) for c in conditions]
+    leg1 = ax.legend(handles=grp_handles, title='Warmup group',
+                     loc='upper left', fontsize=7, title_fontsize=8)
+    ax.add_artist(leg1)
+    ax.legend(handles=cond_handles, title='Condition', loc='lower right',
+              fontsize=7, title_fontsize=8)
+    return True
 
 
 def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
@@ -737,7 +873,9 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central=central, shading=cfg.shading,
-                       stepD=stepD, realStep=realStep)
+                       stepD=stepD, realStep=realStep,
+                       decoded=decoded, start_pos=start_pos,
+                       future_pos=future_pos, warmups=warmups)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
     if cfg.n_example_dreams > 0:
         plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
