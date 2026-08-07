@@ -31,7 +31,10 @@ class RSSM(nj.Module):
   blocks: int = 8
   free_nats: float = 1.0
   gru_act: str = 'tanh'
-  train_noise_std: float = 0.0  # post-gate Gaussian noise on deter, TRAINING only
+  train_noise_std: float = 0.0  # Gaussian noise std on deter, TRAINING only (0=off)
+  train_noise_where: str = 'candidate'  # injection point: 'candidate' (pre-gru_act,
+  #   rectified by relu -> deter stays >=0) | 'deter' (post-gate on the blended
+  #   state, legacy; signed, pushes deter off the relu manifold)
   require_relu_deter: bool = True  # enforce gru_act='relu' so recorded wake AND
   #   dream deter share one (non-negative) activation space — see below
 
@@ -269,18 +272,32 @@ class RSSM(nj.Module):
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
-    cand = nn.act(self.gru_act)(reset * cand)
+    cand = reset * cand
+    # Train-noise injection (training only). Two placements, chosen by
+    # train_noise_where:
+    #   'candidate' (default): additive Gaussian on the candidate PRE-activation,
+    #     before gru_act. With gru_act=relu the activation rectifies it, so cand
+    #     stays >=0 and the blended deter stays in non-negative (relu) space —
+    #     wake, dream, and noise-seeded deter all share one activation space
+    #     (no signed off-manifold artifact). Enters the state only through the
+    #     update gate, so its effect is gated + one-sided.
+    #   'deter' (legacy): additive Gaussian on the post-gate blended deter. Signed
+    #     and carried forward directly, so it pushes the state off the relu
+    #     manifold (this is the placement that made the tn dumps ~31% negative).
+    # Either way it forces the dynamics to contract the perturbation back onto
+    # the wake manifold (the "sufficient conditions for offline reactivation").
+    add_noise = training and self.train_noise_std
+    if add_noise and self.train_noise_where == 'candidate':
+      cand = cand + self.train_noise_std * jax.random.normal(
+          nj.seed(), cand.shape, dtype=cand.dtype)
+    cand = nn.act(self.gru_act)(cand)
     update = jax.nn.sigmoid(update - 1)  # bias toward 0 → default is to remember
     deter = update * cand + (1 - update) * deter  # GRU update: blend new candidate with old h
-    # Train-noise injection: additive Gaussian on the post-gate deter, mirroring
-    # pRNN's internal-noise sleep drive but placed AFTER the gated blend so it
-    # perturbs the state that actually carries forward (matching the dream-seed
-    # test distribution). Training only — forces the network to learn dynamics
-    # that contract off-manifold deter back onto the wake manifold, the
-    # "sufficient conditions for offline reactivation" mechanism.
-    if training and self.train_noise_std:
+    if add_noise and self.train_noise_where == 'deter':
       deter = deter + self.train_noise_std * jax.random.normal(
           nj.seed(), deter.shape, dtype=deter.dtype)
+    elif add_noise and self.train_noise_where not in ('candidate', 'deter'):
+      raise ValueError(f'unknown train_noise_where: {self.train_noise_where!r}')
     return deter
 
   def _prior(self, feat):

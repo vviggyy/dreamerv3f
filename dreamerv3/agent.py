@@ -507,8 +507,10 @@ class Agent(embodied.jax.Agent):
         nd = mu + sd * zt
       elif mode == 'shuffle':
         pool = allrd.reshape((-1, allrd.shape[-1]))         # (B*T, Dt)
-        idx = jax.random.randint(nj.seed(), rdf.shape, 0, pool.shape[0])
-        nd = jnp.take_along_axis(pool, idx, axis=0)         # per-dim resample
+        # NB: distinct name — must NOT shadow the warmup `idx` above, which the
+        # f2 closure captures by reference for the A/B/C/D reshape below.
+        boot_idx = jax.random.randint(nj.seed(), rdf.shape, 0, pool.shape[0])
+        nd = jnp.take_along_axis(pool, boot_idx, axis=0)    # per-dim resample
       else:
         raise ValueError(f'unknown seed_ablation_noise_mode: {mode}')
       nd = nn.cast(nd)
