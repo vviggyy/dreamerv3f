@@ -11,6 +11,7 @@
 - `dreamerv3/dream_vs_future.py` — decodes policy-driven dream rollouts with a saved position decoder and compares them against the agent's *real future* trajectory from the same replay start (exported as `dream/future_pos` in report). Produces a divergence-vs-horizon curve (Manhattan tiles) with shuffled-future chance baseline. Uses policy actions (not real actions), so divergence conflates dynamics drift + policy/behavior mismatch — by design. Does NOT require `include_position` (player_pos is carried in obs for logging, never fed to the encoder)
 - `dreamerv3/dream_seed_ablation.py` — four-condition dream **seeding** ablation (crossed 2×2: `deter ∈ {real, noise}` × `stoch ∈ {posterior(image), prior}`). A=both (current), B=just-latent, C=just-image (noise deter+real image), D=neither (noise). Seed construction lives in `agent.report()` behind `agent.report_seed_ablation`; uses `RSSM.post_from_deter` to inject an arbitrary deter into the posterior. Each seed tiled `seed_ablation_nseeds` times → cross-seed variability. Decodes every dreamed latent with the saved position decoder. Produces `seed_ablation_curves.png` (6 panels: displacement-from-own-start, distance-from-real-start, cross-seed variability, step-to-step displacement/continuity — decoded distance from previous tile per step; read with central=mean since median collapses to 0 — plus P[dx=0] (per-step stay probability) and E[dx|dx>0] (mean jump size over moving steps), both always mean-aggregated regardless of `central`). Full walkthrough in `docs/training_and_dream_loop.md` §11+§13
 - `dreamerv3/replay_activations.py` — replays saved trajectory observations through a (possibly untrained) agent to record activations. Used as control: does spatial decoding require learned representations or is it trivially present? Supports `--replay_activations.load_checkpoint False` for random-weight control
+- `dreamerv3/state_probe.py` — interoceptive state probe: fix the visual scene, sweep the status vitals shown in the image (health/food/drink/energy), and measure how the policy shifts (action distribution + value). Mutates crafter's `player.inventory` and re-renders (terrain untouched, on-distribution icons) rather than editing pixels. Fresh-carry single-frame stimulus (is_first=True resets the recurrent state). Drives the real policy, capturing a frame every `warmup_steps`; at each frame runs the full factorial grid over `vitals` × `levels`. Requires `agent.probe_policy` (set by main.py) which makes `agent.policy` emit `policy_logits` + `value`. Outputs: `value_vs_vitals.png`, `action_probs_vs_vitals.png`, `value_heatmaps.png` (vital pairs), `probe_frames.png`, `state_probe_results.pkl`. Replot via `--state_probe.from_pkl`. NOTE `value` is the head's raw pred() (normalized space) — read its shape vs vitals, not absolute return
 - `dreamerv3/inspect_replay.py` — dumps a **faithful** report-batch from the actual replay buffer (fresh eval rollouts → `make_stream('report')`): recomputed posterior deter (with the loaded checkpoint), the real replay images, player_pos, and the exact per-dim `mu`/`sd` the seed ablation's noise deter is built from. Emitted via `agent.report_dump_batch` as `dump/{deter,mu,sd,player_pos,image}`. Saves `replay_batch.pkl` for `inspect_replay_deter.ipynb` (set `SOURCE='replay_dump'`). Distinct from reusing saved trajectories (which record deter from eval_trajectory's own rollout)
 - `dreamerv3/inspect_replay_deter.ipynb` — notebook to sample a report-style batch (from saved trajectories OR the faithful `replay_batch.pkl` via `SOURCE`), inspect the 16 sequence start locations + start frames on the world map, the per-dim deter `mu`/`sd`, the noise-null decode comparison (matched/matched_relu/truncnorm/shuffle/zero-mean), and per-sequence deter histograms
 - `dreamerv3/tuning_curve.py` — spatial tuning curve analysis: classifies neurons into cell types (place, border, HD, etc.) using pynapple. Computes per-neuron spatial info, EV reliability, autocorrelation metrics, and HD mutual info across all recorded layers. Interactive viewer via `--from_pkl`
@@ -31,6 +32,7 @@
 - `run_Decoding.sh` — standard position decoding (GPU). Settings: repr, device, n_jobs
 - `run_DreamVsFuture.sh` — decode policy dreams and compare to real future trajectory (GPU). Saves decoder if missing, then runs `dream_vs_future`. Settings: LOGDIR, DREAM_EPISODES, DREAM_BATCHES
 - `run_DreamSeedAblation.sh` — four-condition dream seeding ablation (GPU). Saves decoder if missing, then runs `dream_seed_ablation`. Settings: LOGDIR, DREAM_EPISODES, DREAM_BATCHES, N_SEEDS
+- `run_StateProbe.sh` — interoceptive state probe (GPU/CPU). Sweeps status vitals in the image, measures policy/value shift. Settings: LOGDIR, NUM_FRAMES, WARMUP_STEPS, VITALS, LEVELS, FROM_PKL
 - `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, holdout, resume
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing
 - `run_Tuning.sh` — tuning curve analysis (A100). Settings: layers, thresholds, n_jobs
@@ -208,6 +210,20 @@ python dreamerv3/main.py \
   --jax.platform cpu
 ```
 Output format is identical to eval_trajectory — run decode_position/tuning_curve on the output as usual. Key args: `--replay_activations.max_episodes N` (0=all), `--replay_activations.load_checkpoint {True,False}`.
+
+### state probe (interoceptive stimulus manipulation)
+```
+python dreamerv3/main.py \
+  --configs crafter_small size25m \
+  --logdir ./logdir/my_run \
+  --script state_probe \
+  --run.from_checkpoint ./logdir/my_run/ckpt/TIMESTAMP_DIR \
+  --state_probe.save_path ./logdir/my_run/state_probe \
+  --state_probe.num_frames 12 --state_probe.warmup_steps 20 \
+  --state_probe.vitals food,drink,energy --state_probe.levels 0,3,6,9 \
+  --seed 45 --jax.platform cpu
+```
+Fixes each captured scene and re-renders it with every combination of the status vitals (factorial `vitals` × `levels`), then runs the policy fresh-carry on each and records the action distribution + value. Produces `value_vs_vitals.png`, `action_probs_vs_vitals.png`, `value_heatmaps.png`, `probe_frames.png`, `state_probe_results.pkl`. Replot without rerunning: `--state_probe.from_pkl <state_probe_results.pkl>`. Config: `--state_probe.{num_frames,warmup_steps,vitals,levels,load_checkpoint}`. Reads the status bar the model was trained on (mutates `player.inventory`, terrain untouched); a flat response = the policy ignores the interoceptive bar (plausible for random-spawn navigation runs with `disable_mobs`). NOTE the field is `levels` not `values` (the latter collides with dict `.values()` on the config object).
 
 ### inspect replay (faithful report-batch dump)
 ```

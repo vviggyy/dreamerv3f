@@ -86,6 +86,15 @@ defaults:
     real_style: ghost     # real trajectory in decoded-dream plots: bold (on top) | ghost (thin dashed under dream) | none
     save_activations: False  # also dump raw dream deter per condition -> dream_deter_{A,B,C,D}.pkl (key 'dream_deter', shape (N,H+1,D)) for manifold_analysis.py. streams per-batch to disk (bounded RAM)
 
+  state_probe:
+    save_path: ''
+    load_checkpoint: True
+    num_frames: 8          # distinct scene frames to probe (captured while the real policy plays)
+    warmup_steps: 20       # real-policy steps between captured frames (for scene diversity)
+    vitals: food,drink,energy   # which crafter vitals to sweep (comma-sep; subset of health,food,drink,energy)
+    levels: 0,3,6,9        # grid of values each vital takes (comma-sep ints 0-9); full factorial per frame
+    from_pkl: ''           # replot only: path to a saved state_probe_results.pkl (skips agent/env)
+
   replay_activations:
     source_data: ''
     save_path: ''
@@ -183,6 +192,7 @@ defaults:
     dream_warmup: 0   # dream_vs_future: observed steps before dream (0->T//2). seed ablation: 0->dense over all warmups, N>0->single warmup N
     dream_horizon: 0  # report dream rollout length (0 -> imag_length). W+H<=report_length
     record_activations: False
+    probe_policy: False  # state_probe: also emit policy_logits (over actions) + value from policy()
     mask_visual_k: 0
     mask_visual_invert: False
     mask_visual_prob: False

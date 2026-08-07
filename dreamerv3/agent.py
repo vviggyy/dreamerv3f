@@ -88,7 +88,7 @@ class Agent(embodied.jax.Agent):
 
   @property
   def policy_keys(self):
-    if self.config.record_activations:
+    if self.config.record_activations or self.config.probe_policy:
       return '^(enc|dyn|dec|pol|val)/'
     return '^(enc|dyn|dec|pol)/'
 
@@ -141,6 +141,11 @@ class Agent(embodied.jax.Agent):
       policy = self.pol(self.feat2tensor(feat), bdims=1)
     act = sample(policy)
     out = {}
+    if self.config.probe_policy:
+      # Expose the action distribution logits + value estimate for state_probe.
+      pdist = policy['action'] if isinstance(policy, dict) else policy
+      out['policy_logits'] = pdist.logits
+      out['value'] = self.val(self.feat2tensor(feat), bdims=1).pred()
     out['finite'] = elements.tree.flatdict(jax.tree.map(
         lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))

@@ -37,7 +37,8 @@ def main(argv=None):
   # priority (re-applied below), so explicit overrides win.
   INFERENCE_SCRIPTS = (
       'eval_trajectory', 'eval_only', 'dream_decode', 'dream_vs_future',
-      'dream_seed_ablation', 'replay_activations', 'inspect_replay')
+      'dream_seed_ablation', 'replay_activations', 'inspect_replay',
+      'state_probe')
   if config.script in INFERENCE_SCRIPTS and '{timestamp}' not in config.logdir:
     saved_path = elements.Path(config.logdir) / 'config.yaml'
     if saved_path.exists():
@@ -94,6 +95,7 @@ def main(argv=None):
       dream_seed_ablation=config.dream_seed_ablation,
       replay_activations=config.replay_activations,
       inspect_replay=config.inspect_replay,
+      state_probe=config.state_probe,
   )
 
   if config.script == 'train':
@@ -178,6 +180,15 @@ def main(argv=None):
         bind(make_env, config),
         bind(make_replay, config, 'replay'),
         bind(make_stream, config),
+        bind(make_logger, config),
+        args)
+
+  elif config.script == 'state_probe':
+    config = config.update({'agent.probe_policy': True})
+    from . import state_probe
+    state_probe.state_probe(
+        bind(make_agent, config),
+        bind(make_env, config),
         bind(make_logger, config),
         args)
 
