@@ -21,6 +21,14 @@ concat = lambda xs, a: jax.tree.map(lambda *x: jnp.concatenate(x, a), *xs)
 isimage = lambda s: s.dtype == np.uint8 and len(s.shape) == 3
 
 
+# Bar pool for the seed-ablation A' (perturbed-state) condition. The driver
+# (dream_seed_ablation.py) renders it and sets this BEFORE make_agent(), so the
+# inner Agent.__init__ can bake it as `self.aprime_pool` before report() is first
+# traced (report is compiled eagerly at construction — a pool baked after that
+# is invisible, so the A' branch would compile out). See docs §11+§13.
+_APRIME_POOL = None
+
+
 class Agent(embodied.jax.Agent):
 
   banner = [
@@ -34,6 +42,12 @@ class Agent(embodied.jax.Agent):
     self.obs_space = obs_space
     self.act_space = act_space
     self.config = config
+
+    # A' (perturbed-state) bar pool: baked here (before report() is traced) from
+    # the module-level handoff the driver sets prior to make_agent(). Kept a plain
+    # constant so report() can composite/re-encode without new params or inputs.
+    if config.seed_ablation_perturb_state and _APRIME_POOL is not None:
+      self.aprime_pool = jnp.asarray(_APRIME_POOL)
 
     exclude = ['is_first', 'is_last', 'is_terminal', 'reward']
     if not config.include_position:
@@ -538,6 +552,43 @@ class Agent(embodied.jax.Agent):
         seq = jnp.concatenate([d_t[:, None], feat['deter']], 1)
         metrics[f'seedabl/{name}/deter'] = seq.reshape(
             (RB, Nw, Nseed, H + 1, Dt))
+
+      # Condition A' (Aprime): real deter + posterior from a seed image whose
+      # interoceptive status bar is overwritten with random vitals. Unlike
+      # A/B/C/D (all Nseed copies share ONE posterior, differing only by the
+      # sampled z), here each of the Nseed seeds carries an INDEPENDENT perturbed
+      # image -> a distinct posterior, so A''s cross-seed spread measures
+      # state-perturbation sensitivity. Uses post_from_deter (same inject path as
+      # C) with the REAL deter, so step 0 decodes identically to A (the position
+      # decoder reads deter only). The pre-rendered bar pool is baked onto the
+      # model as `self.aprime_pool` by dream_seed_ablation.py (crafter rendering
+      # can't run inside the jitted report); per-seed indices are drawn fresh
+      # each report call (redraw-per-batch, independent per (RB, Nw, seed)).
+      if (self.config.seed_ablation_perturb_state and
+          getattr(self, 'aprime_pool', None) is not None and 'image' in obs):
+        bar_pool = jnp.asarray(self.aprime_pool)             # (K, inv, Wpx, 3) uint8
+        K, inv = bar_pool.shape[0], bar_pool.shape[1]
+        N = RB * Nw * Nseed
+        d_tA = jnp.repeat(rdf, Nseed, axis=0)                # (N, Dt) == A's deter
+        seed_img = jnp.repeat(f2(obs['image'][:RB]), Nseed, axis=0)  # (N,Hpx,Wpx,3)
+        sel = jax.random.randint(nj.seed(), (N,), 0, K)      # per-seed pool index
+        bars = bar_pool[sel].astype(seed_img.dtype)          # (N, inv, Wpx, 3)
+        pert_img = seed_img.at[:, -inv:, :, :].set(bars)     # overwrite status bar
+        # Re-encode the single perturbed frame (encoder is stateless: initial={}).
+        obs1 = {k: jnp.repeat(f2(obs[k][:RB]), Nseed, axis=0) for k in obs}
+        obs1['image'] = pert_img
+        _, _, ptok = self.enc(
+            self.enc.initial(N), obs1, jnp.ones((N,), bool),
+            training=False, single=True)
+        l_t = self.dyn.post_from_deter(d_tA, ptok)
+        s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
+        carry0 = nn.cast(dict(deter=d_tA, stoch=s_t))
+        _, feat, _ = self.dyn.imagine(carry0, dreamfn, H, training=False)
+        seq = jnp.concatenate([d_tA[:, None], feat['deter']], 1)
+        metrics['seedabl/Aprime/deter'] = seq.reshape(
+            (RB, Nw, Nseed, H + 1, Dt))
+        metrics['seedabl/Aprime/pool_idx'] = sel.reshape((RB, Nw, Nseed))
+
       metrics['seedabl/start_pos'] = start_pos              # (RB, Nw, 2)
       metrics['seedabl/future_pos'] = future_pos            # (RB, Nw, H, 2)
       metrics['seedabl/warmups'] = jnp.asarray(Wlist, i32)  # (Nw,)

@@ -85,6 +85,9 @@ defaults:
     noise_mode: matched   # noise-deter null for conditions C/D: matched | matched_relu | truncnorm | shuffle
     real_style: ghost     # real trajectory in decoded-dream plots: bold (on top) | ghost (thin dashed under dream) | none
     save_activations: False  # also dump raw dream deter per condition -> dream_deter_{A,B,C,D}.pkl (key 'dream_deter', shape (N,H+1,D)) for manifold_analysis.py. streams per-batch to disk (bounded RAM)
+    perturb_state: False     # add condition A' (Aprime): real deter + posterior from a seed image whose interoceptive status bar is overwritten with random vitals. Each of the n_seeds gets an independent uniform draw (redrawn per batch) -> A' cross-seed spread measures state-perturbation sensitivity. Adds condition_compare_ADAprime.png (A vs D vs A')
+    perturb_vitals: health,food,drink,energy  # which status vitals A' randomizes (comma-sep subset of health,food,drink,energy); each uniform int 0-9
+    perturb_pool: 1024       # # of pre-rendered random status-bar strips A' samples from (baked as a constant; sampled with replacement per seed)
 
   state_probe:
     save_path: ''
@@ -190,6 +193,7 @@ defaults:
     seed_ablation_nseeds: 16
     seed_ablation_warmup_stride: 1  # dense-warmup stride for the seed ablation
     seed_ablation_noise_mode: matched  # noise-deter null for C/D: matched (mu+sd*N), matched_relu (clip>=0), truncnorm (N>=0), shuffle (per-dim bootstrap of real deter; preserves marginal+nonneg)
+    seed_ablation_perturb_state: False  # emit condition A' (Aprime): real deter + posterior from a status-bar-perturbed seed image. Requires the driver to bake the rendered bar pool onto the model (dream_seed_ablation.py). See dream_seed_ablation.perturb_state
     dream_warmup: 0   # dream_vs_future: observed steps before dream (0->T//2). seed ablation: 0->dense over all warmups, N>0->single warmup N
     dream_horizon: 0  # report dream rollout length (0 -> imag_length). W+H<=report_length
     record_activations: False

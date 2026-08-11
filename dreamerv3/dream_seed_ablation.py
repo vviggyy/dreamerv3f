@@ -91,19 +91,29 @@ import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
 
+from .state_probe import _unwrap_crafter  # reuse the crafter unwrap for A' bars
 
+
+# Base four conditions. A' (Aprime) is an OPTIONAL 5th condition (added only when
+# --dream_seed_ablation.perturb_state), so it is NOT in CONDITIONS: the standard
+# 4-condition panels (seed_ablation_curves, decoded_dreams, warmup deviation)
+# keep iterating CONDITIONS and ignore it. A' is surfaced only in the dedicated
+# A/D/A' comparison plot. Functions that should pick A' up when present iterate
+# the decoded dict's keys instead of this constant (see compute_curves).
 CONDITIONS = ['A', 'B', 'C', 'D']
 LABELS = {
     'A': 'A: both (real deter + image)',
     'B': 'B: just-latent (real deter + prior)',
     'C': 'C: just-image (noise deter + image)',
     'D': 'D: neither (noise deter + prior)',
+    'Aprime': "A': perturbed-state (real deter + vitals-perturbed image)",
 }
-COLORS = {'A': 'crimson', 'B': 'steelblue', 'C': 'darkorange', 'D': 'dimgray'}
+COLORS = {'A': 'crimson', 'B': 'steelblue', 'C': 'darkorange', 'D': 'dimgray',
+          'Aprime': 'seagreen'}
 
 # Linestyle per condition for the warmup-grouped deviation plot (color there
 # encodes the warmup group, so the condition must be carried by linestyle).
-COND_LS = {'A': '-', 'B': ':', 'C': '--', 'D': '-.'}
+COND_LS = {'A': '-', 'B': ':', 'C': '--', 'D': '-.', 'Aprime': (0, (5, 1))}
 
 # Panel G groups warmups into this many equal-count bins by default. Bins are
 # derived from the ACTUAL warmups present (see _auto_warmup_bins), so they cover
@@ -439,7 +449,9 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
     _agg = np.nanmean if central == 'mean' else np.nanmedian
     rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
     dispA, distB, varC, distB_by_w, stepD = {}, {}, {}, {}, {}
-    for c in CONDITIONS:
+    # Iterate whatever conditions are present (A/B/C/D always; 'Aprime' when the
+    # perturb-state run produced it) so A' flows into the comparison plot/summary.
+    for c in decoded:
         pos = decoded[c]                                 # (S, Nw, Ns, H+1, 2)
         dA = _manhattan(pos, pos[:, :, :, :1, :])        # (S, Nw, Ns, H+1)
         dB = _manhattan(pos, rs)                         # (S, Nw, Ns, H+1)
@@ -471,7 +483,7 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
 def _print_summary(dispA, distB, varC, realA, central, stepD=None, realStep=None):
     _agg = np.nanmean if central == 'mean' else np.nanmedian
     print(f"\n[summary] {central} final-step (H) values, pooled over warmups:")
-    for c in CONDITIONS:
+    for c in dispA:
         # step-dist / P[dx=0] / E[dx|dx>0] pooled over ALL steps (continuity),
         # not just the final step. P and conditional-mean always use nanmean.
         if stepD is not None:
@@ -513,6 +525,10 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
                        decoded=r['decoded'], start_pos=r['start_pos'],
                        future_pos=r['future_pos'], warmups=warmups)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
+    if 'Aprime' in r['decoded']:
+        plot_condition_compare(r['decoded'], r['start_pos'], r['future_pos'],
+                               dispA, varC, stepD, realA, realStep, save_dir,
+                               central=central, shading=shading)
     if n_example_dreams > 0:
         plot_decoded_dreams(r['decoded'], r['start_pos'], r['future_pos'],
                             r['metadata'], save_dir, n_cols=n_example_dreams,
@@ -642,6 +658,75 @@ def plot_error_vs_warmup(distB_by_w, warmups, save_dir, central='median'):
     print(f"  Saved {out.name}")
 
 
+def plot_condition_compare(decoded, start_pos, future_pos, dispA, varC, stepD,
+                           realA, realStep, save_dir, conds=('A', 'D', 'Aprime'),
+                           central='median', shading='band'):
+    """A vs D vs A' comparison across the decoded-dream metrics.
+
+    Overlays the three conditions on four panels:
+      (i)  distance-from-real-trajectory  (per-step |decoded_t - real_t|)
+      (ii) displacement-from-own-start
+      (iii) step-to-step continuity (decoded distance from previous tile)
+      (iv) cross-seed variability
+    A = full real seed and D = pure noise bracket the range; A' = real deter with
+    a status-bar-perturbed image sits between them iff the interoceptive channel
+    steers the dream. A' cross-seed spread (iv) is the headline: because A''s seeds
+    carry independent perturbations (not just z-samples), it measures sensitivity
+    to the perturbed state. Honors central/shading via _band; regenerates from the
+    results pkl (needs only decoded positions)."""
+    conds = [c for c in conds if c in decoded]
+    if 'Aprime' not in conds:
+        return
+    S, Nw, Ns, Hp1, _ = decoded['A'].shape
+    # Per-step deviation from the real trajectory: |decoded_dream_t - real_t|.
+    real_path = np.concatenate(
+        [start_pos[:, :, None, :], future_pos], axis=2)      # (S, Nw, H+1, 2)
+    dev = {c: _manhattan(decoded[c], real_path[:, :, None, :, :]).reshape(
+        S * Nw * Ns, Hp1) for c in conds}
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    for c in conds:
+        _band(axes[0, 0], dev[c], COLORS[c], LABELS[c], central=central,
+              shading=shading)
+    axes[0, 0].set_title('Distance from real trajectory (per step)')
+    axes[0, 0].set_ylabel('Manhattan to real position (tiles)')
+
+    for c in conds:
+        _band(axes[0, 1], dispA[c], COLORS[c], LABELS[c], central=central,
+              shading=shading)
+    _band(axes[0, 1], realA, 'black', 'real displacement', ls='--',
+          central=central, shading='none')
+    axes[0, 1].set_title('Displacement from own start')
+    axes[0, 1].set_ylabel('Manhattan from step-0 tile (tiles)')
+
+    for c in conds:
+        _band(axes[1, 0], stepD[c], COLORS[c], LABELS[c], central=central,
+              shading=shading)
+    _band(axes[1, 0], realStep, 'black', 'real step', ls='--', central=central,
+          shading='none')
+    axes[1, 0].set_title('Step-to-step continuity')
+    axes[1, 0].set_ylabel('Manhattan from previous tile (tiles)')
+
+    for c in conds:
+        _band(axes[1, 1], varC[c], COLORS[c], LABELS[c], central=central,
+              shading=shading)
+    axes[1, 1].set_title('Cross-seed variability (A′ = state sensitivity)')
+    axes[1, 1].set_ylabel('Mean spread from seed centroid (tiles)')
+
+    for ax in axes.ravel():
+        ax.set_xlabel('Dream step')
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.suptitle(f'A vs D vs A′ (perturbed state) — {central}, '
+                 f'pooled over {S} starts × {Nw} warmups × {Ns} seeds',
+                 fontsize=13)
+    fig.tight_layout()
+    out = save_dir / 'condition_compare_ADAprime.png'
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
 # Gray shades for the pooled (warmup-independent) reference conditions in
 # panel G. Kept off the viridis ramp so they read as baselines, not warmup bins.
 POOLED_GRAY = {'C': '0.55', 'D': '0.3'}
@@ -740,6 +825,41 @@ def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
     return True
 
 
+def _render_aprime_pool(env, vitals_str, K, seed):
+    """Render K status-bar strips (bottom `_ego_inv_rows` rows of the egocentric
+    frame) from independent uniform vital draws, reusing state_probe's crafter
+    unwrap. The whole bar is overwritten downstream; in a random-spawn/disable-mobs
+    nav run the non-vital inventory slots are 0 in both the seed frames and this
+    fresh env, so exactly `vitals` are perturbed. Returns (pool (K,inv,W,3) uint8,
+    combos (K,len(vitals)) int, vitals list)."""
+    crafter = _unwrap_crafter(env)
+    # Reset so crafter builds the world + player before we mutate inventory
+    # (crafter._env._player is None until the first reset).
+    env.step({'action': np.asarray(0, np.int32), 'reset': np.asarray(True, bool)})
+    ego = getattr(env, '_egocentric_view', None)
+    inv_rows = int(getattr(crafter, '_ego_inv_rows', 0))
+    assert ego and inv_rows > 0, (
+        "perturb_state needs an egocentric env with an inventory bar "
+        f"(egocentric_view={ego}, _ego_inv_rows={inv_rows})")
+    vitals = [v.strip() for v in vitals_str.split(',') if v.strip()]
+    assert all(v in ('health', 'food', 'drink', 'energy') for v in vitals), \
+        f"perturb_vitals must be subset of health,food,drink,energy: {vitals}"
+    rng = np.random.default_rng(seed)
+    combos = rng.integers(0, 10, size=(K, len(vitals)))        # uniform 0-9 / vital
+    player = crafter._env._player
+    saved = {k: player.inventory.get(k) for k in vitals}
+    bars = []
+    for k in range(K):
+        for vi, v in enumerate(vitals):
+            player.inventory[v] = int(combos[k, vi])
+        raw = crafter._env._obs()                              # standard render
+        img = crafter._render_egocentric(raw) if ego else raw
+        bars.append(np.asarray(img, np.uint8)[-inv_rows:])     # bottom bar rows
+    for k, v in saved.items():                                 # restore inventory
+        player.inventory[k] = v
+    return np.stack(bars, 0), combos, vitals
+
+
 def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                         make_logger, args):
     cfg = args.dream_seed_ablation
@@ -771,7 +891,23 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         act_dir = save_dir / 'dream_activations_tmp'
         act_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Agent + checkpoint (params only, skipping opt/ — see dream_vs_future).
+    # 1. A' bar pool must be rendered + handed to the model BEFORE make_agent():
+    #    report() is traced eagerly at construction, so a pool set afterward is
+    #    invisible and the A' branch would compile out (see agent._APRIME_POOL).
+    from . import agent as _agent_mod
+    _agent_mod._APRIME_POOL = None
+    aprime_meta = {}
+    if cfg.perturb_state:
+        _tmpenv = make_env(0, fixed_seed=True)
+        pool, combos, pvitals = _render_aprime_pool(
+            _tmpenv, cfg.perturb_vitals, int(cfg.perturb_pool), args.seed)
+        _tmpenv.close()
+        _agent_mod._APRIME_POOL = pool
+        aprime_meta = {'aprime_vitals': pvitals, 'aprime_pool_combos': combos}
+        print(f"  A' bar pool: {pool.shape} over vitals {pvitals} "
+              f"(sampled per-seed with replacement)")
+
+    # 2. Agent + checkpoint (params only, skipping opt/ — see dream_vs_future).
     print("Creating agent...")
     agent = make_agent()
     logger = make_logger()
@@ -795,6 +931,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         'env_seed': env_seed,
         'world_seed': hash((env_seed, 1)) if env_seed is not None else None,
         'fixed_seed': True, 'task': 'crafter', 'area': area,
+        **aprime_meta,   # aprime_vitals + aprime_pool_combos when perturb_state
     }
     env.close()
 
@@ -831,7 +968,10 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     stream = iter(agent.stream(make_stream(replay, 'report')))
     carry = agent.init_report(args.batch_size)
 
-    decoded = {c: [] for c in CONDITIONS}   # each: list of (RB, Nw, Nseed, H+1, 2)
+    # A/B/C/D always; 'Aprime' when perturb_state produced it (see agent.report).
+    conditions = list(CONDITIONS) + (['Aprime'] if cfg.perturb_state else [])
+    decoded = {c: [] for c in conditions}   # each: list of (RB, Nw, Nseed, H+1, 2)
+    aprime_idx = [] if cfg.perturb_state else None   # per-seed pool index, for repro
     starts, futures = [], []
     warmups = None
     for b in range(cfg.num_batches):
@@ -841,21 +981,30 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
             print("ERROR: seedabl/* missing. Is agent.report_seed_ablation on, "
                   "and does obs carry player_pos?")
             return
-        for c in CONDITIONS:
+        if cfg.perturb_state and 'seedabl/Aprime/deter' not in mets:
+            print("ERROR: perturb_state on but seedabl/Aprime/* missing. Is the "
+                  "bar pool baked (agent.model.aprime_pool) and does obs carry an "
+                  "'image'? Is agent.seed_ablation_perturb_state True?")
+            return
+        for c in conditions:
             raw = np.array(mets[f'seedabl/{c}/deter'])  # (RB, Nw, Nseed, H+1, Dt)
             decoded[c].append(decode(raw))
             if act_dir is not None:
                 # collapse the start axes -> (N, H+1, Dt), N = RB*Nw*Nseed
                 flat = raw.reshape(-1, *raw.shape[3:]).astype(np.float32)
                 np.save(act_dir / f'{c}_b{b}.npy', flat)
+        if aprime_idx is not None:
+            aprime_idx.append(np.array(mets['seedabl/Aprime/pool_idx']))  # (RB,Nw,Nseed)
         starts.append(np.array(mets['seedabl/start_pos']))    # (RB, Nw, 2)
         futures.append(np.array(mets['seedabl/future_pos']))  # (RB, Nw, H, 2)
         if warmups is None:
             warmups = np.array(mets['seedabl/warmups'])       # (Nw,)
         print(f"  Batch {b + 1}/{cfg.num_batches} done")
 
-    for c in CONDITIONS:
+    for c in conditions:
         decoded[c] = np.concatenate(decoded[c], axis=0)  # (S, Nw, Nseed, H+1, 2)
+    if aprime_idx is not None:
+        aprime_idx = np.concatenate(aprime_idx, axis=0)  # (S, Nw, Nseed)
     start_pos = np.concatenate(starts, axis=0)           # (S, Nw, 2)
     future_pos = np.concatenate(futures, axis=0)         # (S, Nw, H, 2)
     S, Nw, Ns, Hp1, _ = decoded['A'].shape
@@ -866,7 +1015,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     # loader (key 'dream_deter', shape (N, H+1, D) flattened to (N*(H+1), D)).
     if act_dir is not None:
         print("Saving raw dream deter per condition (for manifold analysis)...")
-        for c in CONDITIONS:
+        for c in conditions:
             parts = [np.load(act_dir / f'{c}_b{b}.npy')
                      for b in range(cfg.num_batches)]
             arr = np.concatenate(parts, axis=0)  # (N_total, H+1, Dt)
@@ -906,6 +1055,10 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                        decoded=decoded, start_pos=start_pos,
                        future_pos=future_pos, warmups=warmups)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
+    if 'Aprime' in decoded:
+        plot_condition_compare(decoded, start_pos, future_pos, dispA, varC, stepD,
+                               realA, realStep, save_dir, central=central,
+                               shading=cfg.shading)
     if cfg.n_example_dreams > 0:
         plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
                             n_cols=cfg.n_example_dreams, warmups=warmups,
@@ -923,9 +1076,13 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         'distB_by_warmup': distB_by_w,
         'S': S, 'Nw': Nw, 'n_seeds': Ns, 'H': H, 'Hp1': Hp1,
         'decoder_path': str(cfg.decoder_model), 'decoder_metadata': dec_meta,
-        'metadata': metadata, 'conditions': CONDITIONS, 'labels': LABELS,
+        'metadata': metadata, 'conditions': conditions, 'labels': LABELS,
         'noise_mode': cfg.noise_mode,
     }
+    if aprime_idx is not None:
+        # per-seed pool index (S, Nw, Nseed) + the pool's vital combos in metadata
+        results['aprime_pool_idx'] = aprime_idx
+        results['perturb_vitals'] = metadata.get('aprime_vitals')
     with open(save_dir / 'dream_seed_ablation_results.pkl', 'wb') as f:
         pickle.dump(results, f)
     print(f"Results saved to {save_dir / 'dream_seed_ablation_results.pkl'}")
@@ -941,10 +1098,13 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
                   'central': cfg.central, 'shading': cfg.shading,
                   'n_example_dreams': cfg.n_example_dreams,
                   'noise_mode': cfg.noise_mode,
+                  'perturb_state': cfg.perturb_state,
+                  'perturb_vitals': cfg.perturb_vitals,
                   'from_checkpoint': args.from_checkpoint},
             outputs=['seed_ablation_curves.png', 'error_vs_warmup.png',
                      'decoded_dreams_by_condition.png',
-                     'dream_seed_ablation_results.pkl'],
+                     'dream_seed_ablation_results.pkl'] +
+                    (['condition_compare_ADAprime.png'] if cfg.perturb_state else []),
             extra={'n_start_rows': int(S), 'n_warmups': int(Nw),
                    'warmups': [int(w) for w in warmups], 'horizon': int(H)})
     except Exception as e:

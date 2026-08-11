@@ -81,6 +81,7 @@ def main(argv=None):
       **config.run,
       replica=config.replica,
       replicas=config.replicas,
+      seed=config.seed,
       logdir=config.logdir,
       scratch_dir=config.scratch_dir,
       batch_size=config.batch_size,
@@ -171,6 +172,7 @@ def main(argv=None):
         'agent.seed_ablation_nseeds': config.dream_seed_ablation.n_seeds,
         'agent.seed_ablation_warmup_stride': config.dream_seed_ablation.warmup_stride,
         'agent.seed_ablation_noise_mode': config.dream_seed_ablation.noise_mode,
+        'agent.seed_ablation_perturb_state': config.dream_seed_ablation.perturb_state,
         'agent.dream_warmup': config.dream_seed_ablation.warmup,
         'agent.dream_horizon': config.dream_seed_ablation.horizon,
     })
