@@ -299,6 +299,21 @@ def _print_summary(results):
         print(f"  {vit:<7} {curve}   (Δ={mean.max() - mean.min():.2f})")
 
 
+def _carry_mode(results):
+    return results.get('metadata', {}).get('carry_mode', 'fresh')
+
+
+def _out_path(save_dir, stem, ext, mode):
+    """Fresh keeps canonical filenames (backward-compatible); other modes get a
+    `_{mode}` suffix so their outputs don't overwrite the fresh ones in a shared dir."""
+    suffix = '' if mode == 'fresh' else f'_{mode}'
+    return Path(save_dir) / f'{stem}{suffix}.{ext}'
+
+
+def _title_tag(mode):
+    return f'  [carry={mode}]'
+
+
 def make_plots(results, save_dir):
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -318,11 +333,13 @@ def _plot_value_vs_vitals(results, save_dir):
         ax.fill_between(values, mean - std, mean + std, alpha=0.15)
     ax.set_xlabel('Vital value shown in status bar (0-9)')
     ax.set_ylabel('Value estimate (head pred, normalized space)')
-    ax.set_title('Value vs interoceptive vital\n(marginal over frames + other vitals)')
+    mode = _carry_mode(results)
+    ax.set_title('Value vs interoceptive vital'
+                 f'{_title_tag(mode)}\n(marginal over frames + other vitals)')
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()
-    out = save_dir / 'value_vs_vitals.png'
+    out = _out_path(save_dir, 'value_vs_vitals', 'png', mode)
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out.name}")
@@ -348,10 +365,12 @@ def _plot_action_probs_vs_vitals(results, save_dir, top_k=6):
             ax.set_ylabel('P(action)  (marginal)')
         ax.grid(alpha=0.3)
         ax.legend(fontsize=7)
+    mode = _carry_mode(results)
     fig.suptitle('Action-probability shift by interoceptive vital '
-                 f'(top {top_k} most-varying actions per vital)', fontsize=12)
+                 f'(top {top_k} most-varying actions per vital){_title_tag(mode)}',
+                 fontsize=12)
     fig.tight_layout()
-    out = save_dir / 'action_probs_vs_vitals.png'
+    out = _out_path(save_dir, 'action_probs_vs_vitals', 'png', mode)
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out.name}")
@@ -379,10 +398,11 @@ def _plot_value_heatmaps(results, save_dir):
         ax.set_xlabel(vitals[j]); ax.set_ylabel(vitals[i])
         ax.set_title(f'value: {vitals[i]} x {vitals[j]}')
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    fig.suptitle('Value over vital pairs (marginal over frames + other vitals)',
-                 fontsize=12)
+    mode = _carry_mode(results)
+    fig.suptitle('Value over vital pairs (marginal over frames + other vitals)'
+                 f'{_title_tag(mode)}', fontsize=12)
     fig.tight_layout()
-    out = save_dir / 'value_heatmaps.png'
+    out = _out_path(save_dir, 'value_heatmaps', 'png', mode)
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out.name}")
@@ -406,10 +426,11 @@ def _plot_probe_frames(results, save_dir):
                          f"f{bv['food']} d{bv['drink']} e{bv['energy']}",
                          fontsize=7)
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle('Probe frames (real vitals shown; the sweep overwrites these)',
-                 fontsize=11)
+    mode = _carry_mode(results)
+    fig.suptitle('Probe frames (real vitals shown; the sweep overwrites these)'
+                 f'{_title_tag(mode)}', fontsize=11)
     fig.tight_layout()
-    out = save_dir / 'probe_frames.png'
+    out = _out_path(save_dir, 'probe_frames', 'png', mode)
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {out.name}")
