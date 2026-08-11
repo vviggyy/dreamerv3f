@@ -173,7 +173,10 @@ def state_probe(make_agent, make_env, make_logger, args):
         return np.asarray(img, np.uint8)
 
     # 3. Drive the real policy; probe every warmup_steps steps.
-    print("Driving policy and probing...")
+    carry_mode = getattr(cfg, 'carry_mode', 'fresh')
+    assert carry_mode in ('fresh', 'history'), \
+        f"carry_mode must be 'fresh' or 'history', got {carry_mode}"
+    print(f"Driving policy and probing... (carry_mode={carry_mode})")
     carry_real = agent.init_policy(1)
     obs = env.step(mkact(0, True))
     n_actions = None
@@ -187,9 +190,19 @@ def state_probe(make_agent, make_env, make_logger, args):
             probs_list, value_list = [], []
             for combo in combos:
                 vd = dict(zip(vitals, combo))
-                aobs = to_agent_obs(obs, image=render_vitals(vd), is_first=True)
-                carry = agent.init_policy(1)
-                carry, acts, outs = agent.policy(carry, aobs, mode='eval')
+                # fresh: blank-slate carry, is_first=True so the decision depends
+                # on this single stimulus frame only (clean per-value counterfactual).
+                # history: reuse the real drive carry (is_first=False) so the probe
+                # is read from the agent's accumulated temporal context. JAX is
+                # functional, so policy() does not mutate carry_real — the returned
+                # carry is discarded and the real drive is unperturbed.
+                if carry_mode == 'history':
+                    aobs = to_agent_obs(obs, image=render_vitals(vd), is_first=False)
+                    _, acts, outs = agent.policy(carry_real, aobs, mode='eval')
+                else:
+                    aobs = to_agent_obs(obs, image=render_vitals(vd), is_first=True)
+                    carry = agent.init_policy(1)
+                    carry, acts, outs = agent.policy(carry, aobs, mode='eval')
                 logits = np.asarray(outs['policy_logits'])[0]
                 n_actions = logits.shape[-1]
                 probs_list.append(_softmax(logits))
@@ -222,7 +235,8 @@ def state_probe(make_agent, make_env, make_logger, args):
         'images': np.stack([f['image'] for f in frames]),
         'player_pos': np.stack([f['player_pos'] for f in frames]),
         'base_vitals': [f['base_vitals'] for f in frames],
-        'metadata': {'env_seed': env_seed, 'area': area, 'task': 'crafter'},
+        'metadata': {'env_seed': env_seed, 'area': area, 'task': 'crafter',
+                     'carry_mode': carry_mode},
     }
     with open(save_dir / 'state_probe_results.pkl', 'wb') as f:
         pickle.dump(results, f)
@@ -238,7 +252,7 @@ def state_probe(make_agent, make_env, make_logger, args):
             save_dir, 'state_probe',
             args={'vitals': cfg.vitals, 'levels': cfg.levels,
                   'num_frames': cfg.num_frames, 'warmup_steps': cfg.warmup_steps,
-                  'from_checkpoint': from_ckpt},
+                  'carry_mode': carry_mode, 'from_checkpoint': from_ckpt},
             outputs=['state_probe_results.pkl', 'value_vs_vitals.png',
                      'action_probs_vs_vitals.png', 'value_heatmaps.png',
                      'probe_frames.png'],

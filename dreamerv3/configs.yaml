@@ -93,6 +93,7 @@ defaults:
     warmup_steps: 20       # real-policy steps between captured frames (for scene diversity)
     vitals: food,drink,energy   # which crafter vitals to sweep (comma-sep; subset of health,food,drink,energy)
     levels: 0,3,6,9        # grid of values each vital takes (comma-sep ints 0-9); full factorial per frame
+    carry_mode: fresh      # fresh: reset recurrent state per probe (clean per-value counterfactual); history: probe from the real drive carry (contextualized, but confounded by the real vitals in the carry)
     from_pkl: ''           # replot only: path to a saved state_probe_results.pkl (skips agent/env)
 
   replay_activations:
