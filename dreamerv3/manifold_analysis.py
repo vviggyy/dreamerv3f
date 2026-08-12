@@ -58,15 +58,28 @@ DREAM_LAYERS = ['dyn/deter', 'dyn/stoch']
 
 # Seed-ablation conditions (mirrors dream_seed_ablation.py). D is lightened from
 # the seed-ablation 'dimgray' to 'silver' so it reads on the dark manifold theme.
+# A' (Aprime, perturbed-state) is an OPTIONAL 5th condition: it is included only
+# when the seed-ablation dir holds a dream_deter_Aprime.pkl (a --perturb_state
+# --save_activations run), auto-detected in run_seed_ablation_overlay. Kept OUT of
+# the base list so ordinary A/B/C/D runs are unaffected.
 SEED_ABLATION_CONDITIONS = ['A', 'B', 'C', 'D']
+APRIME = 'Aprime'
+# Canonical display order (A' drawn last, on top of A, so their curves compare).
+SEED_ABLATION_ORDER = SEED_ABLATION_CONDITIONS + [APRIME]
 SEED_ABLATION_LABELS = {
     'A': 'A: both (real deter + image)',
     'B': 'B: just-latent (real deter + prior)',
     'C': 'C: just-image (noise deter + image)',
     'D': 'D: neither (noise deter + prior)',
+    APRIME: "A': perturbed-state (real deter + vitals-perturbed image)",
 }
 SEED_ABLATION_COLORS = {'A': 'crimson', 'B': 'steelblue',
-                        'C': 'darkorange', 'D': 'silver'}
+                        'C': 'darkorange', 'D': 'silver',
+                        APRIME: 'mediumseagreen'}
+# A and A' both seed from the REAL deter, so their SW-over-time curves can track
+# closely; a dashed A' disambiguates them where color overlaps. A/B/C/D solid.
+SEED_ABLATION_LINESTYLES = {'A': '-', 'B': '-', 'C': '-', 'D': '-',
+                            APRIME: (0, (5, 1))}
 
 
 def _assert_relu_space(X, layer_name, source):
@@ -590,17 +603,20 @@ def _sw_time_profile(min_dists, t_idx):
 
 def plot_sw_over_time_by_condition(cond_results, layer_name, save_dir,
                                    shading='band'):
-    """Overlay SW-distance-over-time curves for seed-ablation conditions A/B/C/D.
+    """Overlay SW-distance-over-time curves for seed-ablation conditions A/B/C/D
+    (plus A' when a perturbed-state dump is present).
 
     cond_results: {cond: {'min_dists': (M,), 't_idx': (M,)}} against a SHARED wake
     manifold. Rising curve = that condition's dream drifts off the wake manifold as
     it rolls out; flat/low = stays on it. Conditions share one axis so real-deter
-    (A/B) vs noise-deter (C/D) drift is directly comparable. Bounded to [0, 1]
-    (cosine distance on non-negative activations)."""
+    (A/B/A') vs noise-deter (C/D) drift is directly comparable. A' vs A isolates
+    whether perturbing the interoceptive channel pushes the dream further off the
+    wake manifold. Bounded to [0, 1] (cosine distance on non-negative
+    activations)."""
     _setup_dark_style()
     fig, ax = plt.subplots(figsize=(8, 5))
     Tmax = 1
-    for c in SEED_ABLATION_CONDITIONS:
+    for c in SEED_ABLATION_ORDER:
         if c not in cond_results:
             continue
         prof = _sw_time_profile(cond_results[c]['min_dists'],
@@ -611,9 +627,10 @@ def plot_sw_over_time_by_condition(cond_results, layer_name, save_dir,
         steps, med, q25, q75 = prof
         Tmax = max(Tmax, len(steps))
         color = SEED_ABLATION_COLORS[c]
+        ls = SEED_ABLATION_LINESTYLES.get(c, '-')
         if shading == 'band':
             ax.fill_between(steps, q25, q75, color=color, alpha=0.15)
-        ax.plot(steps, med, color=color, linewidth=2,
+        ax.plot(steps, med, color=color, linewidth=2, linestyle=ls,
                 label=SEED_ABLATION_LABELS[c])
     ax.set_xlabel('Dream step (0 = seed)', fontsize=10)
     ax.set_ylabel('SW distance to wake manifold (cosine)', fontsize=10)
@@ -804,6 +821,14 @@ def run_seed_ablation_overlay(args, save_dir, tuning_data):
     all_results = {}
     output_files = []
 
+    # A/B/C/D always; include A' iff its perturbed-state dump is present (from a
+    # --perturb_state --save_activations run). Auto-detected once, up front.
+    conditions = list(SEED_ABLATION_CONDITIONS)
+    if (sa_dir / f'dream_deter_{APRIME}.pkl').exists():
+        conditions.append(APRIME)
+        print(f"Detected {sa_dir.name}/dream_deter_{APRIME}.pkl — including A' "
+              "(perturbed-state) as a 5th condition")
+
     for layer_name in args.layers:
         print(f"\n{'='*60}\nLayer: {layer_name}\n{'='*60}")
 
@@ -836,7 +861,7 @@ def run_seed_ablation_overlay(args, save_dir, tuning_data):
             X_wake = X_wake[:, neuron_idx]
 
         cond_results = {}
-        for c in SEED_ABLATION_CONDITIONS:
+        for c in conditions:
             pkl = sa_dir / f'dream_deter_{c}.pkl'
             if not pkl.exists():
                 print(f"  condition {c}: {pkl.name} not found, skipping")
@@ -909,7 +934,9 @@ def main():
                              '{A,B,C,D}.pkl (from a --save_activations run). '
                              'Switches to condition-overlay mode: one SW-over-'
                              'time figure per layer overlaying A/B/C/D against '
-                             'the shared wake manifold. Only SW-over-time is '
+                             'the shared wake manifold. If dream_deter_Aprime.pkl '
+                             'is also present (a --perturb_state run), A\' is '
+                             'overlaid as a 5th condition. Only SW-over-time is '
                              'produced in this mode.')
     parser.add_argument('--shading', default='band', choices=['band', 'none'],
                         help='Condition overlay spread: filled IQR band or line '

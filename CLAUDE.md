@@ -32,6 +32,7 @@
 - `run_Decoding.sh` — standard position decoding (GPU). Settings: repr, device, n_jobs
 - `run_DreamVsFuture.sh` — decode policy dreams and compare to real future trajectory (GPU). Saves decoder if missing, then runs `dream_vs_future`. Settings: LOGDIR, DREAM_EPISODES, DREAM_BATCHES
 - `run_DreamSeedAblation.sh` — four-condition dream seeding ablation (GPU). Saves decoder if missing, then runs `dream_seed_ablation`. Settings: LOGDIR, DREAM_EPISODES, DREAM_BATCHES, N_SEEDS
+- `run_DSA_Aprime.sh` — dream seeding ablation **with condition A′ (perturbed state)** enabled (GPU, 3-net array: worlds_test_45/masked_k5/rollout_k5). Saves decoder if missing, then runs `dream_seed_ablation --perturb_state True` on the egocentric env; emits `condition_compare_ADAprime.png` (A vs D vs A′). Settings: PERTURB_VITALS, PERTURB_POOL, HORIZON, N_SEEDS, SAVE_ACTIVATIONS (for Phase-2 SW-dist), FROM_PKL (replot). Phase-1 only (no manifold step)
 - `run_StateProbe.sh` — interoceptive state probe (GPU/CPU). Sweeps status vitals in the image, measures policy/value shift. Settings: LOGDIR, NUM_FRAMES, WARMUP_STEPS, VITALS, LEVELS, FROM_PKL
 - `run_LayerDecoding.sh` — layer-wise decoding (A100). Settings: mode, holdout, resume
 - `run_Plotting.sh` — plot trajectories + training progress (CPU). Settings: plot type, animation, smoothing

@@ -47,7 +47,13 @@ class Agent(embodied.jax.Agent):
     # the module-level handoff the driver sets prior to make_agent(). Kept a plain
     # constant so report() can composite/re-encode without new params or inputs.
     if config.seed_ablation_perturb_state and _APRIME_POOL is not None:
-      self.aprime_pool = jnp.asarray(_APRIME_POOL)
+      # Keep it a HOST (numpy) constant, not jnp.asarray (which would make it a
+      # device-resident jax.Array). report() is lowered eagerly at construction
+      # and captures this as a compile-time constant; embedding a device array as
+      # an MLIR constant needs a device->host read, which jax_transfer_guard=
+      # 'disallow' (internal.py) blocks. numpy -> host->device is allowed; report()
+      # does jnp.asarray(self.aprime_pool) inside the trace where it's needed.
+      self.aprime_pool = np.asarray(_APRIME_POOL)
 
     exclude = ['is_first', 'is_last', 'is_terminal', 'reward']
     if not config.include_position:
