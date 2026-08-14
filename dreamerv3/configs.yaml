@@ -82,9 +82,10 @@ defaults:
     make_gif: True        # also emit decoded_dreams_animation.gif: 1x4 conditions, one seed (dream) at a time over the real trajectory
     gif_col: 0            # which example column (start/warmup) to animate in the gif (0-indexed into the selected columns)
     gif_fps: 2            # gif frame rate (frames = n_seeds)
-    noise_mode: matched   # noise-deter null for conditions C/D: matched | matched_relu | truncnorm | shuffle
+    noise_mode: shuffle   # noise-deter null for conditions C/D: matched | matched_relu | truncnorm | shuffle. DEFAULT shuffle: non-negative (relu-safe for manifold analysis)
     real_style: ghost     # real trajectory in decoded-dream plots: bold (on top) | ghost (thin dashed under dream) | none
     save_activations: False  # also dump raw dream deter per condition -> dream_deter_{A,B,C,D}.pkl (key 'dream_deter', shape (N,H+1,D)) for manifold_analysis.py. streams per-batch to disk (bounded RAM)
+    include_e: False         # add condition E (blank-slate): a completely fresh all-zero deter with NO warmup + prior stoch, rolled out under the policy. Tests what the world model hallucinates from nothing. Emitted as a 5th standard condition (appears in seed_ablation_curves + decoded_dreams grid + dump), unlike A' which stays out of the standard panels
     perturb_state: False     # add condition A' (Aprime): real deter + posterior from a seed image whose interoceptive status bar is overwritten with random vitals. Each of the n_seeds gets an independent uniform draw (redrawn per batch) -> A' cross-seed spread measures state-perturbation sensitivity. Adds condition_compare_ADAprime.png (A vs D vs A')
     perturb_vitals: health,food,drink,energy  # which status vitals A' randomizes (comma-sep subset of health,food,drink,energy); each uniform int 0-9
     perturb_pool: 1024       # # of pre-rendered random status-bar strips A' samples from (baked as a constant; sampled with replacement per seed)
@@ -192,8 +193,9 @@ defaults:
     report_dump_batch: False   # emit dump/{deter,mu,sd,player_pos,image} for inspect_replay
     seed_ablation_nseeds: 16
     seed_ablation_warmup_stride: 1  # dense-warmup stride for the seed ablation
-    seed_ablation_noise_mode: matched  # noise-deter null for C/D: matched (mu+sd*N), matched_relu (clip>=0), truncnorm (N>=0), shuffle (per-dim bootstrap of real deter; preserves marginal+nonneg)
+    seed_ablation_noise_mode: shuffle  # noise-deter null for C/D: matched (mu+sd*N), matched_relu (clip>=0), truncnorm (N>=0), shuffle (per-dim bootstrap of real deter; preserves marginal+nonneg). DEFAULT shuffle: non-negative, relu-safe for manifold
     seed_ablation_perturb_state: False  # emit condition A' (Aprime): real deter + posterior from a status-bar-perturbed seed image. Requires the driver to bake the rendered bar pool onto the model (dream_seed_ablation.py). See dream_seed_ablation.perturb_state
+    seed_ablation_include_e: False  # emit condition E (blank-slate): all-zero deter (no warmup) + prior stoch, rolled out under the policy. See dream_seed_ablation.include_e
     dream_warmup: 0   # dream_vs_future: observed steps before dream (0->T//2). seed ablation: 0->dense over all warmups, N>0->single warmup N
     dream_horizon: 0  # report dream rollout length (0 -> imag_length). W+H<=report_length
     record_activations: False

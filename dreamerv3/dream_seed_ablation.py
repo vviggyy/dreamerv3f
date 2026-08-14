@@ -100,20 +100,36 @@ from .state_probe import _unwrap_crafter  # reuse the crafter unwrap for A' bars
 # keep iterating CONDITIONS and ignore it. A' is surfaced only in the dedicated
 # A/D/A' comparison plot. Functions that should pick A' up when present iterate
 # the decoded dict's keys instead of this constant (see compute_curves).
+#
+# Condition E (blank-slate: all-zero deter, no warmup, prior stoch) is the other
+# OPTIONAL condition (--dream_seed_ablation.include_e). Unlike A', E IS a full
+# member of the standard panels when enabled: `_activate_e()` appends it to
+# CONDITIONS so every CONDITIONS-driven plot picks it up. The two hardcoded
+# grid/gif layouts key off len(CONDITIONS), so appending 'E' widens them too.
 CONDITIONS = ['A', 'B', 'C', 'D']
 LABELS = {
     'A': 'A: both (real deter + image)',
     'B': 'B: just-latent (real deter + prior)',
     'C': 'C: just-image (noise deter + image)',
     'D': 'D: neither (noise deter + prior)',
+    'E': 'E: blank-slate (zero deter + prior, no warmup)',
     'Aprime': "A': perturbed-state (real deter + vitals-perturbed image)",
 }
 COLORS = {'A': 'crimson', 'B': 'steelblue', 'C': 'darkorange', 'D': 'dimgray',
-          'Aprime': 'seagreen'}
+          'E': 'mediumvioletred', 'Aprime': 'seagreen'}
 
 # Linestyle per condition for the warmup-grouped deviation plot (color there
 # encodes the warmup group, so the condition must be carried by linestyle).
-COND_LS = {'A': '-', 'B': ':', 'C': '--', 'D': '-.', 'Aprime': (0, (5, 1))}
+COND_LS = {'A': '-', 'B': ':', 'C': '--', 'D': '-.', 'E': (0, (1, 1)),
+           'Aprime': (0, (5, 1))}
+
+
+def _activate_e():
+    """Register condition E in the module-global CONDITIONS so every
+    CONDITIONS-driven panel includes it. Idempotent. Called from the live run
+    (when include_e is set) and from the replot path (when 'E' is in the pkl)."""
+    if 'E' not in CONDITIONS:
+        CONDITIONS.append('E')
 
 # Panel G groups warmups into this many equal-count bins by default. Bins are
 # derived from the ACTUAL warmups present (see _auto_warmup_bins), so they cover
@@ -261,8 +277,9 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     txt = 'white' if world_img is not None else 'black'
     nc = len(cols)
 
-    fig, axes = plt.subplots(4, nc, figsize=(4.2 * nc, 4.4 * 4), facecolor=fc,
-                             squeeze=False)
+    nrow = len(CONDITIONS)
+    fig, axes = plt.subplots(nrow, nc, figsize=(4.2 * nc, 4.4 * nrow),
+                             facecolor=fc, squeeze=False)
     for ri, c in enumerate(CONDITIONS):
         for ci, (s, w) in enumerate(cols):
             ax = axes[ri, ci]
@@ -354,8 +371,10 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     frames = []
     for k in range(Ns):
         # Fixed figure size + dpi (no tight bbox) so every frame is identical px.
-        fig, axes = plt.subplots(1, 4, figsize=(16.8, 4.7), facecolor=fc)
-        for ax, c in zip(axes, CONDITIONS):
+        ncond = len(CONDITIONS)
+        fig, axes = plt.subplots(1, ncond, figsize=(4.2 * ncond, 4.7),
+                                 facecolor=fc)
+        for ax, c in zip(np.atleast_1d(axes), CONDITIONS):
             ax.set_facecolor(fc)
             if world_img is not None:
                 ax.imshow((world_img * 0.6).astype(np.uint8))
@@ -415,11 +434,15 @@ def _band(ax, data, color, label, ls='-', central='median', shading='band'):
             mid = np.nanmedian(data, axis=0)
             lo = np.nanpercentile(data, 25, axis=0)
             hi = np.nanpercentile(data, 75, axis=0)
+    # linestyle passed as keyword (not positional fmt) so tuple dash patterns
+    # (e.g. condition E's (0,(1,1))) work alongside string linestyles.
     if shading == 'bars':
-        ax.errorbar(steps, mid, yerr=[mid - lo, hi - mid], fmt=ls, color=color,
-                    linewidth=2.0, label=label, capsize=2, elinewidth=1.0)
+        ax.errorbar(steps, mid, yerr=[mid - lo, hi - mid], linestyle=ls,
+                    color=color, linewidth=2.0, label=label, capsize=2,
+                    elinewidth=1.0)
     else:
-        ax.plot(steps, mid, ls, color=color, linewidth=2.0, label=label)
+        ax.plot(steps, mid, linestyle=ls, color=color, linewidth=2.0,
+                label=label)
         if shading == 'band':
             ax.fill_between(steps, lo, hi, color=color, alpha=0.15)
 
@@ -514,6 +537,8 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
     print(f"Replotting from {pkl_path} (central={central}, shading={shading})")
     with open(pkl_path, 'rb') as f:
         r = pickle.load(f)
+    if 'E' in r['decoded']:      # pkl produced with condition E -> restore it
+        _activate_e()
     dispA, distB, varC, realA, distB_by_w, stepD, realStep = compute_curves(
         r['decoded'], r['start_pos'], r['future_pos'], central)
     warmups = r['warmups']
@@ -729,12 +754,12 @@ def plot_condition_compare(decoded, start_pos, future_pos, dispA, varC, stepD,
 
 # Gray shades for the pooled (warmup-independent) reference conditions in
 # panel G. Kept off the viridis ramp so they read as baselines, not warmup bins.
-POOLED_GRAY = {'C': '0.55', 'D': '0.3'}
+POOLED_GRAY = {'C': '0.55', 'D': '0.3', 'E': '0.7'}
 
 
 def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
                               bin_conditions=('A', 'B'),
-                              pooled_conditions=('C', 'D'), central='median',
+                              pooled_conditions=('C', 'D', 'E'), central='median',
                               shading='none', bins=None, n_bins=None):
     """Draw panel G onto `ax`: per-step deviation from the REAL trajectory.
 
@@ -759,6 +784,10 @@ def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
     """
     from matplotlib.lines import Line2D
     warmups = np.asarray(warmups)
+    # Only draw conditions actually present (E is optional; C/D absent in some
+    # replots). Keeps the pooled_conditions default = ('C','D','E') safe.
+    bin_conditions = [c for c in bin_conditions if c in decoded]
+    pooled_conditions = [c for c in pooled_conditions if c in decoded]
     if bins is None:
         bins = _auto_warmup_bins(warmups, n_bins or DEFAULT_N_WARMUP_BINS)
     # Real trajectory as (S, Nw, H+1, 2): [start, future_1..future_H].
@@ -867,6 +896,8 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         f"central must be 'median' or 'mean', got {cfg.central!r}"
     assert cfg.shading in ('band', 'bars', 'none'), \
         f"shading must be 'band', 'bars', or 'none', got {cfg.shading!r}"
+    if cfg.include_e:
+        _activate_e()  # register E in CONDITIONS -> flows through every panel
 
     # Fast path: replot from a saved results pkl (no agent/rollouts/decode).
     if cfg.from_pkl:

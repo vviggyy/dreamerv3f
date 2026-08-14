@@ -64,18 +64,20 @@ DREAM_LAYERS = ['dyn/deter', 'dyn/stoch']
 # the base list so ordinary A/B/C/D runs are unaffected.
 SEED_ABLATION_CONDITIONS = ['A', 'B', 'C', 'D']
 APRIME = 'Aprime'
-# Canonical display order (A' drawn last, on top of A, so their curves compare).
-SEED_ABLATION_ORDER = SEED_ABLATION_CONDITIONS + [APRIME]
+ECOND = 'E'   # blank-slate: all-zero deter, no warmup, prior stoch, rolled out
+# Canonical display order (A' and E drawn last so their curves compare on top).
+SEED_ABLATION_ORDER = SEED_ABLATION_CONDITIONS + [APRIME, ECOND]
 SEED_ABLATION_LABELS = {
     'A': 'A: both (real deter + image)',
     'B': 'B: just-latent (real deter + prior)',
     'C': 'C: just-image (noise deter + image)',
     'D': 'D: neither (noise deter + prior)',
     APRIME: "A': perturbed-state (real deter + vitals-perturbed image)",
+    ECOND: 'E: blank-slate (zero deter + prior, no warmup)',
 }
 SEED_ABLATION_COLORS = {'A': 'crimson', 'B': 'steelblue',
                         'C': 'darkorange', 'D': 'silver',
-                        APRIME: 'mediumseagreen'}
+                        APRIME: 'mediumseagreen', ECOND: 'mediumvioletred'}
 # A and A' both seed from the REAL deter, so their SW-over-time curves can track
 # closely; a dashed A' disambiguates them where color overlaps. A/B/C/D solid.
 SEED_ABLATION_LINESTYLES = {'A': '-', 'B': '-', 'C': '-', 'D': '-',
@@ -828,6 +830,10 @@ def run_seed_ablation_overlay(args, save_dir, tuning_data):
         conditions.append(APRIME)
         print(f"Detected {sa_dir.name}/dream_deter_{APRIME}.pkl — including A' "
               "(perturbed-state) as a 5th condition")
+    if (sa_dir / f'dream_deter_{ECOND}.pkl').exists():
+        conditions.append(ECOND)
+        print(f"Detected {sa_dir.name}/dream_deter_{ECOND}.pkl — including E "
+              "(blank-slate) as an additional condition")
 
     for layer_name in args.layers:
         print(f"\n{'='*60}\nLayer: {layer_name}\n{'='*60}")

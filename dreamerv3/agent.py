@@ -547,8 +547,21 @@ class Agent(embodied.jax.Agent):
           'D': self.dyn._prior(nd),
       }
       deters = {'A': rdf, 'B': rdf, 'C': nd, 'D': nd}       # all (RB*Nw, Dt)
+      names = ['A', 'B', 'C', 'D']
+      # Condition E (blank-slate): a completely fresh all-zero deter with NO
+      # warmup, stoch seeded from the prior over that zero deter, then rolled out
+      # under the policy. Warmup-independent by construction (the zero deter is
+      # identical for every warmup slot; only the sampled z varies per seed), so
+      # it fills the (RB*Nw, Dt) shape like the others and reads as a flat
+      # baseline across warmups. Tests what the world model hallucinates from
+      # nothing.
+      if self.config.seed_ablation_include_e:
+        zd = jnp.zeros_like(rdf)
+        logits['E'] = self.dyn._prior(zd)
+        deters['E'] = zd
+        names.append('E')
       Dt = rdf.shape[-1]
-      for name in ('A', 'B', 'C', 'D'):
+      for name in names:
         d_t = jnp.repeat(deters[name], Nseed, axis=0)        # (RB*Nw*Nseed, Dt)
         l_t = jnp.repeat(logits[name], Nseed, axis=0)        # (RB*Nw*Nseed, S, C)
         s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
