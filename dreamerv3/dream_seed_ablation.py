@@ -159,6 +159,37 @@ def _manhattan(a, b):
     return np.abs(a - b).sum(axis=-1)
 
 
+def _mask_future_teleports(future_pos, future_valid=None, max_step=1.5):
+    """NaN out real-trajectory steps at/after an episode-boundary teleport.
+
+    The report stream can span an episode reset; at the reset player_pos jumps to
+    the new (random) spawn, so the real path leaps ~map-wide in one step. Prefer
+    the authoritative `future_valid` mask (from agent.report's is_first). For old
+    pkls without it, fall back to detecting impossible single-step jumps: a Crafter
+    agent moves <=1 tile/step, so any consecutive Manhattan > max_step is a reset.
+    Marks that step and everything after it invalid. future_pos: (S, Nw, H, 2).
+    Returns a NaN-masked copy (does not mutate input)."""
+    fp = np.asarray(future_pos, dtype=float)
+    if future_valid is not None:
+        valid = np.asarray(future_valid, dtype=bool)
+    else:
+        # step 0..H-1 consecutive Manhattan along the future window (no start ref;
+        # a reset shows as a large jump *between* future steps, and if it lands on
+        # future_1 the first-step check below still can't see it — but random_spawn
+        # resets are far, so the first post-reset->next-step jump is caught).
+        jumps = _manhattan(fp[:, :, 1:, :], fp[:, :, :-1, :])   # (S, Nw, H-1)
+        teleport = jumps > max_step                              # (S, Nw, H-1)
+        # a jump at index j (fp[j]->fp[j+1]) invalidates step j+1 onward
+        after = np.cumsum(teleport, axis=-1) > 0                 # (S, Nw, H-1)
+        valid = np.concatenate(
+            [np.ones(fp.shape[:2] + (1,), bool), ~after], axis=-1)
+    n_masked = int((~valid).any(-1).sum())
+    if n_masked:
+        print(f"  Masked {n_masked} window(s) with an episode-boundary teleport "
+              f"in the real trajectory ({'is_first' if future_valid is not None else 'jump-detected'})")
+    return np.where(valid[..., None], fp, np.nan)
+
+
 def _render_world(metadata, tile_size=8):
     """Reconstruct the Crafter world map from metadata (env_seed/area).
 
@@ -269,8 +300,9 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     allp = to_px(np.concatenate(
         [dream_xy.reshape(-1, 2), real_xy.reshape(-1, 2), start_xy], axis=0))
     pad = (tile_size * 4) if world_img is not None else 2
-    xlo, xhi = allp[:, 0].min() - pad, allp[:, 0].max() + pad
-    ylo, yhi = allp[:, 1].min() - pad, allp[:, 1].max() + pad
+    # nan-aware: future_pos may hold NaN at episode-boundary teleport steps.
+    xlo, xhi = np.nanmin(allp[:, 0]) - pad, np.nanmax(allp[:, 0]) + pad
+    ylo, yhi = np.nanmin(allp[:, 1]) - pad, np.nanmax(allp[:, 1]) + pad
 
     cmap = plt.cm.plasma
     fc = '#1a1a1a' if world_img is not None else 'white'
@@ -361,8 +393,9 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     real_path = np.concatenate([start_pos[s, w][None], future_pos[s, w]])
     allp = to_px(np.concatenate([dxy, real_path], axis=0))
     pad = (tile_size * 4) if world_img is not None else 2
-    xlo, xhi = allp[:, 0].min() - pad, allp[:, 0].max() + pad
-    ylo, yhi = allp[:, 1].min() - pad, allp[:, 1].max() + pad
+    # nan-aware: future_pos may hold NaN at episode-boundary teleport steps.
+    xlo, xhi = np.nanmin(allp[:, 0]) - pad, np.nanmax(allp[:, 0]) + pad
+    ylo, yhi = np.nanmin(allp[:, 1]) - pad, np.nanmax(allp[:, 1]) + pad
 
     cmap = plt.cm.plasma
     fc = '#1a1a1a' if world_img is not None else 'white'
@@ -539,6 +572,10 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
         r = pickle.load(f)
     if 'E' in r['decoded']:      # pkl produced with condition E -> restore it
         _activate_e()
+    # Mask real-trajectory episode-boundary teleports (uses stored future_valid
+    # when present, else jump-detects it — repairs pkls saved before this fix).
+    r['future_pos'] = _mask_future_teleports(
+        r['future_pos'], r.get('future_valid'))
     dispA, distB, varC, realA, distB_by_w, stepD, realStep = compute_curves(
         r['decoded'], r['start_pos'], r['future_pos'], central)
     warmups = r['warmups']
@@ -1003,7 +1040,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     conditions = list(CONDITIONS) + (['Aprime'] if cfg.perturb_state else [])
     decoded = {c: [] for c in conditions}   # each: list of (RB, Nw, Nseed, H+1, 2)
     aprime_idx = [] if cfg.perturb_state else None   # per-seed pool index, for repro
-    starts, futures = [], []
+    starts, futures, future_valids = [], [], []
     warmups = None
     for b in range(cfg.num_batches):
         batch = next(stream)
@@ -1028,6 +1065,8 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
             aprime_idx.append(np.array(mets['seedabl/Aprime/pool_idx']))  # (RB,Nw,Nseed)
         starts.append(np.array(mets['seedabl/start_pos']))    # (RB, Nw, 2)
         futures.append(np.array(mets['seedabl/future_pos']))  # (RB, Nw, H, 2)
+        if 'seedabl/future_valid' in mets:
+            future_valids.append(np.array(mets['seedabl/future_valid']))  # (RB,Nw,H)
         if warmups is None:
             warmups = np.array(mets['seedabl/warmups'])       # (Nw,)
         print(f"  Batch {b + 1}/{cfg.num_batches} done")
@@ -1038,6 +1077,13 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         aprime_idx = np.concatenate(aprime_idx, axis=0)  # (S, Nw, Nseed)
     start_pos = np.concatenate(starts, axis=0)           # (S, Nw, 2)
     future_pos = np.concatenate(futures, axis=0)         # (S, Nw, H, 2)
+    # The report stream can span an episode boundary; at a reset player_pos
+    # teleports to the new (random) spawn, so the real trajectory jumps ~map-wide.
+    # Mask future steps at/after the first reset within each window to NaN so the
+    # teleport neither draws a bogus line nor inflates the real-trajectory curves
+    # (all downstream aggregations are nan-aware; matplotlib skips NaN segments).
+    future_valid = np.concatenate(future_valids, axis=0) if future_valids else None
+    future_pos = _mask_future_teleports(future_pos, future_valid)
     S, Nw, Ns, Hp1, _ = decoded['A'].shape
     H = future_pos.shape[2]
 
@@ -1103,6 +1149,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     results = {
         'decoded': decoded,          # {cond: (S, Nw, Nseed, H+1, 2)}
         'start_pos': start_pos, 'future_pos': future_pos, 'warmups': warmups,
+        'future_valid': future_valid,  # (S, Nw, H) bool or None; teleport steps False
         'dispA': dispA, 'distB': distB, 'varC': varC, 'realA': realA,
         'distB_by_warmup': distB_by_w,
         'S': S, 'Nw': Nw, 'n_seeds': Ns, 'H': H, 'Hp1': Hp1,

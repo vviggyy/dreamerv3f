@@ -509,6 +509,12 @@ class Agent(embodied.jax.Agent):
       ppos = obs['player_pos'][:RB]
       start_pos = ppos[:, idx]                              # (RB, Nw, 2)
       future_pos = ppos[:, fut_idx]                         # (RB, Nw, H, 2)
+      # The report stream can span an episode boundary; at a reset player_pos
+      # teleports to the new spawn (random_spawn), so the real trajectory jumps
+      # discontinuously. Mark future steps at/after the first reset within each
+      # window as invalid so downstream can NaN-mask them (no spurious divergence).
+      fut_isfirst = obs['is_first'][:RB].astype(f32)[:, fut_idx]  # (RB, Nw, H)
+      future_valid = jnp.cumsum(fut_isfirst, axis=-1) < 0.5       # (RB, Nw, H)
 
       f2 = lambda x: x[:, idx].reshape((RB * Nw, *x.shape[2:]))
       rdf = f2(rp['deter'])                                 # (RB*Nw, Dt) real deter
@@ -610,6 +616,7 @@ class Agent(embodied.jax.Agent):
 
       metrics['seedabl/start_pos'] = start_pos              # (RB, Nw, 2)
       metrics['seedabl/future_pos'] = future_pos            # (RB, Nw, H, 2)
+      metrics['seedabl/future_valid'] = future_valid        # (RB, Nw, H)
       metrics['seedabl/warmups'] = jnp.asarray(Wlist, i32)  # (Nw,)
 
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
