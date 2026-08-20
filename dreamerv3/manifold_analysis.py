@@ -51,6 +51,22 @@ from run_info import log_run_info
 from decode_position import load_episodes, _prepare_single_layer, filter_stuck_episodes
 
 # ---------------------------------------------------------------------------
+# Output format (png default; svg/pdf for Illustrator-editable vector output)
+# ---------------------------------------------------------------------------
+
+SAVE_FMT = 'png'  # overridden by --fmt in main()
+
+
+def _savefig(fig, out):
+    """Save honoring the global SAVE_FMT; vector formats drop the raster dpi."""
+    out = Path(out)
+    if out.suffix.lower() == '.png' and SAVE_FMT != 'png':
+        out = out.with_suffix('.' + SAVE_FMT)
+    kw = {} if out.suffix.lower() in ('.svg', '.pdf') else {'dpi': 150}
+    fig.savefig(out, bbox_inches='tight', **kw)
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -377,7 +393,7 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
     ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
     out = save_dir / f'{layer_name.replace("/", "_")}_isomap_position.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -402,7 +418,7 @@ def plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir):
                  fontweight='bold')
 
     out = save_dir / f'{layer_name.replace("/", "_")}_isomap_wakedream.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -431,7 +447,7 @@ def plot_srsa(hist2, neural_bins, spatial_bins, rho, layer_name, save_dir):
     ax.set_title(f'{layer_name} — Spatial RSA', fontsize=11, fontweight='bold')
 
     out = save_dir / f'{layer_name.replace("/", "_")}_srsa.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -481,7 +497,7 @@ def plot_hill_fit(hill_fit, layer_name, save_dir):
               labelcolor='white', loc='lower right')
 
     out = save_dir / f'{layer_name.replace("/", "_")}_hillfit.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -538,7 +554,7 @@ def plot_sw_histogram(min_dists, median_sw, neural_bins, layer_name, save_dir):
     fig.tight_layout()
 
     out = save_dir / f'{layer_name.replace("/", "_")}_swdist.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -579,7 +595,7 @@ def plot_sw_over_time(min_dists, t_idx, layer_name, save_dir):
     ax.legend(fontsize=9, facecolor='#333333', edgecolor='grey', labelcolor='white')
     fig.tight_layout()
     out = save_dir / f'{layer_name.replace("/", "_")}_sw_over_time.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -644,7 +660,7 @@ def plot_sw_over_time_by_condition(cond_results, layer_name, save_dir,
               labelcolor='white', loc='upper left')
     fig.tight_layout()
     out = save_dir / f'{layer_name.replace("/", "_")}_sw_over_time_by_condition.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -723,7 +739,7 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
     fig.suptitle(f'{layer_name}', fontsize=12, fontweight='bold', color='white')
     fig.tight_layout()
     out = save_dir / f'{layer_name.replace("/", "_")}_wakesleep.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -804,7 +820,7 @@ def plot_summary(results, save_dir):
                  color='white')
     fig.tight_layout()
     out = save_dir / 'manifold_summary.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -969,7 +985,12 @@ def main():
                         help='Min EV threshold to subset neurons (requires --tuning_pkl)')
     parser.add_argument('--tuning_pkl', default=None,
                         help='Path to tuning_results.pkl (required for --ev_thresh)')
+    parser.add_argument('--fmt', default='png', choices=['png', 'svg', 'pdf'],
+                        help='Figure output format (svg/pdf = Illustrator-editable vector)')
     args = parser.parse_args()
+
+    global SAVE_FMT
+    SAVE_FMT = args.fmt
 
     if args.ev_thresh is not None and args.tuning_pkl is None:
         parser.error('--ev_thresh requires --tuning_pkl')
