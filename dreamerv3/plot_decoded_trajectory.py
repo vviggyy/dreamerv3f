@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from decode_position import load_classifier_model  # noqa: E402
@@ -66,6 +67,9 @@ def main():
     ap.add_argument('--area', type=int, nargs=2, default=None, help='world area (auto)')
     ap.add_argument('--tile_size', type=int, default=12, help='px per tile for world render')
     ap.add_argument('--subsample', type=int, default=1, help='keep every Nth step (thin dense paths)')
+    ap.add_argument('--drop_first', type=int, default=1,
+                    help='drop the first N steps (t=0 deter is the uninformative '
+                         'reset state and decodes to a fixed corner). Default 1.')
     args = ap.parse_args()
 
     data = Path(args.data)
@@ -90,10 +94,14 @@ def main():
     env_seed = hash((seed, 0)) % (2**32 - 1)
     print(f"seed={seed} -> env_seed={env_seed}, area={area}")
 
-    real, dec, err = decode_episode(ep, clf, meta)
+    real, dec, _ = decode_episode(ep, clf, meta)
+    if args.drop_first > 0:
+        real, dec = real[args.drop_first:], dec[args.drop_first:]
     if args.subsample > 1:
         real, dec = real[::args.subsample], dec[::args.subsample]
-    print(f"episode {args.episode}: mean Manhattan error = {err:.2f} tiles ({len(real)} steps)")
+    err = np.abs(dec.astype(int) - real.astype(int)).sum(axis=1).mean()
+    print(f"episode {args.episode}: mean Manhattan error = {err:.2f} tiles "
+          f"({len(real)} steps, dropped first {args.drop_first})")
 
     ts = args.tile_size
     world = render_world(env_seed, area=area, tile_size=ts)
@@ -119,7 +127,15 @@ def main():
     axes[2].plot(dp[:, 0], dp[:, 1], '--', color='magenta', lw=1.8, alpha=0.9, label='decoded')
     axes[2].plot(rp[0, 0], rp[0, 1], 'o', color='lime', ms=7, mec='black', zorder=11)
     axes[2].plot(rp[-1, 0], rp[-1, 1], 's', color='red', ms=7, mec='black', zorder=11)
-    axes[2].legend(loc='upper right', fontsize=10, framealpha=0.85)
+    handles = [
+        Line2D([0], [0], color='cyan', lw=2.2, label='real'),
+        Line2D([0], [0], color='magenta', lw=1.8, ls='--', label='decoded'),
+        Line2D([0], [0], marker='o', color='none', markerfacecolor='lime',
+               mec='black', ms=8, label='start (t=%d)' % args.drop_first),
+        Line2D([0], [0], marker='s', color='none', markerfacecolor='red',
+               mec='black', ms=8, label='end'),
+    ]
+    axes[2].legend(handles=handles, loc='upper right', fontsize=9, framealpha=0.85)
 
     fig.suptitle(f'{data.parent.name} — episode {args.episode} '
                  f'(deter decoder, {meta["width"]}x{meta["height"]} grid)',
