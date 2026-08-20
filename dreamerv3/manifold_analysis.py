@@ -67,6 +67,32 @@ def _savefig(fig, out):
 
 
 # ---------------------------------------------------------------------------
+# Theme tokens (dark default; --theme light inverts for white-background posters)
+# ---------------------------------------------------------------------------
+
+THEME = 'dark'
+FG = 'white'          # text / labels / titles / wake points
+BG = '#1a1a1a'        # figure + axes background
+AXEDGE = '#555555'    # axes spines
+TICK = '#cccccc'      # tick labels
+GRID = '#333333'      # grid lines
+LEGEND_FC = '#333333' # legend face
+LEGEND_EC = 'grey'    # legend edge
+
+
+def _apply_theme(theme):
+    """Set the module color tokens for 'dark' or 'light'."""
+    global THEME, FG, BG, AXEDGE, TICK, GRID, LEGEND_FC, LEGEND_EC
+    THEME = theme
+    if theme == 'light':
+        FG, BG, AXEDGE, TICK = 'black', 'white', '#999999', '#333333'
+        GRID, LEGEND_FC, LEGEND_EC = '#cccccc', '#eeeeee', '#888888'
+    else:
+        FG, BG, AXEDGE, TICK = 'white', '#1a1a1a', '#555555', '#cccccc'
+        GRID, LEGEND_FC, LEGEND_EC = '#333333', '#333333', 'grey'
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -360,17 +386,17 @@ def compute_isomap(X_wake, X_dream, n_neighbors=150, max_total=8000):
 # ---------------------------------------------------------------------------
 
 def _setup_dark_style():
-    """Dark theme consistent with repo plotting style."""
+    """Apply the active theme (dark default, or light via --theme) to rcParams."""
     plt.rcParams.update({
-        'figure.facecolor': '#1a1a1a',
-        'axes.facecolor': '#1a1a1a',
-        'axes.edgecolor': '#555555',
-        'axes.labelcolor': 'white',
-        'text.color': 'white',
-        'xtick.color': '#cccccc',
-        'ytick.color': '#cccccc',
-        'grid.color': '#333333',
-        'savefig.facecolor': '#1a1a1a',
+        'figure.facecolor': BG,
+        'axes.facecolor': BG,
+        'axes.edgecolor': AXEDGE,
+        'axes.labelcolor': FG,
+        'text.color': FG,
+        'xtick.color': TICK,
+        'ytick.color': TICK,
+        'grid.color': GRID,
+        'savefig.facecolor': BG,
     })
 
 
@@ -406,12 +432,12 @@ def plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir):
     _setup_dark_style()
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
-    ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c='white', s=4, alpha=0.3,
+    ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=FG, s=4, alpha=0.3,
                edgecolors='none', label='wake', zorder=2)
     ax.scatter(emb_dream[:, 0], emb_dream[:, 1], c='#cc0000', s=4, alpha=0.5,
                edgecolors='none', label='dream', zorder=3)
-    ax.legend(fontsize=9, loc='upper right', facecolor='#333333',
-              edgecolor='grey', labelcolor='white')
+    ax.legend(fontsize=9, loc='upper right', facecolor=LEGEND_FC,
+              edgecolor=LEGEND_EC, labelcolor=FG)
     ax.set_xlabel('Isomap 1', fontsize=10)
     ax.set_ylabel('Isomap 2', fontsize=10)
     ax.set_title(f'{layer_name} — Wake vs Dream manifold', fontsize=11,
@@ -493,8 +519,8 @@ def plot_hill_fit(hill_fit, layer_name, save_dir):
     ax.set_xlabel('Spatial distance', fontsize=10)
     ax.set_ylabel('Neural distance (cosine)', fontsize=10)
     ax.set_title(f'{layer_name} — Hill fit', fontsize=11, fontweight='bold')
-    ax.legend(fontsize=8, facecolor='#333333', edgecolor='grey',
-              labelcolor='white', loc='lower right')
+    ax.legend(fontsize=8, facecolor=LEGEND_FC, edgecolor=LEGEND_EC,
+              labelcolor=FG, loc='lower right')
 
     out = save_dir / f'{layer_name.replace("/", "_")}_hillfit.png'
     _savefig(fig, out)
@@ -547,8 +573,8 @@ def plot_sw_histogram(min_dists, median_sw, neural_bins, layer_name, save_dir):
     ax.set_xlabel('Count', fontsize=10)
     ax.set_ylabel('')
     ax.set_ylim(0.0, 1.0)
-    ax.legend(fontsize=9, facecolor='#333333', edgecolor='grey',
-              labelcolor='white')
+    ax.legend(fontsize=9, facecolor=LEGEND_FC, edgecolor=LEGEND_EC,
+              labelcolor=FG)
 
     fig.suptitle(f'{layer_name} — SW distance', fontsize=11, fontweight='bold')
     fig.tight_layout()
@@ -592,7 +618,7 @@ def plot_sw_over_time(min_dists, t_idx, layer_name, save_dir):
     ax.set_ylim(0.0, 1.0)
     ax.set_title(f'{layer_name} — SW distance over dream time',
                  fontsize=11, fontweight='bold')
-    ax.legend(fontsize=9, facecolor='#333333', edgecolor='grey', labelcolor='white')
+    ax.legend(fontsize=9, facecolor=LEGEND_FC, edgecolor=LEGEND_EC, labelcolor=FG)
     fig.tight_layout()
     out = save_dir / f'{layer_name.replace("/", "_")}_sw_over_time.png'
     _savefig(fig, out)
@@ -656,8 +682,8 @@ def plot_sw_over_time_by_condition(cond_results, layer_name, save_dir,
     ax.set_ylim(0.0, 1.0)
     ax.set_title(f'{layer_name} — SW distance over dream time by condition',
                  fontsize=11, fontweight='bold')
-    ax.legend(fontsize=8, facecolor='#333333', edgecolor='grey',
-              labelcolor='white', loc='upper left')
+    ax.legend(fontsize=8, facecolor=LEGEND_FC, edgecolor=LEGEND_EC,
+              labelcolor=FG, loc='upper left')
     fig.tight_layout()
     out = save_dir / f'{layer_name.replace("/", "_")}_sw_over_time_by_condition.png'
     _savefig(fig, out)
@@ -724,19 +750,19 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
                         cmap='viridis', s=4, alpha=0.6, edgecolors='none')
         fig.colorbar(sc, ax=ax, shrink=0.7)
         ax.axis('off')
-        ax.set_title('position', fontsize=9, color='white')
+        ax.set_title('position', fontsize=9, color=FG)
 
         # Panel 4: Isomap wake + dream overlay
         ax = axes[3]
-        ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c='white', s=4, alpha=0.3,
+        ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=FG, s=4, alpha=0.3,
                    edgecolors='none')
         ax.scatter(emb_dream[:, 0], emb_dream[:, 1],
                    c=np.tile([0.7, 0, 0], (len(emb_dream), 1)),
                    s=4, alpha=0.5, edgecolors='none')
         ax.axis('off')
-        ax.set_title('wake + dream', fontsize=9, color='white')
+        ax.set_title('wake + dream', fontsize=9, color=FG)
 
-    fig.suptitle(f'{layer_name}', fontsize=12, fontweight='bold', color='white')
+    fig.suptitle(f'{layer_name}', fontsize=12, fontweight='bold', color=FG)
     fig.tight_layout()
     out = save_dir / f'{layer_name.replace("/", "_")}_wakesleep.png'
     _savefig(fig, out)
@@ -791,8 +817,8 @@ def plot_summary(results, save_dir):
         ax.set_xticks(x)
         ax.set_xticklabels([l.replace('/', '\n') for l in layers], fontsize=8)
         ax.set_title('Hill fit parameters', fontsize=11, fontweight='bold')
-        ax.legend(fontsize=8, facecolor='#333333', edgecolor='grey',
-                  labelcolor='white')
+        ax.legend(fontsize=8, facecolor=LEGEND_FC, edgecolor=LEGEND_EC,
+                  labelcolor=FG)
     else:
         ax.axis('off')
         ax.text(0.5, 0.5, 'Hill fit not available', transform=ax.transAxes,
@@ -814,10 +840,10 @@ def plot_summary(results, save_dir):
         lines.append(f"  wake N = {r['n_wake']}, dream N = {r['n_dream']}")
     ax.text(0.05, 0.95, '\n'.join(lines), transform=ax.transAxes,
             fontsize=9, fontfamily='monospace', verticalalignment='top',
-            color='white')
+            color=FG)
 
     fig.suptitle('Neural Manifold Analysis', fontsize=14, fontweight='bold',
-                 color='white')
+                 color=FG)
     fig.tight_layout()
     out = save_dir / 'manifold_summary.png'
     _savefig(fig, out)
@@ -987,10 +1013,13 @@ def main():
                         help='Path to tuning_results.pkl (required for --ev_thresh)')
     parser.add_argument('--fmt', default='png', choices=['png', 'svg', 'pdf'],
                         help='Figure output format (svg/pdf = Illustrator-editable vector)')
+    parser.add_argument('--theme', default='dark', choices=['dark', 'light'],
+                        help='Color theme; light = white bg + dark points/text (poster)')
     args = parser.parse_args()
 
     global SAVE_FMT
     SAVE_FMT = args.fmt
+    _apply_theme(args.theme)
 
     if args.ev_thresh is not None and args.tuning_pkl is None:
         parser.error('--ev_thresh requires --tuning_pkl')
