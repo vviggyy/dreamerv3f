@@ -123,6 +123,23 @@ COLORS = {'A': 'crimson', 'B': 'steelblue', 'C': 'darkorange', 'D': 'dimgray',
 COND_LS = {'A': '-', 'B': ':', 'C': '--', 'D': '-.', 'E': (0, (1, 1)),
            'Aprime': (0, (5, 1))}
 
+# Output format + theme (set from cfg.fmt / cfg.theme in dream_seed_ablation()).
+# svg/pdf = Illustrator-editable vector; light = white bg + dark text (poster).
+SAVE_FMT = 'png'
+THEME = 'dark'
+
+
+def _savefig(fig, out, **kw):
+    """Save honoring SAVE_FMT (png->svg/pdf); vector formats drop raster dpi."""
+    if str(out).endswith('.png') and SAVE_FMT != 'png':
+        out = out.with_suffix('.' + SAVE_FMT)
+    if str(out).endswith(('.svg', '.pdf')):
+        kw.pop('dpi', None)
+    else:
+        kw.setdefault('dpi', 150)
+    fig.savefig(out, bbox_inches='tight', **kw)
+    return out
+
 
 def _activate_e():
     """Register condition E in the module-global CONDITIONS so every
@@ -305,8 +322,12 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     ylo, yhi = np.nanmin(allp[:, 1]) - pad, np.nanmax(allp[:, 1]) + pad
 
     cmap = plt.cm.plasma
-    fc = '#1a1a1a' if world_img is not None else 'white'
-    txt = 'white' if world_img is not None else 'black'
+    if THEME == 'light':
+        fc, txt = 'white', 'black'
+    else:
+        fc = '#1a1a1a' if world_img is not None else 'white'
+        txt = 'white' if world_img is not None else 'black'
+    legend_fc = 'white' if THEME == 'light' else 'black'
     nc = len(cols)
 
     nrow = len(CONDITIONS)
@@ -317,7 +338,11 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
             ax = axes[ri, ci]
             ax.set_facecolor(fc)
             if world_img is not None:
-                ax.imshow((world_img * 0.6).astype(np.uint8))
+                if THEME == 'light':  # lighten world toward white so it sits on white bg
+                    disp = (255 - (255 - world_img.astype(np.float32)) * 0.6).astype(np.uint8)
+                else:                 # darken for contrast on dark bg
+                    disp = (world_img * 0.6).astype(np.uint8)
+                ax.imshow(disp)
 
             for k in range(Ns):
                 tp = to_px(decoded[c][s, w, k])                # (Hp1, 2)
@@ -357,11 +382,11 @@ def plot_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     cbar.ax.yaxis.set_tick_params(color=txt)
     cbar.ax.tick_params(labelcolor=txt)
     fig.legend(handles=_marker_handles(cmap), loc='lower center', ncol=3,
-               fontsize=9, facecolor='black', edgecolor='0.4', labelcolor=txt,
+               fontsize=9, facecolor=legend_fc, edgecolor='0.4', labelcolor=txt,
                framealpha=0.6, bbox_to_anchor=(0.5, -0.01))
 
     out = save_dir / 'decoded_dreams_by_condition.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight', facecolor=fc)
+    out = _savefig(fig, out, facecolor=fc)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -398,8 +423,11 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
     ylo, yhi = np.nanmin(allp[:, 1]) - pad, np.nanmax(allp[:, 1]) + pad
 
     cmap = plt.cm.plasma
-    fc = '#1a1a1a' if world_img is not None else 'white'
-    txt = 'white' if world_img is not None else 'black'
+    if THEME == 'light':
+        fc, txt = 'white', 'black'
+    else:
+        fc = '#1a1a1a' if world_img is not None else 'white'
+        txt = 'white' if world_img is not None else 'black'
 
     frames = []
     for k in range(Ns):
@@ -410,7 +438,11 @@ def animate_decoded_dreams(decoded, start_pos, future_pos, metadata, save_dir,
         for ax, c in zip(np.atleast_1d(axes), CONDITIONS):
             ax.set_facecolor(fc)
             if world_img is not None:
-                ax.imshow((world_img * 0.6).astype(np.uint8))
+                if THEME == 'light':  # lighten world toward white so it sits on white bg
+                    disp = (255 - (255 - world_img.astype(np.float32)) * 0.6).astype(np.uint8)
+                else:                 # darken for contrast on dark bg
+                    disp = (world_img * 0.6).astype(np.uint8)
+                ax.imshow(disp)
             _draw_real_traj(ax, start_pos[s, w], future_pos[s, w], to_px, real_style)
             tp = to_px(decoded[c][s, w, k])                    # (Hp1, 2)
             for t in range(Hp1 - 1):
@@ -695,7 +727,7 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
 
     fig.tight_layout()
     out = save_dir / 'seed_ablation_curves.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    out = _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -715,7 +747,7 @@ def plot_error_vs_warmup(distB_by_w, warmups, save_dir, central='median'):
     ax.set_ylim(bottom=0)
     fig.tight_layout()
     out = save_dir / 'error_vs_warmup.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    out = _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -784,7 +816,7 @@ def plot_condition_compare(decoded, start_pos, future_pos, dispA, varC, stepD,
                  fontsize=13)
     fig.tight_layout()
     out = save_dir / 'condition_compare_ADAprime.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    out = _savefig(fig, out)
     plt.close(fig)
     print(f"  Saved {out.name}")
 
@@ -933,6 +965,9 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
         f"central must be 'median' or 'mean', got {cfg.central!r}"
     assert cfg.shading in ('band', 'bars', 'none'), \
         f"shading must be 'band', 'bars', or 'none', got {cfg.shading!r}"
+    global SAVE_FMT, THEME
+    SAVE_FMT = getattr(cfg, 'fmt', 'png')
+    THEME = getattr(cfg, 'theme', 'dark')
     if cfg.include_e:
         _activate_e()  # register E in CONDITIONS -> flows through every panel
 

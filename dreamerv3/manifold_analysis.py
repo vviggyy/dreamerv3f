@@ -424,6 +424,48 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
     print(f"  Saved {out.name}")
 
 
+def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
+                                    mapcenter=None, env_seed=None, area=None):
+    """Companion 'color key' for plot_isomap_position: render the world map
+    tinted by the SAME arctan(x/y) position-angle colormap (viridis), so the
+    abstract isomap colors can be read back to real world locations. Saved as a
+    SEPARATE file (align/overlay with the isomap in Illustrator)."""
+    _setup_dark_style()
+    try:
+        from plot_trajectories import _render_crafter_world
+    except Exception as e:
+        print(f"  colorkey: world render unavailable ({e}); skipping")
+        return
+    if env_seed is None:
+        print("  colorkey: no env_seed (pass --world_env_seed); skipping world key")
+        return
+    md = {'env_seed': env_seed, 'area': tuple(area) if area is not None else None}
+    world_img, _es, ts = _render_crafter_world(md, tile_size=12)
+    if world_img is None:
+        print("  colorkey: no world image; skipping world color key")
+        return
+    if mapcenter is None:  # match plot_isomap_position's default exactly
+        mapcenter = [pos_wake[:, 0].mean(), pos_wake[:, 1].mean()]
+    W, H = (int(area[0]), int(area[1])) if area is not None else (32, 32)
+    X, Y = np.meshgrid(np.arange(W), np.arange(H))  # X[y,x], Y[y,x]
+    field = np.arctan((X - mapcenter[0]) / (Y - mapcenter[1] + 1e-9))  # (H, W)
+    field_px = np.repeat(np.repeat(field, ts, axis=0), ts, axis=1)  # -> world px
+
+    fig, ax = plt.subplots(1, 1, figsize=(7, 6))
+    ax.imshow(world_img, origin='upper', interpolation='nearest')
+    im = ax.imshow(field_px, origin='upper', cmap='viridis', alpha=0.55,
+                   interpolation='nearest')
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('arctan(x/y)', fontsize=9)
+    ax.axis('off')
+    ax.set_title(f'{layer_name} — position color key (world)',
+                 fontsize=11, fontweight='bold')
+    out = save_dir / f'{layer_name.replace("/", "_")}_position_colorkey_world.png'
+    _savefig(fig, out)
+    plt.close(fig)
+    print(f"  Saved {out.name}")
+
+
 def plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir):
     """Isomap with wake (white) vs dream (red) overlay.
 
@@ -1015,6 +1057,11 @@ def main():
                         help='Figure output format (svg/pdf = Illustrator-editable vector)')
     parser.add_argument('--theme', default='dark', choices=['dark', 'light'],
                         help='Color theme; light = white bg + dark points/text (poster)')
+    parser.add_argument('--world_env_seed', type=int, default=None,
+                        help='env_seed for the position color-key world render '
+                             '(overrides metadata; needed when trajectories lack it)')
+    parser.add_argument('--world_area', type=int, nargs=2, default=None,
+                        help='world area for the color-key render (default: metadata)')
     args = parser.parse_args()
 
     global SAVE_FMT
@@ -1169,9 +1216,18 @@ def main():
         if emb_wake is not None:
             plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir)
             plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir)
+            # Separate world color-key (same arctan colormap on world 45) so the
+            # isomap colors map back to real locations (align in Illustrator).
+            key_seed = args.world_env_seed if args.world_env_seed is not None \
+                else metadata.get('env_seed')
+            key_area = tuple(args.world_area) if args.world_area \
+                else metadata.get('area')
+            plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
+                                            env_seed=key_seed, area=key_area)
             output_files.extend([
                 f'{slug}_isomap_position.png',
                 f'{slug}_isomap_wakedream.png',
+                f'{slug}_position_colorkey_world.png',
             ])
 
         # Combined WakeSleep figure (pRNN style)

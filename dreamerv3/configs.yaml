@@ -77,6 +77,8 @@ defaults:
     horizon: 0        # dream rollout length (0 -> imag_length); warmup+horizon <= report_length
     central: median   # curve central tendency: 'median' (spread=IQR) or 'mean' (spread=std)
     shading: band     # spread display: 'band' (filled), 'bars' (error bars), or 'none'
+    fmt: png          # figure output format: png | svg | pdf (svg/pdf = Illustrator-editable vector)
+    theme: dark       # color theme: dark | light (light = white bg + dark text/points for posters)
     from_pkl: ''      # replot only: path to a saved dream_seed_ablation_results.pkl (skips agent/rollouts/decode)
     n_example_dreams: 4   # decoded_dreams_by_condition.png: # columns (distinct example dreams) in the 4xN grid; rows are conditions, all seeds drawn per cell (0 disables)
     make_gif: True        # also emit decoded_dreams_animation.gif: 1x4 conditions, one seed (dream) at a time over the real trajectory
