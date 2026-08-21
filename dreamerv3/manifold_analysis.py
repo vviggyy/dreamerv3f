@@ -451,9 +451,13 @@ def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
     field = np.arctan((X - mapcenter[0]) / (Y - mapcenter[1] + 1e-9))  # (H, W)
     field_px = np.repeat(np.repeat(field, ts, axis=0), ts, axis=1)  # -> world px
 
+    # Grayscale the world (luminance) so the arctan colormap is the ONLY color
+    # signal — the crafter tile colors otherwise fight the viridis overlay.
+    gray = world_img.astype(np.float32) @ np.array([0.299, 0.587, 0.114])
+
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
-    ax.imshow(world_img, origin='upper', interpolation='nearest')
-    im = ax.imshow(field_px, origin='upper', cmap='viridis', alpha=0.55,
+    ax.imshow(gray, origin='upper', cmap='gray', interpolation='nearest')
+    im = ax.imshow(field_px, origin='upper', cmap='viridis', alpha=0.6,
                    interpolation='nearest')
     cbar = fig.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label('arctan(x/y)', fontsize=9)
@@ -1216,19 +1220,21 @@ def main():
         if emb_wake is not None:
             plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir)
             plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir)
-            # Separate world color-key (same arctan colormap on world 45) so the
-            # isomap colors map back to real locations (align in Illustrator).
-            key_seed = args.world_env_seed if args.world_env_seed is not None \
-                else metadata.get('env_seed')
-            key_area = tuple(args.world_area) if args.world_area \
-                else metadata.get('area')
-            plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
-                                            env_seed=key_seed, area=key_area)
             output_files.extend([
                 f'{slug}_isomap_position.png',
                 f'{slug}_isomap_wakedream.png',
-                f'{slug}_position_colorkey_world.png',
             ])
+
+        # Separate world color-key (same arctan colormap on a grayscaled world)
+        # so the isomap colors map back to real locations (align in Illustrator).
+        # Independent of Isomap — needs only pos_wake + the world render.
+        key_seed = args.world_env_seed if args.world_env_seed is not None \
+            else metadata.get('env_seed')
+        key_area = tuple(args.world_area) if args.world_area \
+            else metadata.get('area')
+        plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
+                                        env_seed=key_seed, area=key_area)
+        output_files.append(f'{slug}_position_colorkey_world.png')
 
         # Combined WakeSleep figure (pRNN style)
         plot_wake_sleep_figure(layer_results, layer_name, save_dir)
