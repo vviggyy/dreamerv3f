@@ -91,6 +91,7 @@ defaults:
     perturb_state: False     # add condition A' (Aprime): real deter + posterior from a seed image whose interoceptive status bar is overwritten with random vitals. Each of the n_seeds gets an independent uniform draw (redrawn per batch) -> A' cross-seed spread measures state-perturbation sensitivity. Adds condition_compare_ADAprime.png (A vs D vs A')
     perturb_vitals: health,food,drink,energy  # which status vitals A' randomizes (comma-sep subset of health,food,drink,energy); each uniform int 0-9
     perturb_pool: 1024       # # of pre-rendered random status-bar strips A' samples from (baked as a constant; sampled with replacement per seed)
+    perturb_state_mode: seed  # A' variant: 'seed' = perturb only the seed frame (posterior injected onto clean real deter; step0==A, cheap); 'warmup' = perturb every observed frame's status bar and re-observe so the recurrent deter accumulates the counterfactual vitals across the WHOLE warmup (step0 != A; the proper causal test). One bar per seed, shared across warmup frames
 
   state_probe:
     save_path: ''
@@ -197,6 +198,7 @@ defaults:
     seed_ablation_warmup_stride: 1  # dense-warmup stride for the seed ablation
     seed_ablation_noise_mode: shuffle  # noise-deter null for C/D: matched (mu+sd*N), matched_relu (clip>=0), truncnorm (N>=0), shuffle (per-dim bootstrap of real deter; preserves marginal+nonneg). DEFAULT shuffle: non-negative, relu-safe for manifold
     seed_ablation_perturb_state: False  # emit condition A' (Aprime): real deter + posterior from a status-bar-perturbed seed image. Requires the driver to bake the rendered bar pool onto the model (dream_seed_ablation.py). See dream_seed_ablation.perturb_state
+    seed_ablation_perturb_state_mode: seed  # A' construction: 'seed' = perturb ONLY the seed frame's posterior onto the clean real deter (step0==A); 'warmup' = perturb the status bar on EVERY observed frame, re-observe -> deter itself carries the counterfactual vitals across the whole warmup (step0 != A). See dream_seed_ablation.perturb_state_mode
     seed_ablation_include_e: False  # emit condition E (blank-slate): all-zero deter (no warmup) + prior stoch, rolled out under the policy. See dream_seed_ablation.include_e
     dream_warmup: 0   # dream_vs_future: observed steps before dream (0->T//2). seed ablation: 0->dense over all warmups, N>0->single warmup N
     dream_horizon: 0  # report dream rollout length (0 -> imag_length). W+H<=report_length

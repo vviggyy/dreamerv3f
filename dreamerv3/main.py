@@ -173,6 +173,7 @@ def main(argv=None):
         'agent.seed_ablation_warmup_stride': config.dream_seed_ablation.warmup_stride,
         'agent.seed_ablation_noise_mode': config.dream_seed_ablation.noise_mode,
         'agent.seed_ablation_perturb_state': config.dream_seed_ablation.perturb_state,
+        'agent.seed_ablation_perturb_state_mode': config.dream_seed_ablation.perturb_state_mode,
         'agent.seed_ablation_include_e': config.dream_seed_ablation.include_e,
         'agent.dream_warmup': config.dream_seed_ablation.warmup,
         'agent.dream_horizon': config.dream_seed_ablation.horizon,

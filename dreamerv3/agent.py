@@ -378,6 +378,11 @@ class Agent(embodied.jax.Agent):
 
     carry, obs, prevact, _ = self._apply_replay_context(carry, data)
     (enc_carry, dyn_carry, dec_carry) = carry
+    # Initial dyn carry, saved before the openloop block below rebinds `dyn_carry`.
+    # The warmup-mode A' re-observe (a perturbed re-run of loss()'s observe) must
+    # start from this same pre-sequence state so its deter is comparable to the
+    # real posterior (outs['repfeat']) that A/B are seeded from.
+    dyn_carry0 = dyn_carry
     B, T = obs['is_first'].shape
     RB = min(self.config.report_batch_size, B)
     metrics = {}
@@ -593,26 +598,66 @@ class Agent(embodied.jax.Agent):
           getattr(self, 'aprime_pool', None) is not None and 'image' in obs):
         bar_pool = jnp.asarray(self.aprime_pool)             # (K, inv, Wpx, 3) uint8
         K, inv = bar_pool.shape[0], bar_pool.shape[1]
-        N = RB * Nw * Nseed
-        d_tA = jnp.repeat(rdf, Nseed, axis=0)                # (N, Dt) == A's deter
-        seed_img = jnp.repeat(f2(obs['image'][:RB]), Nseed, axis=0)  # (N,Hpx,Wpx,3)
-        sel = jax.random.randint(nj.seed(), (N,), 0, K)      # per-seed pool index
-        bars = bar_pool[sel].astype(seed_img.dtype)          # (N, inv, Wpx, 3)
-        pert_img = seed_img.at[:, -inv:, :, :].set(bars)     # overwrite status bar
-        # Re-encode the single perturbed frame (encoder is stateless: initial={}).
-        obs1 = {k: jnp.repeat(f2(obs[k][:RB]), Nseed, axis=0) for k in obs}
-        obs1['image'] = pert_img
-        _, _, ptok = self.enc(
-            self.enc.initial(N), obs1, jnp.ones((N,), bool),
-            training=False, single=True)
-        l_t = self.dyn.post_from_deter(d_tA, ptok)
-        s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
+        ps_mode = self.config.seed_ablation_perturb_state_mode
+        if ps_mode == 'warmup':
+          # Full-warmup A': overwrite the status bar on EVERY observed frame (one
+          # bar per seed, shared across the T frames), re-encode + re-observe from
+          # the same pre-sequence carry that produced rp, so the recurrent deter
+          # ACCUMULATES the counterfactual vitals across the whole warmup. Then
+          # seed each warmup slot from THAT perturbed posterior (deter+logit at
+          # index idx), exactly as A slices rp. Unlike seed-mode, step 0 no longer
+          # matches A -- the deter itself is perturbed. Per-seed independent bars
+          # make A''s cross-seed spread the sensitivity to perturbing the whole
+          # observed history.
+          rep = lambda x: jnp.repeat(x[:RB], Nseed, axis=0)  # (RB*Nseed, ...)
+          sel = jax.random.randint(nj.seed(), (RB * Nseed,), 0, K)  # per (b,seed)
+          bars = bar_pool[sel].astype(obs['image'].dtype)    # (RB*Nseed, inv, Wpx, 3)
+          obs_s = {k: rep(v) for k, v in obs.items()}
+          # status bar = bottom `inv` rows (axis 2 = Hpx in the (N,T,H,W,3) seq)
+          obs_s['image'] = obs_s['image'].at[:, :, -inv:, :, :].set(bars[:, None])
+          reset_s = rep(obs['is_first'])                     # (RB*Nseed, T)
+          prevact_s = {k: rep(v) for k, v in prevact.items()}
+          _, _, ptok_seq = self.enc(
+              self.enc.initial(RB * Nseed), obs_s, reset_s, training=False)
+          dc0 = jax.tree.map(
+              lambda x: jnp.repeat(x[:RB], Nseed, axis=0), dyn_carry0)
+          _, _, prep = self.dyn.observe(
+              dc0, ptok_seq, prevact_s, reset_s, training=False)
+          # slice at each warmup index, reorder (RB*Nseed,Nw)->canonical
+          # ((b*Nw+w)*Nseed+s) layout used by A/B/C/D above.
+          def _slice(x):  # (RB*Nseed, T, *tail) -> (RB*Nw*Nseed, *tail)
+            tail = x.shape[2:]
+            xw = x[:, idx].reshape((RB, Nseed, Nw) + tail)
+            return jnp.swapaxes(xw, 1, 2).reshape((RB * Nw * Nseed,) + tail)
+          d_tA = nn.cast(_slice(prep['deter']))              # (RB*Nw*Nseed, Dt)
+          l_t = _slice(prep['logit'])
+          s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
+          pool_idx = jnp.broadcast_to(
+              sel.reshape((RB, 1, Nseed)), (RB, Nw, Nseed))
+        else:
+          # seed-mode (default): perturb ONLY the seed frame's posterior and
+          # inject it onto the clean real deter (step 0 decodes identically to A).
+          N = RB * Nw * Nseed
+          d_tA = jnp.repeat(rdf, Nseed, axis=0)              # (N, Dt) == A's deter
+          seed_img = jnp.repeat(f2(obs['image'][:RB]), Nseed, axis=0)  # (N,Hpx,Wpx,3)
+          sel = jax.random.randint(nj.seed(), (N,), 0, K)    # per-seed pool index
+          bars = bar_pool[sel].astype(seed_img.dtype)        # (N, inv, Wpx, 3)
+          pert_img = seed_img.at[:, -inv:, :, :].set(bars)   # overwrite status bar
+          # Re-encode the single perturbed frame (encoder is stateless: initial={}).
+          obs1 = {k: jnp.repeat(f2(obs[k][:RB]), Nseed, axis=0) for k in obs}
+          obs1['image'] = pert_img
+          _, _, ptok = self.enc(
+              self.enc.initial(N), obs1, jnp.ones((N,), bool),
+              training=False, single=True)
+          l_t = self.dyn.post_from_deter(d_tA, ptok)
+          s_t = nn.cast(self.dyn._dist(l_t).sample(seed=nj.seed()))
+          pool_idx = sel.reshape((RB, Nw, Nseed))
         carry0 = nn.cast(dict(deter=d_tA, stoch=s_t))
         _, feat, _ = self.dyn.imagine(carry0, dreamfn, H, training=False)
         seq = jnp.concatenate([d_tA[:, None], feat['deter']], 1)
         metrics['seedabl/Aprime/deter'] = seq.reshape(
             (RB, Nw, Nseed, H + 1, Dt))
-        metrics['seedabl/Aprime/pool_idx'] = sel.reshape((RB, Nw, Nseed))
+        metrics['seedabl/Aprime/pool_idx'] = pool_idx
 
       metrics['seedabl/start_pos'] = start_pos              # (RB, Nw, 2)
       metrics['seedabl/future_pos'] = future_pos            # (RB, Nw, H, 2)
