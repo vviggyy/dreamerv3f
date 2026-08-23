@@ -769,6 +769,36 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     print(f"  Saved {fname}")
 
 
+def plot_fullset_occupancy(pos_all, width, height, save_dir,
+                           repr_name='deter', metadata=None):
+    """Full-set (train+test combined) occupancy heatmap — the exact data the
+    tuning curves are computed on, distinct from the per-split train/test rows
+    in occupancy_vs_error. Single panel, same style. Saved as a NEW svg
+    (occupancy_fullset_{repr}.svg)."""
+    stats = _compute_tile_stats(pos_all, pos_all.astype(float), width, height)
+    world_img, world_extent = _get_world_img(metadata, width, height)
+    fig, ax = plt.subplots(figsize=(6, 5.5))
+    if world_img is not None:
+        ax.imshow(world_img, alpha=0.25, extent=world_extent,
+                  origin='lower', aspect='equal')
+    occ = stats['tile_visits'].copy()
+    occ[occ == 0] = np.nan
+    im = ax.imshow(occ.T, origin='lower', cmap='hot', aspect='equal',
+                   interpolation='nearest', extent=world_extent, alpha=0.8)
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Visit count')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_xlim(world_extent[0], world_extent[1])
+    ax.set_ylim(world_extent[2], world_extent[3])
+    ax.set_title(f'Tile occupancy (full set — {len(pos_all)} timesteps)')
+    fig.tight_layout()
+    fname = f'occupancy_fullset_{repr_name}.svg'
+    fig.savefig(save_dir / fname, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {fname}")
+
+
 def plot_decoder_probmap(proba_all, pos, groups, layer_name, save_dir,
                          n_steps=12, episode=0):
     """Show decoder softmax probability over the grid with true agent position.
@@ -2119,6 +2149,11 @@ if __name__ == '__main__':
                     save_dir, repr_name=occ_layer.replace('/', '_'),
                     method='classification', metadata=metadata,
                     train_pos=train_pos_ln, train_pred=train_pred_ln)
+                pos_full = (np.concatenate([train_pos_ln, pos_test], axis=0)
+                            if train_pos_ln is not None else pos_test)
+                plot_fullset_occupancy(
+                    pos_full, width, height, save_dir,
+                    repr_name=occ_layer.replace('/', '_'), metadata=metadata)
         print("\n>>> Plots saved. Decoding evaluation complete. <<<")
         if loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
@@ -2294,6 +2329,10 @@ if __name__ == '__main__':
                                metadata=metadata,
                                train_pos=train_pos_cls,
                                train_pred=train_pred_xy)
+        pos_full = (np.concatenate([train_pos_cls, test_pos], axis=0)
+                    if train_pos_cls is not None else test_pos)
+        plot_fullset_occupancy(pos_full, width, height, save_dir,
+                               repr_name=name, metadata=metadata)
         # Probability heatmap for each episode (deter only, LOGO only)
         if name == 'deter' and args.holdout_frac <= 0:
             for ep_idx in range(len(np.unique(groups))):
