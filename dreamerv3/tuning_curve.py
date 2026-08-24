@@ -803,17 +803,58 @@ def plot_si_ev_scatter(metrics, group_ids, layer_name, save_path,
     plt.close(fig)
 
 
-def _interactive_si_ev(metrics, layer_name, tc_array):
-    """Interactive SI vs EV scatter — click a point to show its tuning curve."""
+def save_neuron_tuning_svg(tc_array, metrics, layer_name, idx, out_path):
+    """Save a single neuron's 2D tuning curve as a standalone SVG (vector).
+
+    tc_array: (n_neurons, H, W). idx: neuron number. metrics: dict with 'SI'/'EVs'
+    for the title (optional — falls back gracefully if absent).
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tc = tc_array[idx]
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+              interpolation='nearest', cmap=_tc_cmap())
+    si = metrics.get('SI') if isinstance(metrics, dict) else None
+    ev = metrics.get('EVs') if isinstance(metrics, dict) else None
+    title = f'{layer_name}  neuron {idx}'
+    if si is not None and ev is not None:
+        title += f'\nSI={si[idx]:.3f}  EV={ev[idx]:.3f}'
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(0.8)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches='tight')
+    plt.close(fig)
+    return out_path
+
+
+def _interactive_si_ev(metrics, layer_name, tc_array, save_dir=None):
+    """Interactive SI vs EV scatter — click a point to show its tuning curve.
+
+    Press 's' to save the currently-selected neuron's tuning curve as an SVG
+    into save_dir (default: cwd). Selected neuron numbers are printed on exit.
+    """
     si = metrics['SI']
     ev = metrics['EVs']
+    save_dir = Path(save_dir) if save_dir else Path('.')
+    safe_layer = layer_name.replace('/', '_')
+    state = {'idx': None, 'saved': []}
+    # Free the 's' key from matplotlib's default "save figure" binding so it
+    # only triggers our per-neuron SVG save.
+    if 's' in plt.rcParams.get('keymap.save', []):
+        plt.rcParams['keymap.save'] = [
+            k for k in plt.rcParams['keymap.save'] if k != 's']
 
     fig, (ax_scatter, ax_tc) = plt.subplots(1, 2, figsize=(11, 5),
                                              gridspec_kw={'width_ratios': [1, 1]})
     ax_scatter.scatter(si, ev, s=10, alpha=0.5, color='steelblue', picker=True)
     ax_scatter.set_xlabel('Spatial Information (bits/spike)')
     ax_scatter.set_ylabel('Explained Variance')
-    ax_scatter.set_title(f'{layer_name}: SI vs EV  (click a point)')
+    ax_scatter.set_title(f'{layer_name}: SI vs EV  (click a point, press "s" to save)')
 
     ax_tc.set_title('Tuning curve')
     ax_tc.axis('off')
@@ -826,6 +867,7 @@ def _interactive_si_ev(metrics, layer_name, tc_array):
 
     def on_pick(event):
         ind = event.ind[0]
+        state['idx'] = ind
         # Update highlight
         highlight.set_offsets([[si[ind], ev[ind]]])
         # Draw tuning curve
@@ -833,7 +875,8 @@ def _interactive_si_ev(metrics, layer_name, tc_array):
         tc = tc_array[ind]
         im = ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
                           interpolation='nearest', cmap=_tc_cmap())
-        ax_tc.set_title(f'Neuron {ind}  SI={si[ind]:.3f}  EV={ev[ind]:.3f}')
+        ax_tc.set_title(f'Neuron {ind}  SI={si[ind]:.3f}  EV={ev[ind]:.3f}'
+                        f'\n(press "s" to save SVG)')
         for spine in ax_tc.spines.values():
             spine.set_edgecolor('black')
             spine.set_linewidth(0.8)
@@ -841,9 +884,26 @@ def _interactive_si_ev(metrics, layer_name, tc_array):
         ax_tc.set_ylabel('y')
         fig.canvas.draw_idle()
 
+    def on_key(event):
+        if event.key != 's' or state['idx'] is None:
+            return
+        idx = state['idx']
+        out = save_dir / f'{safe_layer}_neuron{idx}_tuning.svg'
+        save_neuron_tuning_svg(tc_array, metrics, layer_name, idx, out)
+        if idx not in state['saved']:
+            state['saved'].append(idx)
+        print(f"  saved neuron {idx} -> {out}")
+        ax_tc.set_title(f'Neuron {idx}  SI={si[idx]:.3f}  EV={ev[idx]:.3f}'
+                        f'\nSAVED -> {out.name}')
+        fig.canvas.draw_idle()
+
     fig.canvas.mpl_connect('pick_event', on_pick)
+    fig.canvas.mpl_connect('key_press_event', on_key)
     fig.tight_layout()
     plt.show()
+    if state['saved']:
+        print(f"[{layer_name}] saved neurons: "
+              f"{','.join(str(i) for i in state['saved'])}")
     return fig
 
 
@@ -1459,6 +1519,11 @@ def main():
                         help='Load precomputed tuning_results.pkl and show interactive viewer (no recomputation)')
     parser.add_argument('--plot_autocorr', action='store_true',
                         help='With --from_pkl: generate tuning+autocorr plots instead of interactive viewer')
+    parser.add_argument('--save_neurons', default=None,
+                        help='With --from_pkl: comma-separated neuron numbers to '
+                             'save as standalone tuning-curve SVGs (no interaction). '
+                             'e.g. --save_neurons 3,17,42. Uses --layers to pick the '
+                             'layer(s); output goes to --save (or the pkl dir).')
     args = parser.parse_args()
 
     # Interactive viewer or autocorr plots from precomputed pkl
@@ -1510,7 +1575,7 @@ def main():
             return
 
         # Batch reclassify + replot when --save is provided (non-interactive)
-        if args.save and not args.interactive:
+        if args.save and not args.interactive and not args.save_neurons:
             save_dir = Path(args.save)
             save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1576,7 +1641,33 @@ def main():
             print("Done.")
             return
 
+        # Save specific neurons by number as standalone SVGs (no interaction)
+        if args.save_neurons:
+            out_dir = Path(args.save) if args.save else Path(args.from_pkl).parent
+            out_dir.mkdir(parents=True, exist_ok=True)
+            sel_layers = ([ln for ln in layer_names if ln in args.layers]
+                          if args.layers else layer_names)
+            if not sel_layers:
+                parser.error(f"--layers {args.layers} matched no layer in the pkl "
+                             f"(available: {layer_names})")
+            idxs = [int(s) for s in args.save_neurons.split(',') if s.strip() != '']
+            for ln in sel_layers:
+                ld = layers[ln]
+                tc = ld['tuning_curves']
+                n = tc.shape[0]
+                safe = ln.replace('/', '_')
+                for idx in idxs:
+                    if idx < 0 or idx >= n:
+                        print(f"  skip neuron {idx}: out of range for {ln} (0..{n-1})")
+                        continue
+                    out = out_dir / f'{safe}_neuron{idx}_tuning.svg'
+                    save_neuron_tuning_svg(tc, ld['metrics'], ln, idx, out)
+                    print(f"  saved {ln} neuron {idx} -> {out}")
+            print("Done.")
+            return
+
         # Interactive viewer
+        interactive_save_dir = Path(args.save) if args.save else Path(args.from_pkl).parent
         if len(layer_names) == 1:
             ln = layer_names[0]
         else:
@@ -1588,12 +1679,14 @@ def main():
             if choice == 'all':
                 for ln in layer_names:
                     ld = layers[ln]
-                    _interactive_si_ev(ld['metrics'], ln, ld['tuning_curves'])
+                    _interactive_si_ev(ld['metrics'], ln, ld['tuning_curves'],
+                                       save_dir=interactive_save_dir)
                 print("Done.")
                 return
             ln = layer_names[int(choice)]
         ld = layers[ln]
-        _interactive_si_ev(ld['metrics'], ln, ld['tuning_curves'])
+        _interactive_si_ev(ld['metrics'], ln, ld['tuning_curves'],
+                           save_dir=interactive_save_dir)
         return
 
     if not args.data or not args.save:
