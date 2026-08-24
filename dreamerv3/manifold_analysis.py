@@ -402,19 +402,24 @@ def _setup_dark_style():
 
 def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
                          mapcenter=None):
-    """Isomap colored by arctan(x/y) position angle (viridis, pRNN style)."""
+    """Isomap colored by full-circle atan2(x, y) position angle (cyclic hsv).
+
+    Uses atan2 (−π..π, full 360°) with a cyclic colormap so opposite headings
+    get distinct colors and the wrap is seamless — unlike arctan(x/y) which only
+    spans 180° and folds opposite sides of the map onto the same color."""
     _setup_dark_style()
 
     if mapcenter is None:
         mapcenter = [pos_wake[:, 0].mean(), pos_wake[:, 1].mean()]
-    color = np.arctan((pos_wake[:, 0] - mapcenter[0]) /
-                      (pos_wake[:, 1] - mapcenter[1]))
+    color = np.arctan2(pos_wake[:, 0] - mapcenter[0],
+                       pos_wake[:, 1] - mapcenter[1])
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
-    sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color, cmap='viridis',
-                    s=4, alpha=0.6, edgecolors='none')
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
-    cbar.set_label('arctan(x/y)', fontsize=9)
+    sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color, cmap='hsv',
+                    vmin=-np.pi, vmax=np.pi, s=4, alpha=0.6, edgecolors='none')
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8, ticks=[-np.pi, 0, np.pi])
+    cbar.ax.set_yticklabels(['−π', '0', 'π'])
+    cbar.set_label('position angle atan2(x, y)', fontsize=9)
     ax.axis('off')
     ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
@@ -427,9 +432,10 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
 def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
                                     mapcenter=None, env_seed=None, area=None):
     """Companion 'color key' for plot_isomap_position: render the world map
-    tinted by the SAME arctan(x/y) position-angle colormap (viridis), so the
-    abstract isomap colors can be read back to real world locations. Saved as a
-    SEPARATE file (align/overlay with the isomap in Illustrator)."""
+    tinted by the SAME full-circle atan2(x, y) position-angle colormap (cyclic
+    hsv, −π..π), so the abstract isomap colors can be read back to real world
+    locations. Saved as a SEPARATE file (align/overlay with the isomap in
+    Illustrator)."""
     _setup_dark_style()
     try:
         from plot_trajectories import _render_crafter_world
@@ -448,7 +454,7 @@ def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
         mapcenter = [pos_wake[:, 0].mean(), pos_wake[:, 1].mean()]
     W, H = (int(area[0]), int(area[1])) if area is not None else (32, 32)
     X, Y = np.meshgrid(np.arange(W), np.arange(H))  # X[y,x], Y[y,x]
-    field = np.arctan((X - mapcenter[0]) / (Y - mapcenter[1] + 1e-9))  # (H, W)
+    field = np.arctan2(X - mapcenter[0], Y - mapcenter[1])  # (H, W), −π..π
     field_px = np.repeat(np.repeat(field, ts, axis=0), ts, axis=1)  # -> world px
 
     # Grayscale the world (luminance) so the arctan colormap is the ONLY color
@@ -457,10 +463,11 @@ def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     ax.imshow(gray, origin='upper', cmap='gray', interpolation='nearest')
-    im = ax.imshow(field_px, origin='upper', cmap='viridis', alpha=0.6,
-                   interpolation='nearest')
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label('arctan(x/y)', fontsize=9)
+    im = ax.imshow(field_px, origin='upper', cmap='hsv', alpha=0.6,
+                   vmin=-np.pi, vmax=np.pi, interpolation='nearest')
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, ticks=[-np.pi, 0, np.pi])
+    cbar.ax.set_yticklabels(['−π', '0', 'π'])
+    cbar.set_label('position angle atan2(x, y)', fontsize=9)
     ax.axis('off')
     ax.set_title(f'{layer_name} — position color key (world)',
                  fontsize=11, fontweight='bold')
@@ -791,10 +798,12 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
         # Panel 3: Isomap colored by position angle (pRNN style)
         ax = axes[2]
         cx, cy = pos_wake[:, 0].mean(), pos_wake[:, 1].mean()
-        color = np.arctan((pos_wake[:, 0] - cx) / (pos_wake[:, 1] - cy))
+        color = np.arctan2(pos_wake[:, 0] - cx, pos_wake[:, 1] - cy)
         sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color,
-                        cmap='viridis', s=4, alpha=0.6, edgecolors='none')
-        fig.colorbar(sc, ax=ax, shrink=0.7)
+                        cmap='hsv', vmin=-np.pi, vmax=np.pi,
+                        s=4, alpha=0.6, edgecolors='none')
+        cb = fig.colorbar(sc, ax=ax, shrink=0.7, ticks=[-np.pi, 0, np.pi])
+        cb.ax.set_yticklabels(['−π', '0', 'π'])
         ax.axis('off')
         ax.set_title('position', fontsize=9, color=FG)
 
