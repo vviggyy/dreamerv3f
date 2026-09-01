@@ -923,13 +923,19 @@ def _draw_deviation_by_warmup(ax, decoded, start_pos, future_pos, warmups,
     return True
 
 
-def _render_aprime_pool(env, vitals_str, K, seed):
+def _render_aprime_pool(env, vitals_str, K, seed,
+                        scheme='uniform', low=1, high=9):
     """Render K status-bar strips (bottom `_ego_inv_rows` rows of the egocentric
-    frame) from independent uniform vital draws, reusing state_probe's crafter
-    unwrap. The whole bar is overwritten downstream; in a random-spawn/disable-mobs
-    nav run the non-vital inventory slots are 0 in both the seed frames and this
-    fresh env, so exactly `vitals` are perturbed. Returns (pool (K,inv,W,3) uint8,
-    combos (K,len(vitals)) int, vitals list)."""
+    frame) from A' vital draws, reusing state_probe's crafter unwrap. The whole
+    bar is overwritten downstream; in a random-spawn/disable-mobs nav run the
+    non-vital inventory slots are 0 in both the seed frames and this fresh env, so
+    exactly `vitals` are perturbed. Two value schemes (`scheme`):
+      uniform: each vital ~ uniform int [low, high]  (default; the original A').
+      one_low: structured deficit -- for each vital i, one bar has vital i = low
+               and every OTHER perturbed vital = high. len(vitals) distinct
+               patterns, sampled with replacement into the K-pool so A''s
+               cross-seed spread ranges over WHICH vital is deficient.
+    Returns (pool (K,inv,W,3) uint8, combos (K,len(vitals)) int, vitals list)."""
     crafter = _unwrap_crafter(env)
     # Reset so crafter builds the world + player before we mutate inventory
     # (crafter._env._player is None until the first reset).
@@ -942,8 +948,18 @@ def _render_aprime_pool(env, vitals_str, K, seed):
     vitals = [v.strip() for v in vitals_str.split(',') if v.strip()]
     assert all(v in ('health', 'food', 'drink', 'energy') for v in vitals), \
         f"perturb_vitals must be subset of health,food,drink,energy: {vitals}"
+    V = len(vitals)
+    lo, hi = int(low), int(high)
     rng = np.random.default_rng(seed)
-    combos = rng.integers(0, 10, size=(K, len(vitals)))        # uniform 0-9 / vital
+    if scheme == 'uniform':
+        combos = rng.integers(lo, hi + 1, size=(K, V))          # uniform [lo,hi]/vital
+    elif scheme == 'one_low':
+        base = np.full((V, V), hi, dtype=int)                   # V deficit patterns
+        base[np.arange(V), np.arange(V)] = lo                   # vital i deficient
+        combos = base[rng.integers(0, V, size=K)]               # sample w/ replacement
+    else:
+        raise ValueError(f"unknown perturb_scheme: {scheme!r} "
+                         "(expected 'uniform' or 'one_low')")
     player = crafter._env._player
     saved = {k: player.inventory.get(k) for k in vitals}
     bars = []
@@ -1003,12 +1019,15 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     if cfg.perturb_state:
         _tmpenv = make_env(0, fixed_seed=True)
         pool, combos, pvitals = _render_aprime_pool(
-            _tmpenv, cfg.perturb_vitals, int(cfg.perturb_pool), args.seed)
+            _tmpenv, cfg.perturb_vitals, int(cfg.perturb_pool), args.seed,
+            scheme=cfg.perturb_scheme, low=cfg.perturb_low, high=cfg.perturb_high)
         _tmpenv.close()
         _agent_mod._APRIME_POOL = pool
-        aprime_meta = {'aprime_vitals': pvitals, 'aprime_pool_combos': combos}
+        aprime_meta = {'aprime_vitals': pvitals, 'aprime_pool_combos': combos,
+                       'aprime_scheme': cfg.perturb_scheme}
         print(f"  A' bar pool: {pool.shape} over vitals {pvitals} "
-              f"(sampled per-seed with replacement)")
+              f"[scheme={cfg.perturb_scheme}, low={cfg.perturb_low}, "
+              f"high={cfg.perturb_high}] (sampled per-seed with replacement)")
 
     # 2. Agent + checkpoint (params only, skipping opt/ — see dream_vs_future).
     print("Creating agent...")

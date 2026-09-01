@@ -37,6 +37,28 @@ ACHIEVEMENT_COLORS = [
     '#aaaaaa', '#ff6600', '#00aaff', '#ff00ff',
 ]
 
+# Crafter tech-tree depth: tier = length of an achievement's prerequisite chain.
+# Tier 0 = unlockable from scratch; each higher tier requires a lower-tier unlock
+# first (wood -> table -> wood tools -> stone -> stone tools/furnace -> coal/iron
+# -> iron tools -> diamond). Used by the tiered achievement panel to color by tier.
+ACHIEVEMENT_TIERS = {
+    'collect_wood': 0, 'collect_drink': 0, 'collect_sapling': 0,
+    'eat_cow': 0, 'defeat_zombie': 0, 'wake_up': 0,
+    'place_table': 1, 'place_plant': 1,
+    'make_wood_pickaxe': 2, 'make_wood_sword': 2, 'eat_plant': 2,
+    'collect_stone': 3, 'defeat_skeleton': 3,
+    'place_stone': 4, 'place_furnace': 4, 'make_stone_pickaxe': 4,
+    'make_stone_sword': 4,
+    'collect_coal': 5, 'collect_iron': 5,
+    'make_iron_pickaxe': 6, 'make_iron_sword': 6,
+    'collect_diamond': 7,
+}
+TIER_LABELS = {
+    0: 'base (no prereq)', 1: 'wood/sapling', 2: 'wood tools',
+    3: 'stone', 4: 'stone tools/furnace', 5: 'coal/iron',
+    6: 'iron tools', 7: 'diamond',
+}
+
 
 def load_jsonl(path):
     records = []
@@ -249,6 +271,94 @@ def plot_crafter_score(ax, records, smooth_window):
     print(f'  Crafter score (last window): {final:.1f}% ({n_ach} achievements)')
 
 
+def _spread_labels(ys, min_gap, lo, hi):
+    """Nudge label y-positions so adjacent labels keep at least `min_gap`,
+    preserving their vertical order and staying within [lo, hi]. Simple two-pass
+    (spread up from the bottom, then push down anything that overflowed `hi`)."""
+    ys = np.asarray(ys, float)
+    order = np.argsort(ys)
+    s = ys[order].copy()
+    for i in range(1, len(s)):            # push up
+        if s[i] - s[i - 1] < min_gap:
+            s[i] = s[i - 1] + min_gap
+    for i in range(len(s) - 2, -1, -1):   # push overflow back down
+        if s[i + 1] - s[i] < min_gap:
+            s[i] = s[i + 1] - min_gap
+    s = np.clip(s, lo, hi)
+    out = np.empty_like(s)
+    out[order] = s
+    return out
+
+
+def plot_achievement_rates_tiered(ax, records, smooth_window):
+    """Per-achievement unlock rate, colored by Crafter tech-tree tier, with each
+    line directly labeled at its right end (no legend clutter, no emojis). Line
+    style cycles within a tier so same-color lines stay distinguishable."""
+    ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
+    keys = {k for r in records for k in r if ach_pattern.match(k)}
+    if not keys:
+        ax.text(0.5, 0.5, 'No achievement data in metrics.jsonl', ha='center',
+                va='center', transform=ax.transAxes, fontsize=10, color='grey')
+        ax.set_title('Achievement Unlock Rate by Tier', fontsize=13)
+        style_ax(ax)
+        return ax
+
+    # Order by (tier, name) so within-tier line styles cycle deterministically.
+    items = []
+    for key in keys:
+        name = ach_pattern.match(key).group(1)
+        items.append((ACHIEVEMENT_TIERS.get(name, 99), name, key))
+    items.sort()
+
+    max_tier = max(t for t, _, _ in items if t != 99) or 1
+    cmap = plt.cm.viridis
+    # Truncate to [0, 0.82]: the pale-yellow top of viridis is illegible on white,
+    # so the deepest tiers stay a readable yellow-green rather than near-white.
+    tier_color = {t: cmap(0.82 * t / max_tier) for t in range(max_tier + 1)}
+
+    labels, xmax = [], 0
+    for tier, name, key in items:
+        steps, vals = records_to_series(records, key)
+        if len(steps) == 0:
+            continue
+        if smooth_window > 1 and len(steps) > smooth_window:
+            sx, sy = smooth(steps, vals, smooth_window)
+        else:
+            sx, sy = steps, vals
+        if len(sx) == 0:
+            continue
+        color = tier_color.get(tier, '#888888')
+        # Solid lines throughout; the inline labels carry identity, so within-tier
+        # style variation is unnecessary.
+        ax.plot(sx, sy, color=color, lw=1.3)
+        labels.append([sy[-1], name.replace('_', ' '), color])
+        xmax = max(xmax, sx[-1])
+
+    # Make room on the right for the inline labels, then de-overlap them.
+    xmin = ax.get_xlim()[0]
+    ax.set_xlim(xmin, xmax + 0.30 * (xmax - xmin))
+    lo, hi = ax.get_ylim()
+    gap = 0.030 * (hi - lo)
+    new_ys = _spread_labels([l[0] for l in labels], gap, lo, hi)
+    for (y0, name, color), y in zip(labels, new_ys):
+        ax.plot([xmax, xmax + 0.02 * (xmax - xmin)], [y0, y],  # tiny leader
+                color=color, lw=0.5, alpha=0.6)
+        ax.text(xmax + 0.03 * (xmax - xmin), y, name, color=color,
+                fontsize=6.5, va='center', ha='left')
+
+    # Compact tier legend (color = tier), not per-achievement.
+    from matplotlib.lines import Line2D
+    handles = [Line2D([0], [0], color=tier_color[t], lw=2.2,
+                      label=f'T{t}: {TIER_LABELS.get(t, "")}')
+               for t in range(max_tier + 1)]
+    ax.legend(handles=handles, fontsize=6.5, framealpha=0.85,
+              loc='upper left', title='tier', title_fontsize=7)
+    ax.set_ylabel('Avg unlocks / episode', fontsize=11)
+    ax.set_title('Per-Achievement Unlock Rate by Tier', fontsize=13)
+    style_ax(ax)
+    return ax
+
+
 def plot_achievement_rates(ax, records, smooth_window, show_raw=True):
     ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
     all_keys = set()
@@ -316,6 +426,9 @@ def main():
                              '95th percentile of smoothed values')
     parser.add_argument('--no_raw_ach', action='store_true',
                         help='Hide raw (unsmoothed) traces on achievement panel')
+    parser.add_argument('--tiered_ach', action='store_true',
+                        help='Achievement panel: color lines by Crafter tech-tree '
+                             'tier and label each line inline (no raw traces)')
     args = parser.parse_args()
 
     logdir = pathlib.Path(args.logdir)
@@ -384,6 +497,9 @@ def main():
         elif panel_type == 'crafter_score':
             plot_crafter_score(ax, score_records, args.smooth)
         elif panel_type == 'achievements':
+            if args.tiered_ach:
+                plot_achievement_rates_tiered(ax, metric_records, args.smooth)
+                return  # tiered mode manages its own x/ylim (label margin)
             plot_achievement_rates(ax, metric_records, args.smooth,
                                   show_raw=not args.no_raw_ach)
             # Apply y-axis clipping if requested

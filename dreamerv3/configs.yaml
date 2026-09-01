@@ -91,6 +91,9 @@ defaults:
     perturb_state: False     # add condition A' (Aprime): real deter + posterior from a seed image whose interoceptive status bar is overwritten with random vitals. Each of the n_seeds gets an independent uniform draw (redrawn per batch) -> A' cross-seed spread measures state-perturbation sensitivity. Adds condition_compare_ADAprime.png (A vs D vs A')
     perturb_vitals: health,food,drink,energy  # which status vitals A' randomizes (comma-sep subset of health,food,drink,energy); each uniform int 0-9
     perturb_pool: 1024       # # of pre-rendered random status-bar strips A' samples from (baked as a constant; sampled with replacement per seed)
+    perturb_scheme: uniform  # how A' draws the vital VALUES for each bar: 'uniform' = each perturb_vital ~ uniform int [perturb_low, perturb_high]; 'one_low' = structured deficit -- one vital set to perturb_low, all OTHER perturb_vitals set to perturb_high (len(vitals) distinct patterns, sampled with replacement into the pool). Orthogonal to perturb_state_mode (seed vs warmup injection)
+    perturb_low: 1           # A' vital value: uniform-> lower bound (inclusive); one_low-> the deficient vital's value. Floor is 1 not 0: a fully-depleted (0) vital may be off-distribution (the agent rarely observes it during training)
+    perturb_high: 9          # A' vital value: uniform-> upper bound (inclusive); one_low-> the sated (non-deficient) vitals' value
     perturb_state_mode: seed  # A' variant: 'seed' = perturb only the seed frame (posterior injected onto clean real deter; step0==A, cheap); 'warmup' = perturb every observed frame's status bar and re-observe so the recurrent deter accumulates the counterfactual vitals across the WHOLE warmup (step0 != A; the proper causal test). One bar per seed, shared across warmup frames
 
   state_probe:
