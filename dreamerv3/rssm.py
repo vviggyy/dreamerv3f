@@ -31,6 +31,10 @@ class RSSM(nj.Module):
   blocks: int = 8
   free_nats: float = 1.0
   gru_act: str = 'tanh'
+  gate_norm: bool = False  # apply Norm to the GRU gate pre-activations (reset/cand/
+  #   update) before splitting — classic LayerNorm-GRU (Ba et al. 2016). Uses the
+  #   same `norm` impl. Off by default; changes the param structure (adds a
+  #   dygrunorm scale/shift) so it needs a fresh training run
   train_noise_std: float = 0.0  # Gaussian noise std on deter, TRAINING only (0=off)
   train_noise_where: str = 'candidate'  # injection point: 'candidate' (pre-gru_act,
   #   rectified by relu -> deter stays >=0) | 'deter' (post-gate on the blended
@@ -269,6 +273,11 @@ class RSSM(nj.Module):
       x = self.sub(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'dynhid{i}norm', nn.Norm, self.norm)(x))
     x = self.sub('dyngru', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
+    if self.gate_norm:
+      # LayerNorm-GRU: normalize the gate pre-activations (reset/cand/update)
+      # before gating. Norms the flat 3*deter vector (mixes blocks), matching
+      # how dynhid{i}norm already norms the flat deter.
+      x = self.sub('dygrunorm', nn.Norm, self.norm)(x)
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
