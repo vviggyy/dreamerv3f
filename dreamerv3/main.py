@@ -249,6 +249,7 @@ def main(argv=None):
 
 def make_agent(config):
   from .agent import Agent
+  from . import agent as agent_mod
   env = make_env(config, 0)
   notlog = lambda k: not k.startswith('log/')
   obs_space = {k: v for k, v in env.obs_space.items() if notlog(k)}
@@ -256,6 +257,25 @@ def make_agent(config):
   env.close()
   if config.random_agent:
     return embodied.RandomAgent(obs_space, act_space)
+
+  # Train-time A' (perturbed-vitals) replay scheme: render the crafter status-bar
+  # pool Python-side and hand it to the agent BEFORE construction (report()/loss()
+  # are traced eagerly, so a pool set afterward is invisible -- mirrors the
+  # dream_seed_ablation driver). Only when training with train_scheme_mix A' > 0.
+  agent_mod._APRIME_POOL = None
+  aprime_w = dict(agent_mod._parse_scheme_mix(
+      config.agent.train_scheme_mix)).get("A'", 0.0)
+  if config.script in ('train', 'train_eval') and aprime_w > 0:
+    from .dream_seed_ablation import _render_aprime_pool
+    tmpenv = make_env(config, 0, fixed_seed=True)
+    pool, _, pvitals = _render_aprime_pool(
+        tmpenv, config.agent.train_scheme_perturb_vitals,
+        int(config.agent.train_scheme_perturb_pool), config.seed)
+    tmpenv.close()
+    agent_mod._APRIME_POOL = pool
+    print(f"[train_scheme_mix] A' bar pool: {pool.shape} over vitals {pvitals} "
+          f"(A' weight={aprime_w})")
+
   cpdir = elements.Path(config.logdir)
   cpdir = cpdir.parent if config.replicas > 1 else cpdir
   return Agent(obs_space, act_space, elements.Config(

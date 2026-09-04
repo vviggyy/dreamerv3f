@@ -28,6 +28,23 @@ isimage = lambda s: s.dtype == np.uint8 and len(s.shape) == 3
 # is invisible, so the A' branch would compile out). See docs §11+§13.
 _APRIME_POOL = None
 
+# Train-time imagination-seed schemes, in canonical order. train_scheme_mix is a
+# comma triple of weights for these (see configs.yaml).
+_TRAIN_SCHEMES = ('A', 'D', "A'")
+
+
+def _parse_scheme_mix(spec):
+  """'1,0,0' -> [('A', 1.0)]. Returns the non-zero-weight (name, weight) pairs in
+  canonical order A, D, A'. Parsed at trace time; the default '1,0,0' yields a
+  single scheme (pure A), which the caller uses to bypass the mixture switch."""
+  parts = [p.strip() for p in str(spec).split(',') if p.strip() != '']
+  assert len(parts) == len(_TRAIN_SCHEMES), (
+      f"train_scheme_mix needs {len(_TRAIN_SCHEMES)} comma weights "
+      f"for {_TRAIN_SCHEMES}: {spec!r}")
+  weights = [float(p) for p in parts]
+  assert all(w >= 0 for w in weights) and sum(weights) > 0, (spec, weights)
+  return [(n, w) for n, w in zip(_TRAIN_SCHEMES, weights) if w > 0]
+
 
 class Agent(embodied.jax.Agent):
 
@@ -43,10 +60,12 @@ class Agent(embodied.jax.Agent):
     self.act_space = act_space
     self.config = config
 
-    # A' (perturbed-state) bar pool: baked here (before report() is traced) from
-    # the module-level handoff the driver sets prior to make_agent(). Kept a plain
-    # constant so report() can composite/re-encode without new params or inputs.
-    if config.seed_ablation_perturb_state and _APRIME_POOL is not None:
+    # A' (perturbed-state) bar pool: baked here (before report()/loss() are traced)
+    # from the module-level handoff the driver (or main.py's train path) sets prior
+    # to make_agent(). Kept a plain constant so report()/loss() can composite/
+    # re-encode without new params or inputs. Baked whenever a pool was handed off
+    # (report seed-ablation A', or train_scheme_mix with A' weight > 0).
+    if _APRIME_POOL is not None:
       # Keep it a HOST (numpy) constant, not jnp.asarray (which would make it a
       # device-resident jax.Array). report() is lowered eagerly at construction
       # and captures this as a compile-time constant; embedding a device array as
@@ -299,11 +318,25 @@ class Agent(embodied.jax.Agent):
     # Imagination
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
-    starts = self.dyn.starts(dyn_entries, dyn_carry, K)
     policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    # Replay-scheme mixture: per training step, seed the actor-critic imagination
+    # with one of A/D/A' sampled from train_scheme_mix (WM training above is
+    # untouched -- real data every step). A = real posterior (standard Dreamer),
+    # D = noise deter + prior, A' = real deter + perturbed-vitals posterior. The
+    # mix is parsed at trace time; default '1,0,0' (pure A) -> single scheme ->
+    # the exact original path (no switch, no extra RNG), so eval/report/default
+    # are byte-for-byte unchanged.
+    schemes = _parse_scheme_mix(self.config.train_scheme_mix)
+    if training and len(schemes) > 1:
+      seed = self._imag_seed_mixture(
+          schemes, repfeat, obs, K, metrics)
+      starts = {'deter': seed['deter'], 'stoch': seed['stoch']}
+      first = jax.tree.map(lambda x: x[:, None], seed)
+    else:
+      starts = self.dyn.starts(dyn_entries, dyn_carry, K)
+      first = jax.tree.map(
+          lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
-    first = jax.tree.map(
-        lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
     imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
     lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
     lastact = jax.tree.map(lambda x: x[:, None], lastact)
@@ -371,6 +404,89 @@ class Agent(embodied.jax.Agent):
     entries = (enc_entries, dyn_entries, dec_entries)
     outs = {'tokens': tokens, 'repfeat': repfeat, 'losses': losses}
     return loss, (carry, entries, outs, metrics)
+
+  def _noise_deter(self, all_deter, shape):
+    # Noise-deter null for the D scheme, matching the seed-ablation report block.
+    # all_deter is the full-batch real posterior deter (B, T, Dt); `shape` is the
+    # (N, Dt) output. Mode from seed_ablation_noise_mode (shuffle default: per-dim
+    # bootstrap of the real deter -> non-negative, relu-safe).
+    allrd = f32(all_deter)
+    mu, sd = allrd.mean((0, 1)), allrd.std((0, 1))
+    mode = self.config.seed_ablation_noise_mode
+    if mode == 'matched':
+      nd = mu + sd * jax.random.normal(nj.seed(), shape, f32)
+    elif mode == 'matched_relu':
+      nd = jnp.maximum(mu + sd * jax.random.normal(nj.seed(), shape, f32), 0.0)
+    elif mode == 'truncnorm':
+      lo = (0.0 - mu) / (sd + 1e-8)
+      zt = jax.random.truncated_normal(nj.seed(), lo, 1e9, shape, f32)
+      nd = mu + sd * zt
+    elif mode == 'shuffle':
+      pool = allrd.reshape((-1, allrd.shape[-1]))
+      boot_idx = jax.random.randint(nj.seed(), shape, 0, pool.shape[0])
+      nd = jnp.take_along_axis(pool, boot_idx, axis=0)
+    else:
+      raise ValueError(f'unknown seed_ablation_noise_mode: {mode}')
+    return nn.cast(nd)
+
+  def _imag_seed_mixture(self, schemes, repfeat, obs, K, metrics):
+    # Build a per-start imagination seed {deter, stoch, logit} of shape (B*K, ...)
+    # by sampling ONE scheme this train step from `schemes` (list of (name,weight)).
+    # Only the sampled branch executes at runtime (nj.cond), so A''s image
+    # re-encode cost is paid only on A' steps. All branches return the same pytree
+    # structure/shape/dtype so the selection is well-formed.
+    B = repfeat['deter'].shape[0]
+    N = B * K
+    lastK = lambda x: x[:, -K:].reshape((N, *x.shape[2:]))
+    rp = jax.tree.map(lastK, repfeat)          # {deter,stoch,logit} (N, ...)
+
+    def seed_A():
+      return dict(deter=rp['deter'], stoch=rp['stoch'], logit=rp['logit'])
+
+    def seed_D():
+      nd = self._noise_deter(repfeat['deter'], (N, rp['deter'].shape[-1]))
+      logit = self.dyn._prior(nd)
+      stoch = nn.cast(self.dyn._dist(logit).sample(seed=nj.seed()))
+      return dict(deter=nd, stoch=stoch, logit=logit)
+
+    def seed_Aprime():
+      # Real deter + posterior from a seed image whose status bar is overwritten
+      # with random vitals (seed-mode A'). Step 0 decodes identically to A; any
+      # divergence beyond A is the interoceptive channel steering the dream.
+      bar_pool = jnp.asarray(self.aprime_pool)   # (P, inv, Wpx, 3) uint8
+      P, inv = bar_pool.shape[0], bar_pool.shape[1]
+      obs1 = {k: lastK(obs[k]) for k in obs}     # single-frame obs per start
+      sel = jax.random.randint(nj.seed(), (N,), 0, P)
+      bars = bar_pool[sel].astype(obs1['image'].dtype)
+      obs1['image'] = obs1['image'].at[:, -inv:, :, :].set(bars)
+      _, _, ptok = self.enc(
+          self.enc.initial(N), obs1, jnp.ones((N,), bool),
+          training=False, single=True)
+      logit = self.dyn.post_from_deter(rp['deter'], ptok)
+      stoch = nn.cast(self.dyn._dist(logit).sample(seed=nj.seed()))
+      return dict(deter=rp['deter'], stoch=stoch, logit=logit)
+
+    builders = {'A': seed_A, 'D': seed_D, "A'": seed_Aprime}
+    names = [n for n, _ in schemes]
+    if "A'" in names:
+      assert getattr(self, 'aprime_pool', None) is not None and 'image' in obs, (
+          "train_scheme_mix has A' weight > 0 but no bar pool was baked / no "
+          "'image' obs. A' needs the egocentric env with an inventory bar and "
+          "main.py to render the pool (agent._APRIME_POOL) before make_agent.")
+    weights = jnp.asarray([w for _, w in schemes], f32)
+    idx = jax.random.categorical(nj.seed(), jnp.log(weights / weights.sum()))
+    metrics['train_scheme/idx'] = idx
+    for i, n in enumerate(names):
+      metrics[f'train_scheme/frac_{n}'] = (idx == i).astype(f32)
+
+    # Nest binary nj.cond over the active schemes (<=3): cond(idx==0, s0,
+    # cond(idx==1, s1, s2)). nj.cond threads state + gives each branch its own
+    # rng, so branches may consume different amounts of randomness.
+    def build(i):
+      if i == len(names) - 1:
+        return builders[names[i]]()
+      return nj.cond(idx == i, builders[names[i]], lambda: build(i + 1))
+    return build(0)
 
   def report(self, carry, data):
     if not self.config.report:
