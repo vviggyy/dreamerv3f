@@ -430,11 +430,15 @@ class Agent(embodied.jax.Agent):
     return nn.cast(nd)
 
   def _imag_seed_mixture(self, schemes, repfeat, obs, K, metrics):
-    # Build a per-start imagination seed {deter, stoch, logit} of shape (B*K, ...)
-    # by sampling ONE scheme this train step from `schemes` (list of (name,weight)).
-    # Only the sampled branch executes at runtime (nj.cond), so A''s image
-    # re-encode cost is paid only on A' steps. All branches return the same pytree
-    # structure/shape/dtype so the selection is well-formed.
+    # Build the imagination seed {deter, stoch, logit} of shape (B*K, ...) from the
+    # scheme mixture `schemes` (list of (name, weight)). Granularity toggle:
+    #   within_batch : each of the B*K start-states independently assigned a scheme
+    #                  (exact per-step mixture). Computes every active scheme's seed
+    #                  and selects per start, so A''s re-encode always runs (A'>0).
+    #   whole_batch  : one scheme sampled for the whole batch this step; only the
+    #                  chosen branch runs (nj.cond), so A' cost is paid only on A'
+    #                  steps.
+    # All schemes return the same pytree structure/shape/dtype so selection is valid.
     B = repfeat['deter'].shape[0]
     N = B * K
     lastK = lambda x: x[:, -K:].reshape((N, *x.shape[2:]))
@@ -474,19 +478,38 @@ class Agent(embodied.jax.Agent):
           "'image' obs. A' needs the egocentric env with an inventory bar and "
           "main.py to render the pool (agent._APRIME_POOL) before make_agent.")
     weights = jnp.asarray([w for _, w in schemes], f32)
-    idx = jax.random.categorical(nj.seed(), jnp.log(weights / weights.sum()))
-    metrics['train_scheme/idx'] = idx
-    for i, n in enumerate(names):
-      metrics[f'train_scheme/frac_{n}'] = (idx == i).astype(f32)
+    logw = jnp.log(weights / weights.sum())
+    gran = self.config.train_scheme_granularity
 
-    # Nest binary nj.cond over the active schemes (<=3): cond(idx==0, s0,
-    # cond(idx==1, s1, s2)). nj.cond threads state + gives each branch its own
-    # rng, so branches may consume different amounts of randomness.
-    def build(i):
-      if i == len(names) - 1:
-        return builders[names[i]]()
-      return nj.cond(idx == i, builders[names[i]], lambda: build(i + 1))
-    return build(0)
+    if gran == 'within_batch':
+      # Independent per-start assignment -> exact per-step mixture. Compute every
+      # active scheme's seed for all N=B*K starts, then gather per start.
+      N = B * K
+      seeds = [builders[n]() for n in names]           # each {k: (N, ...)}
+      assign = jax.random.categorical(nj.seed(), logw, shape=(N,))  # (N,) in [0,S)
+      for i, n in enumerate(names):
+        metrics[f'train_scheme/frac_{n}'] = (assign == i).astype(f32).mean()
+      def pick(key):
+        stacked = jnp.stack([s[key] for s in seeds], 0)  # (S, N, ...)
+        return stacked[assign, jnp.arange(N)]            # (N, ...) per-start choice
+      return {k: pick(k) for k in ('deter', 'stoch', 'logit')}
+
+    if gran == 'whole_batch':
+      # One scheme for the whole batch this step. Nest binary nj.cond over the
+      # active schemes (<=3): cond(idx==0, s0, cond(idx==1, s1, s2)). nj.cond
+      # threads state + gives each branch its own rng, so branches may consume
+      # different amounts of randomness and only the chosen branch runs.
+      idx = jax.random.categorical(nj.seed(), logw)
+      metrics['train_scheme/idx'] = idx
+      for i, n in enumerate(names):
+        metrics[f'train_scheme/frac_{n}'] = (idx == i).astype(f32)
+      def build(i):
+        if i == len(names) - 1:
+          return builders[names[i]]()
+        return nj.cond(idx == i, builders[names[i]], lambda: build(i + 1))
+      return build(0)
+
+    raise ValueError(f'unknown train_scheme_granularity: {gran}')
 
   def report(self, carry, data):
     if not self.config.report:

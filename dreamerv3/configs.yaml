@@ -213,7 +213,8 @@ defaults:
     mask_recon_loss: True
     rollout_k: 0
     rollout_dyn_scale: 1.0
-    train_scheme_mix: '1,0,0'  # per-train-step imagination-seed mixture, comma weights for A,D,A' (auto-normalized). A=real posterior (standard Dreamer), D=noise deter+prior, A'=real deter+perturbed-vitals posterior. Default '1,0,0'=pure A=no-op. Uses seed_ablation_noise_mode for D's noise deter. A'>0 requires the egocentric env with an inventory bar (main.py bakes the bar pool)
+    train_scheme_mix: '1,0,0'  # imagination-seed mixture, comma weights for A,D,A' (auto-normalized). A=real posterior (standard Dreamer), D=noise deter+prior, A'=real deter+perturbed-vitals posterior. Default '1,0,0'=pure A=no-op. Uses seed_ablation_noise_mode for D's noise deter. A'>0 requires the egocentric env with an inventory bar (main.py bakes the bar pool)
+    train_scheme_granularity: within_batch  # how a scheme is chosen: within_batch = each of the B*K imagined start-states independently assigned (exact per-step mixture; computes all active schemes' seeds every step, so A''s re-encode always runs when A'>0); whole_batch = one scheme sampled per training step for the entire batch (cheaper -- A' re-encode only on A' steps via nj.cond)
     train_scheme_perturb_vitals: health,food,drink,energy  # vitals randomized for train-time A' (subset of health,food,drink,energy)
     train_scheme_perturb_pool: 1024  # # of pre-rendered status bars sampled with replacement for train-time A'
 
