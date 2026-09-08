@@ -160,17 +160,15 @@ def draw_ternary_heatmap(ax, runs, metric):
     cbar = plt.colorbar(tcf, ax=ax, shrink=0.75, pad=0.02)
     cbar.set_label(f'Final {METRIC_LABEL[metric]}', fontsize=9)
 
-    # Triangle outline + light internal grid at 33/66 iso-lines.
+    # Overlay the triangulation mesh: the fill is LINEAR INTERPOLATION between the
+    # 10 sampled mixtures, so show the triangle edges to make that explicit
+    # (interior color is inferred, not measured).
+    ax.triplot(tri, color='k', lw=0.6, alpha=0.35, zorder=4)
+
+    # Triangle outline (the internal structure is shown by the triangulation
+    # mesh below, so no separate iso-line grid is drawn).
     tri_xy = np.array([V_A, V_D, V_AP, V_A])
     ax.plot(tri_xy[:, 0], tri_xy[:, 1], color='k', lw=1.2)
-    for f in (1 / 3, 2 / 3):
-        # iso-a, iso-d, iso-ap lines
-        ax.plot(*zip(bary_to_xy(f, 1 - f, 0), bary_to_xy(f, 0, 1 - f)),
-                color='w', lw=0.4, alpha=0.5)
-        ax.plot(*zip(bary_to_xy(1 - f, f, 0), bary_to_xy(0, f, 1 - f)),
-                color='w', lw=0.4, alpha=0.5)
-        ax.plot(*zip(bary_to_xy(1 - f, 0, f), bary_to_xy(0, 1 - f, f)),
-                color='w', lw=0.4, alpha=0.5)
 
     # Sampled mixtures. Offset each value label TOWARD the triangle centroid so
     # corner points don't collide with the (outside) corner descriptors.
