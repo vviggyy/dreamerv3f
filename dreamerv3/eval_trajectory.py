@@ -84,6 +84,12 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       facing = np.array([tran['log/player_facing_x'], tran['log/player_facing_y']], dtype=np.int32)
       episode_data['player_facing'].append(facing)
 
+    # Record interoceptive vitals (health/food/drink/energy) per step, if logged
+    for vital in ('health', 'food', 'drink', 'energy'):
+      key = f'log/{vital}'
+      if key in tran:
+        episode_data[f'vital_{vital}'].append(int(tran[key]))
+
     # Track achievements and print when new ones are unlocked
     current_achievements = {}
     for key in tran:

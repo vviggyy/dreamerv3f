@@ -35,6 +35,9 @@ OBJECT_CODES = {
 
 class Crafter(embodied.Env):
 
+  # Interoceptive vitals drawn on the status bar (each 0-9); logged per step.
+  _VITALS = ('health', 'food', 'drink', 'energy')
+
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
                egocentric_view=None, disable_mobs=False, upright_sprites=False,
@@ -131,6 +134,11 @@ class Crafter(embodied.Env):
         'log/player_facing_x': elements.Space(np.int32),
         'log/player_facing_y': elements.Space(np.int32),
     }
+    # Interoceptive vitals (health/food/drink/energy, each 0-9) for trajectory
+    # analysis. log/ prefix = ignored by the agent encoder; read from the same
+    # player.inventory the status bar is drawn from (see state_probe.py).
+    spaces.update({
+        f'log/{v}': elements.Space(np.int32) for v in self._VITALS})
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     spaces.update({
         f'log/achievement_{k}': elements.Space(np.int32)
@@ -309,6 +317,11 @@ class Crafter(embodied.Env):
         f'log/achievement_{k}': np.int32(info['achievements'][k] if info else 0)
         for k in self._achievements}
     obs.update(achievements)
+    # Interoceptive vitals from the live player inventory (same source the
+    # status bar renders from). Present at reset and every step.
+    inv = self._env._player.inventory
+    obs.update({
+        f'log/{v}': np.int32(inv.get(v, 0)) for v in self._VITALS})
     return obs
 
   def _render_egocentric(self, raw_image):

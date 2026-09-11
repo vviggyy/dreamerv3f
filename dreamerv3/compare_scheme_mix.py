@@ -162,8 +162,9 @@ def draw_ternary_heatmap(ax, runs, metric):
 
     # Overlay the triangulation mesh: the fill is LINEAR INTERPOLATION between the
     # 10 sampled mixtures, so show the triangle edges to make that explicit
-    # (interior color is inferred, not measured).
-    ax.triplot(tri, color='k', lw=0.6, alpha=0.35, zorder=4)
+    # (interior color is inferred, not measured). White reads over both the dark
+    # and bright ends of viridis.
+    ax.triplot(tri, color='white', lw=1.1, alpha=0.85, zorder=4)
 
     # Triangle outline (the internal structure is shown by the triangulation
     # mesh below, so no separate iso-line grid is drawn).
