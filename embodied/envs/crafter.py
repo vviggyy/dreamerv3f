@@ -33,6 +33,47 @@ OBJECT_CODES = {
 }
 
 
+def _install_fixed_layout_worldgen():
+  """Monkeypatch crafter.worldgen.generate_world so that terrain is driven by a
+  fixed per-world ``_layout_seed`` (identical spatial layout across episodes)
+  while resources (tree/coal/iron/diamond) and mobs (cow/zombie/skeleton) are
+  resampled from a per-episode ``_content_seed``.
+
+  In stock crafter both come from the single ``world.random`` stream seeded per
+  episode: the OpenSimplex noise field (which fixes the grass/water/sand/
+  mountain/path/lava *shell*) is seeded from ``world.random``, and the
+  ``world.random.uniform()`` draws then decide which eligible tiles within that
+  shell become tree/coal/iron/diamond (vs plain grass/stone) and where mobs
+  spawn. Splitting the two seeds lets us hold the shell fixed and only move the
+  resources+mobs. Idempotent and a no-op unless a World carries both attributes,
+  so it is harmless for envs that don't use fixed_layout."""
+  import opensimplex
+  import crafter.worldgen as wg
+  if getattr(wg, '_fixed_layout_patched', False):
+    return
+  _orig_generate = wg.generate_world
+
+  def generate_world(world, player):
+    layout_seed = getattr(world, '_layout_seed', None)
+    content_seed = getattr(world, '_content_seed', None)
+    if layout_seed is None or content_seed is None:
+      return _orig_generate(world, player)
+    # Terrain shell: fixed simplex seed -> identical layout every episode.
+    simplex = opensimplex.OpenSimplex(seed=int(layout_seed))
+    # Resources + mobs: fresh per-episode uniform stream -> relocated content.
+    world.random = np.random.RandomState(int(content_seed))
+    tunnels = np.zeros(world.area, bool)
+    for x in range(world.area[0]):
+      for y in range(world.area[1]):
+        wg._set_material(world, (x, y), player, tunnels, simplex)
+    for x in range(world.area[0]):
+      for y in range(world.area[1]):
+        wg._set_object(world, (x, y), player, tunnels)
+
+  wg.generate_world = generate_world
+  wg._fixed_layout_patched = True
+
+
 class Crafter(embodied.Env):
 
   # Interoceptive vitals drawn on the status bar (each 0-9); logged per step.
@@ -41,7 +82,7 @@ class Crafter(embodied.Env):
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
                egocentric_view=None, disable_mobs=False, upright_sprites=False,
-               custom_world=''):
+               custom_world='', fixed_layout=False):
     assert task in ('reward', 'noreward')
     # Parse custom world file before creating env (may override area)
     self._custom_world = custom_world
@@ -75,9 +116,18 @@ class Crafter(embodied.Env):
     self._achievements = crafter.constants.achievements.copy()
     self._done = True
     self._fixed_seed = fixed_seed
+    self._fixed_layout = fixed_layout
     self._random_spawn = random_spawn
     self._seed = seed
     self._spawn_rng = np.random.RandomState(seed)
+    # fixed_layout: identical terrain every episode, but resources+mobs move.
+    # Terrain seed is derived from the base seed only (episode-independent). Use
+    # an int-only hash tuple (episode marker -1, never a real episode) so it is
+    # deterministic across processes — matching the repo's seed convention;
+    # hash() on tuples containing str is randomized by PYTHONHASHSEED.
+    if fixed_layout:
+      _install_fixed_layout_worldgen()
+      self._layout_seed = hash((seed, -1)) % (2 ** 31 - 1)
     # egocentric view setup
     self._pixel_size = size[0] if hasattr(size, '__len__') else size
     self._egocentric_view = egocentric_view if egocentric_view else None
@@ -158,7 +208,15 @@ class Crafter(embodied.Env):
       self._length = 0
       self._reward = 0
       self._done = False
-      if self._fixed_seed:
+      if self._fixed_layout:
+        # Same terrain shell every episode; new resource+mob placement. Seeds
+        # are read by the patched worldgen inside self._env.reset().
+        world = self._env._world
+        world._layout_seed = self._layout_seed
+        # Per-episode content seed (int-only tuple -> process-stable, so episode
+        # N's resource+mob placement is reproducible in later analysis runs).
+        world._content_seed = hash((self._seed, self._episode)) % (2 ** 31 - 1)
+      elif self._fixed_seed:
         self._env._episode = 0
       image = self._env.reset()
       if self._custom_grid is not None:
