@@ -373,6 +373,38 @@ def _render_crafter_world(metadata=None, tile_size=8):
     return world_img, env_seed, tile_size
 
 
+# Collectable / interactable materials to mark on maps (vs terrain: grass/sand/path).
+_RESOURCE_MATS = ('tree', 'stone', 'coal', 'iron', 'diamond', 'water', 'lava')
+
+
+def _extract_resource_tiles(metadata=None):
+    """Return {material_name: (xs, ys)} tile coords for resource materials on the
+    Crafter world map, in the same (x, y) frame as player_pos / the occupancy grid
+    (mat_map[x, y] -> plotted at data coord (x, y)). {} on failure."""
+    try:
+        import crafter
+    except ImportError:
+        return {}
+    env_seed = metadata.get('env_seed') if metadata else None
+    if env_seed is None:
+        env_seed = 42
+    area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
+    env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
+    env.reset()
+    world = env._world
+    mat_map = world._mat_map
+    inv = {v: k for k, v in world._mat_names.items() if v}
+    out = {}
+    for name in _RESOURCE_MATS:
+        mid = inv.get(name)
+        if mid is None:
+            continue
+        xs, ys = np.where(mat_map == mid)
+        if len(xs):
+            out[name] = (xs, ys)
+    return out
+
+
 def plot_world_only(metadata=None, tile_size=8, save_path=None):
     """Render and save just the Crafter world map image (no trajectories)."""
     world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)

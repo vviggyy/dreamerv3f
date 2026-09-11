@@ -544,8 +544,58 @@ def _get_world_img(metadata, width, height):
     return img_lower, extent
 
 
+# Per-resource (matplotlib marker, color) scattered on top of the occupancy/error
+# maps. Distinct shape + color per resource, with a white edge for legibility
+# over both the translucent world and the 'hot' colormap.
+_RESOURCE_MARKERS = {
+    'tree':    ('^', '#2e7d32'),  # green triangle
+    'stone':   ('h', '#9e9e9e'),  # grey hexagon
+    'coal':    ('o', '#111111'),  # black circle
+    'iron':    ('D', '#b8860b'),  # goldenrod diamond
+    'diamond': ('*', '#00bcd4'),  # cyan star
+    'water':   ('s', '#1565c0'),  # blue square
+    'lava':    ('X', '#d32f2f'),  # red X
+}
+
+
+def _get_resource_tiles(metadata):
+    """Load resource-tile coords for the world (mirrors _get_world_img's import
+    fallback). Returns {name: (xs, ys)} or {} if unavailable."""
+    if metadata is None:
+        return {}
+    try:
+        from plot_trajectories import _extract_resource_tiles
+    except Exception:
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from plot_trajectories import _extract_resource_tiles
+        except Exception:
+            return {}
+    try:
+        return _extract_resource_tiles(metadata)
+    except Exception:
+        return {}
+
+
+def _overlay_resources(ax, resource_tiles, markersize=22, legend=True):
+    """Scatter a distinct marker at each resource tile, on top of the heatmap.
+    A white edge keeps markers legible over both the world and 'hot' colormap."""
+    if not resource_tiles:
+        return
+    for name, (xs, ys) in resource_tiles.items():
+        marker, color = _RESOURCE_MARKERS.get(name, ('P', 'magenta'))
+        ax.scatter(xs, ys, marker=marker, c=color, s=markersize,
+                   edgecolors='white', linewidths=0.4, zorder=5,
+                   label=name, clip_on=True)
+    if legend:
+        ax.legend(loc='upper right', fontsize=6, framealpha=0.7,
+                  handletextpad=0.1, borderpad=0.3, labelspacing=0.2,
+                  markerscale=1.2)
+
+
 def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
-                        repr_name, method, row_label):
+                        repr_name, method, row_label, resource_tiles=None):
     """Draw one row of the occupancy-vs-error figure (3 panels)."""
     ax_heat, ax_err_map, ax_scatter = axes
     tile_visits = stats['tile_visits']
@@ -555,13 +605,14 @@ def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
 
     # Panel A: occupancy
     if world_img is not None:
-        ax_heat.imshow(world_img, alpha=0.25, extent=world_extent,
+        ax_heat.imshow(world_img, alpha=0.4, extent=world_extent,
                        origin='lower', aspect='equal')
     occ_plot = tile_visits.copy()
     occ_plot[occ_plot == 0] = np.nan
     im = ax_heat.imshow(occ_plot.T, origin='lower', cmap='hot',
                         aspect='equal', interpolation='nearest',
-                        extent=world_extent, alpha=0.8)
+                        extent=world_extent, alpha=0.7)
+    _overlay_resources(ax_heat, resource_tiles)
     cbar = plt.colorbar(im, ax=ax_heat, shrink=0.8)
     cbar.set_label('Visit count')
     ax_heat.set_xlabel('X')
@@ -572,11 +623,12 @@ def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
 
     # Panel B: mean error per tile
     if world_img is not None:
-        ax_err_map.imshow(world_img, alpha=0.25, extent=world_extent,
+        ax_err_map.imshow(world_img, alpha=0.4, extent=world_extent,
                           origin='lower', aspect='equal')
     im2 = ax_err_map.imshow(tile_mean_err.T, origin='lower', cmap='RdYlGn_r',
                             aspect='equal', interpolation='nearest',
-                            extent=world_extent, alpha=0.8)
+                            extent=world_extent, alpha=0.7)
+    _overlay_resources(ax_err_map, resource_tiles)
     cbar2 = plt.colorbar(im2, ax=ax_err_map, shrink=0.8)
     cbar2.set_label('Mean Manhattan error (tiles)')
     ax_err_map.set_xlabel('X')
@@ -616,7 +668,8 @@ def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
 
 
 def _plot_diff_row(axes, test_stats, train_stats, width, height,
-                   world_img, world_extent, repr_name, method):
+                   world_img, world_extent, repr_name, method,
+                   resource_tiles=None):
     """Draw the train-minus-test difference row (3 panels)."""
     ax_occ, ax_err, ax_scatter = axes
 
@@ -633,13 +686,14 @@ def _plot_diff_row(axes, test_stats, train_stats, width, height,
     occ_diff_plot[either_visited] = occ_diff[either_visited]
 
     if world_img is not None:
-        ax_occ.imshow(world_img, alpha=0.25, extent=world_extent,
+        ax_occ.imshow(world_img, alpha=0.4, extent=world_extent,
                       origin='lower', aspect='equal')
     vmax = max(abs(np.nanmin(occ_diff_plot)), abs(np.nanmax(occ_diff_plot)), 0.01)
     im = ax_occ.imshow(occ_diff_plot.T, origin='lower', cmap='RdBu_r',
                        aspect='equal', interpolation='nearest',
-                       extent=world_extent, alpha=0.8,
+                       extent=world_extent, alpha=0.7,
                        vmin=-vmax, vmax=vmax)
+    _overlay_resources(ax_occ, resource_tiles)
     cbar = plt.colorbar(im, ax=ax_occ, shrink=0.8)
     cbar.set_label('Occupancy % (train - test)')
     ax_occ.set_xlabel('X')
@@ -656,13 +710,14 @@ def _plot_diff_row(axes, test_stats, train_stats, width, height,
     err_diff[both_visited] = train_err[both_visited] - test_err[both_visited]
 
     if world_img is not None:
-        ax_err.imshow(world_img, alpha=0.25, extent=world_extent,
+        ax_err.imshow(world_img, alpha=0.4, extent=world_extent,
                       origin='lower', aspect='equal')
     vmax_e = max(abs(np.nanmin(err_diff)), abs(np.nanmax(err_diff)), 0.01)
     im2 = ax_err.imshow(err_diff.T, origin='lower', cmap='RdBu_r',
                         aspect='equal', interpolation='nearest',
-                        extent=world_extent, alpha=0.8,
+                        extent=world_extent, alpha=0.7,
                         vmin=-vmax_e, vmax=vmax_e)
+    _overlay_resources(ax_err, resource_tiles)
     cbar2 = plt.colorbar(im2, ax=ax_err, shrink=0.8)
     cbar2.set_label('Mean error diff (train - test)')
     ax_err.set_xlabel('X')
@@ -733,7 +788,8 @@ def _plot_diff_row(axes, test_stats, train_stats, width, height,
 def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
                             repr_name='deter', method='classification',
                             metadata=None,
-                            train_pos=None, train_pred=None):
+                            train_pos=None, train_pred=None,
+                            show_resources=True):
     """Occupancy-vs-error figure.
 
     Row 1: held-out / test data.
@@ -750,17 +806,21 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
         axes = axes[np.newaxis, :]  # ensure 2D
 
     world_img, world_extent = _get_world_img(metadata, width, height)
+    resource_tiles = _get_resource_tiles(metadata) if show_resources else {}
 
     test_stats = _compute_tile_stats(pos, pred, width, height)
     _plot_occupancy_row(axes[0], test_stats, width, height,
-                        world_img, world_extent, repr_name, method, 'test')
+                        world_img, world_extent, repr_name, method, 'test',
+                        resource_tiles=resource_tiles)
 
     if has_train:
         train_stats = _compute_tile_stats(train_pos, train_pred, width, height)
         _plot_occupancy_row(axes[1], train_stats, width, height,
-                            world_img, world_extent, repr_name, method, 'train')
+                            world_img, world_extent, repr_name, method, 'train',
+                            resource_tiles=resource_tiles)
         _plot_diff_row(axes[2], test_stats, train_stats, width, height,
-                       world_img, world_extent, repr_name, method)
+                       world_img, world_extent, repr_name, method,
+                       resource_tiles=resource_tiles)
 
     fig.tight_layout()
     fname = f'occupancy_vs_error_{repr_name}.svg'
@@ -770,7 +830,8 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
 
 
 def plot_fullset_occupancy(pos_all, width, height, save_dir,
-                           repr_name='deter', metadata=None):
+                           repr_name='deter', metadata=None,
+                           show_resources=True):
     """Full-set (train+test combined) occupancy heatmap — the exact data the
     tuning curves are computed on, distinct from the per-split train/test rows
     in occupancy_vs_error. Single panel, same style. Saved as a NEW svg
@@ -779,12 +840,13 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
     world_img, world_extent = _get_world_img(metadata, width, height)
     fig, ax = plt.subplots(figsize=(6, 5.5))
     if world_img is not None:
-        ax.imshow(world_img, alpha=0.25, extent=world_extent,
+        ax.imshow(world_img, alpha=0.4, extent=world_extent,
                   origin='lower', aspect='equal')
     occ = stats['tile_visits'].copy()
     occ[occ == 0] = np.nan
     im = ax.imshow(occ.T, origin='lower', cmap='hot', aspect='equal',
-                   interpolation='nearest', extent=world_extent, alpha=0.8)
+                   interpolation='nearest', extent=world_extent, alpha=0.7)
+    _overlay_resources(ax, _get_resource_tiles(metadata) if show_resources else {})
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label('Visit count')
     ax.set_xlabel('X')
@@ -1744,6 +1806,11 @@ if __name__ == '__main__':
                         help='Which representation to decode (default: all three)')
     parser.add_argument('--save_model', action='store_true', default=False,
                         help='Save trained decoder models (for dream_decode.py)')
+    parser.add_argument('--show_resources', action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help='Overlay resource-tile markers (tree/stone/coal/'
+                             'iron/diamond/water/lava) on occupancy maps '
+                             '(default on; use --no-show_resources to disable)')
     parser.add_argument('--n_jobs', type=int, default=1,
                         help='Parallel workers for CV folds and per-neuron '
                              'analysis. Use -1 for all CPUs. (default: 1)')
@@ -2148,12 +2215,14 @@ if __name__ == '__main__':
                     pos_test, layer_pred_xy[occ_layer], width, height,
                     save_dir, repr_name=occ_layer.replace('/', '_'),
                     method='classification', metadata=metadata,
-                    train_pos=train_pos_ln, train_pred=train_pred_ln)
+                    train_pos=train_pos_ln, train_pred=train_pred_ln,
+                    show_resources=args.show_resources)
                 pos_full = (np.concatenate([train_pos_ln, pos_test], axis=0)
                             if train_pos_ln is not None else pos_test)
                 plot_fullset_occupancy(
                     pos_full, width, height, save_dir,
-                    repr_name=occ_layer.replace('/', '_'), metadata=metadata)
+                    repr_name=occ_layer.replace('/', '_'), metadata=metadata,
+                    show_resources=args.show_resources)
         print("\n>>> Plots saved. Decoding evaluation complete. <<<")
         if loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
@@ -2328,11 +2397,13 @@ if __name__ == '__main__':
                                method='classification',
                                metadata=metadata,
                                train_pos=train_pos_cls,
-                               train_pred=train_pred_xy)
+                               train_pred=train_pred_xy,
+                               show_resources=args.show_resources)
         pos_full = (np.concatenate([train_pos_cls, test_pos], axis=0)
                     if train_pos_cls is not None else test_pos)
         plot_fullset_occupancy(pos_full, width, height, save_dir,
-                               repr_name=name, metadata=metadata)
+                               repr_name=name, metadata=metadata,
+                               show_resources=args.show_resources)
         # Probability heatmap for each episode (deter only, LOGO only)
         if name == 'deter' and args.holdout_frac <= 0:
             for ep_idx in range(len(np.unique(groups))):
