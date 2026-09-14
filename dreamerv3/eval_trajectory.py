@@ -161,10 +161,17 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   # Create environment with fixed_seed so all episodes use the same world
   # Pass random_spawn through from config if set
   env_overrides = dict(fixed_seed=True)
+  island_meta = None
   if hasattr(args, 'env') and hasattr(args.env, 'crafter'):
     rs = getattr(args.env.crafter, 'random_spawn', False)
     if rs:
       env_overrides['random_spawn'] = True
+    # Record island-border params (if used) so plot backgrounds render the blob.
+    if getattr(args.env.crafter, 'island_border', False):
+      island_meta = {
+          'fill': float(getattr(args.env.crafter, 'island_fill', 0.72)),
+          'roughness': float(getattr(args.env.crafter, 'island_roughness', 0.16)),
+      }
   env = make_env(0, **env_overrides)
   try:
     env_seed = env._seed
@@ -222,6 +229,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
         'fixed_seed': True,
         'task': 'crafter',
         'area': area,
+        'island': island_meta,   # None unless island_border was used
     }
     with open(str(all_file), 'wb') as f:
       pickle.dump(save_data, f)

@@ -339,6 +339,18 @@ def _render_crafter_world(metadata=None, tile_size=8):
 
     area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
     env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
+    # island_border: if the run used the island generator, apply the same
+    # worldgen patch here so the background is a blob, not a box. Params flow via
+    # metadata['island'] (recorded by eval_trajectory). Best-effort — a plain box
+    # is shown if the patch/params are unavailable.
+    island = metadata.get('island') if metadata else None
+    if island:
+        try:
+            from embodied.envs.crafter import _install_worldgen_patch, ISLAND_DEFAULTS
+            _install_worldgen_patch()
+            env._world._island = dict(ISLAND_DEFAULTS, **island)
+        except Exception as e:
+            print(f"Could not apply island worldgen to background: {e}")
     env.reset()
 
     world = env._world

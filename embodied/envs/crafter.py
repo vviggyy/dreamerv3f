@@ -33,45 +33,138 @@ OBJECT_CODES = {
 }
 
 
-def _install_fixed_layout_worldgen():
-  """Monkeypatch crafter.worldgen.generate_world so that terrain is driven by a
-  fixed per-world ``_layout_seed`` (identical spatial layout across episodes)
-  while resources (tree/coal/iron/diamond) and mobs (cow/zombie/skeleton) are
-  resampled from a per-episode ``_content_seed``.
+# Island-border defaults (see _island_set_material). Only island_fill and
+# island_roughness are user-facing via env.crafter.*; the rest are internal.
+ISLAND_DEFAULTS = dict(
+    fill=0.72,        # fraction of the inscribed radius that stays land
+    roughness=0.16,   # simplex amplitude on the coastline -> blob, not circle
+    scale=12.0,       # simplex wavelength (tiles) of the coastline wiggle
+    gain=6.0,         # how hard water is pushed up in the transition band
+    band=0.06,        # past this much beyond the boundary -> hard ocean
+)
 
-  In stock crafter both come from the single ``world.random`` stream seeded per
-  episode: the OpenSimplex noise field (which fixes the grass/water/sand/
-  mountain/path/lava *shell*) is seeded from ``world.random``, and the
-  ``world.random.uniform()`` draws then decide which eligible tiles within that
-  shell become tree/coal/iron/diamond (vs plain grass/stone) and where mobs
-  spawn. Splitting the two seeds lets us hold the shell fixed and only move the
-  resources+mobs. Idempotent and a no-op unless a World carries both attributes,
-  so it is harmless for envs that don't use fixed_layout."""
+
+def _island_set_material(world, pos, player, tunnels, simplex, island):
+  """crafter.worldgen._set_material with an added radial 'coast' term that turns
+  the fixed square area into an irregular island surrounded by water.
+
+  A second radial falloff (centered on the world center, unlike crafter's
+  player-centered ``start`` bubble) raises the ``water`` field toward the edges;
+  a simplex term perturbs the effective radius so the coastline is a blob rather
+  than a circle. Inside the blob (coast <= 0) the tile is left to stock crafter
+  logic; in a thin transition band crafter's own ``0.25 < water <= 0.35 -> sand``
+  rule paints beaches; past the band the tile is forced to water. Because
+  ``_set_object`` only spawns mobs/cows on walkable land, the ocean stays empty
+  for free. Body copied from the pinned crafter worldgen."""
+  import functools
+  import crafter.worldgen as wg
+  x, y = pos
+  area = world.area
+  simplex = functools.partial(wg._simplex, simplex)
+  uniform = world.random.uniform
+  start = 4 - np.sqrt((x - player.pos[0]) ** 2 + (y - player.pos[1]) ** 2)
+  start += 2 * simplex(x, y, 8, 3)
+  start = 1 / (1 + np.exp(-start))
+  water = simplex(x, y, 3, {15: 1, 5: 0.15}, False) + 0.1
+  water -= 2 * start
+  # --- island coast term (the only addition vs stock _set_material) ---
+  cx, cy = (area[0] - 1) / 2.0, (area[1] - 1) / 2.0
+  R = min(cx, cy) or 1.0
+  d = np.sqrt((x - cx) ** 2 + (y - cy) ** 2) / R      # 0 center .. 1 nearest edge
+  coast = d - island['fill'] + island['roughness'] * simplex(x, y, 9, island['scale'])
+  if coast > island['band']:                          # deep water: force ocean
+    world[x, y] = 'water'
+    return
+  if coast > 0:                                       # transition: nudge -> beach
+    water += island['gain'] * coast
+  # --- remainder is stock crafter _set_material ---
+  mountain = simplex(x, y, 0, {15: 1, 5: 0.3})
+  mountain -= 4 * start + 0.3 * water
+  if start > 0.5:
+    world[x, y] = 'grass'
+  elif mountain > 0.15:
+    if (simplex(x, y, 6, 7) > 0.15 and mountain > 0.3):  # cave
+      world[x, y] = 'path'
+    elif simplex(2 * x, y / 5, 7, 3) > 0.4:  # horizontal tunnel
+      world[x, y] = 'path'
+      tunnels[x, y] = True
+    elif simplex(x / 5, 2 * y, 7, 3) > 0.4:  # vertical tunnel
+      world[x, y] = 'path'
+      tunnels[x, y] = True
+    elif simplex(x, y, 1, 8) > 0 and uniform() > 0.85:
+      world[x, y] = 'coal'
+    elif simplex(x, y, 2, 6) > 0.4 and uniform() > 0.75:
+      world[x, y] = 'iron'
+    elif mountain > 0.18 and uniform() > 0.994:
+      world[x, y] = 'diamond'
+    elif mountain > 0.3 and simplex(x, y, 6, 5) > 0.35:
+      world[x, y] = 'lava'
+    else:
+      world[x, y] = 'stone'
+  elif 0.25 < water <= 0.35 and simplex(x, y, 4, 9) > -0.2:
+    world[x, y] = 'sand'
+  elif 0.3 < water:
+    world[x, y] = 'water'
+  else:  # grassland
+    if simplex(x, y, 5, 7) > 0 and uniform() > 0.8:
+      world[x, y] = 'tree'
+    else:
+      world[x, y] = 'grass'
+
+
+def _install_worldgen_patch():
+  """Monkeypatch crafter.worldgen.generate_world to support two per-World opt-in
+  features, driven by attributes stamped on the ``World`` before reset():
+
+  * ``_layout_seed`` + ``_content_seed`` (fixed_layout): terrain shell is driven
+    by a fixed simplex seed (identical spatial layout every episode) while
+    resources (tree/coal/iron/diamond) and mobs (cow/zombie/skeleton) are
+    resampled from a per-episode content seed. In stock crafter both come from
+    the single per-episode ``world.random`` stream; splitting the two seeds lets
+    us hold the shell fixed and only move the resources+mobs.
+
+  * ``_island`` (island_border): a params dict that turns the square area into an
+    irregular water-bordered island via ``_island_set_material``.
+
+  The two compose (island shape from the layout seed, content resampled).
+  Idempotent and a no-op unless a World carries the relevant attributes, so it is
+  harmless for envs that use neither feature."""
   import opensimplex
   import crafter.worldgen as wg
-  if getattr(wg, '_fixed_layout_patched', False):
+  if getattr(wg, '_worldgen_patched', False):
     return
   _orig_generate = wg.generate_world
 
   def generate_world(world, player):
+    island = getattr(world, '_island', None)
     layout_seed = getattr(world, '_layout_seed', None)
     content_seed = getattr(world, '_content_seed', None)
-    if layout_seed is None or content_seed is None:
-      return _orig_generate(world, player)
-    # Terrain shell: fixed simplex seed -> identical layout every episode.
-    simplex = opensimplex.OpenSimplex(seed=int(layout_seed))
-    # Resources + mobs: fresh per-episode uniform stream -> relocated content.
-    world.random = np.random.RandomState(int(content_seed))
+    if island is None and (layout_seed is None or content_seed is None):
+      return _orig_generate(world, player)   # neither feature active
+    # Seeds: fixed_layout splits the shell/content streams; otherwise mirror
+    # stock (seed the simplex from world.random, then use it for uniform draws).
+    if layout_seed is not None and content_seed is not None:
+      simplex = opensimplex.OpenSimplex(seed=int(layout_seed))
+      world.random = np.random.RandomState(int(content_seed))
+    else:
+      simplex = opensimplex.OpenSimplex(seed=world.random.randint(0, 2 ** 31 - 1))
     tunnels = np.zeros(world.area, bool)
     for x in range(world.area[0]):
       for y in range(world.area[1]):
-        wg._set_material(world, (x, y), player, tunnels, simplex)
+        if island is not None:
+          _island_set_material(world, (x, y), player, tunnels, simplex, island)
+        else:
+          wg._set_material(world, (x, y), player, tunnels, simplex)
     for x in range(world.area[0]):
       for y in range(world.area[1]):
         wg._set_object(world, (x, y), player, tunnels)
 
   wg.generate_world = generate_world
-  wg._fixed_layout_patched = True
+  wg._worldgen_patched = True
+
+
+# Backwards-compatible alias (the unified patch supersedes the old name).
+_install_fixed_layout_worldgen = _install_worldgen_patch
 
 
 class Crafter(embodied.Env):
@@ -82,7 +175,8 @@ class Crafter(embodied.Env):
   def __init__(self, task, size=(64, 64), area=(64, 64), logs=False,
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
                egocentric_view=None, disable_mobs=False, upright_sprites=False,
-               custom_world='', fixed_layout=False):
+               custom_world='', fixed_layout=False, island_border=False,
+               island_fill=0.72, island_roughness=0.16):
     assert task in ('reward', 'noreward')
     # Parse custom world file before creating env (may override area)
     self._custom_world = custom_world
@@ -126,8 +220,17 @@ class Crafter(embodied.Env):
     # deterministic across processes — matching the repo's seed convention;
     # hash() on tuples containing str is randomized by PYTHONHASHSEED.
     if fixed_layout:
-      _install_fixed_layout_worldgen()
+      _install_worldgen_patch()
       self._layout_seed = hash((seed, -1)) % (2 ** 31 - 1)
+    # island_border: turn the square area into an irregular water-bordered island
+    # (see _island_set_material). Composes with fixed_layout. The params dict is
+    # stamped onto the World before each reset() so the patched worldgen sees it.
+    self._island_border = island_border
+    self._island_params = None
+    if island_border:
+      _install_worldgen_patch()
+      self._island_params = dict(
+          ISLAND_DEFAULTS, fill=float(island_fill), roughness=float(island_roughness))
     # egocentric view setup
     self._pixel_size = size[0] if hasattr(size, '__len__') else size
     self._egocentric_view = egocentric_view if egocentric_view else None
@@ -218,6 +321,10 @@ class Crafter(embodied.Env):
         world._content_seed = hash((self._seed, self._episode)) % (2 ** 31 - 1)
       elif self._fixed_seed:
         self._env._episode = 0
+      if self._island_params is not None:
+        # Read by the patched worldgen inside self._env.reset() to carve the
+        # island. Composes with the fixed_layout seeds stamped just above.
+        self._env._world._island = self._island_params
       image = self._env.reset()
       if self._custom_grid is not None:
         self._load_custom_world()
