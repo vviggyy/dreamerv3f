@@ -171,6 +171,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       island_meta = {
           'fill': float(getattr(args.env.crafter, 'island_fill', 0.72)),
           'roughness': float(getattr(args.env.crafter, 'island_roughness', 0.16)),
+          'seed': int(getattr(args.env.crafter, 'island_seed', -1)),
       }
   env = make_env(0, **env_overrides)
   try:

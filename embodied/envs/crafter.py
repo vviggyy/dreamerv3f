@@ -141,9 +141,17 @@ def _install_worldgen_patch():
     content_seed = getattr(world, '_content_seed', None)
     if island is None and (layout_seed is None or content_seed is None):
       return _orig_generate(world, player)   # neither feature active
-    # Seeds: fixed_layout splits the shell/content streams; otherwise mirror
-    # stock (seed the simplex from world.random, then use it for uniform draws).
-    if layout_seed is not None and content_seed is not None:
+    # Seeds. Priority for the terrain simplex (which fixes the shell + island
+    # shape): an explicit island['seed'] >= 0 (nameable, reproducible island,
+    # independent of the world/resource seed) > fixed_layout's layout_seed >
+    # stock (seed from world.random). Resources/mobs use content_seed when
+    # fixed_layout is active, else the per-episode world.random from world.reset.
+    isl_seed = int(island.get('seed', -1)) if island else -1
+    if isl_seed >= 0:
+      simplex = opensimplex.OpenSimplex(seed=isl_seed)
+      if content_seed is not None:
+        world.random = np.random.RandomState(int(content_seed))
+    elif layout_seed is not None and content_seed is not None:
       simplex = opensimplex.OpenSimplex(seed=int(layout_seed))
       world.random = np.random.RandomState(int(content_seed))
     else:
@@ -176,7 +184,7 @@ class Crafter(embodied.Env):
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
                egocentric_view=None, disable_mobs=False, upright_sprites=False,
                custom_world='', fixed_layout=False, island_border=False,
-               island_fill=0.72, island_roughness=0.16):
+               island_fill=0.72, island_roughness=0.16, island_seed=-1):
     assert task in ('reward', 'noreward')
     # Parse custom world file before creating env (may override area)
     self._custom_world = custom_world
@@ -229,8 +237,11 @@ class Crafter(embodied.Env):
     self._island_params = None
     if island_border:
       _install_worldgen_patch()
+      # island_seed >= 0 -> a fixed, nameable island shape+shell (reproducible in
+      # gen_island_worlds.py and plot backgrounds); -1 -> derive from world seed.
       self._island_params = dict(
-          ISLAND_DEFAULTS, fill=float(island_fill), roughness=float(island_roughness))
+          ISLAND_DEFAULTS, fill=float(island_fill),
+          roughness=float(island_roughness), seed=int(island_seed))
     # egocentric view setup
     self._pixel_size = size[0] if hasattr(size, '__len__') else size
     self._egocentric_view = egocentric_view if egocentric_view else None
