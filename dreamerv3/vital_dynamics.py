@@ -75,6 +75,70 @@ VITAL_EVENTS = [
     'eat_cow', 'eat_plant', 'collect_drink', 'wake_up',
     'defeat_zombie', 'defeat_skeleton']
 
+# Health-drop / death cause labels, inferred from crafter's damage model
+# (objects.py): a necessity at 0 (food/drink/energy) causes slow -1 degen via
+# _degen_or_regen_health; moving onto lava is instant nonzero->0; a drop while
+# all necessities are >0 must be mob combat (zombie melee / skeleton arrow).
+HURT_CAUSE_COLORS = {
+    'hunger': '#8c564b',      # food == 0
+    'thirst': '#17becf',      # drink == 0
+    'exhaustion': '#bcbd22',  # energy == 0
+    'combat': '#e377c2',      # mob attack (necessities OK)
+    'lava': '#ff0000',        # instant nonzero->0 on a move step
+    'unknown': '#555555',
+}
+
+
+def classify_health_drops(vitals, actions=None):
+    """Every step where health decreased -> (t, delta, cause).
+
+    cause in {hunger, thirst, exhaustion, combat, lava}; multiple simultaneously
+    lacking necessities are joined (e.g. 'hunger+thirst'). Heuristic from crafter's
+    damage model — see HURT_CAUSE_COLORS. `actions` (per-step action ids) lets us
+    flag lava (instant nonzero->0 on a move) vs a same-step combat kill."""
+    h = np.asarray(vitals['health']).astype(int)
+    food = np.asarray(vitals['food']).astype(int)
+    drink = np.asarray(vitals['drink']).astype(int)
+    energy = np.asarray(vitals['energy']).astype(int)
+    drops = []
+    for t in range(1, len(h)):
+        d = int(h[t]) - int(h[t - 1])
+        if d >= 0:
+            continue
+        lacking = []
+        if food[t - 1] == 0 or food[t] == 0:
+            lacking.append('hunger')
+        if drink[t - 1] == 0 or drink[t] == 0:
+            lacking.append('thirst')
+        if energy[t - 1] == 0 or energy[t] == 0:
+            lacking.append('exhaustion')
+        instant_to_zero = (h[t] == 0 and h[t - 1] >= 2)  # lost >=2 to 0 in one step
+        is_move = (actions is not None and t < len(actions)
+                   and 1 <= int(actions[t]) <= 4)
+        if not lacking and instant_to_zero and (is_move or actions is None):
+            cause = 'lava'
+        elif lacking:
+            cause = '+'.join(lacking)
+        else:
+            cause = 'combat'
+        drops.append((t, d, cause))
+    return drops
+
+
+def cause_of_death(vitals, actions=None):
+    """Death-cause label, or 'survived (timeout)' if the episode ended with
+    health > 0 (i.e. it hit the step limit rather than dying)."""
+    h = np.asarray(vitals['health']).astype(int)
+    if len(h) == 0:
+        return 'unknown'
+    if int(h[-1]) > 0:
+        return 'survived (timeout)'
+    drops = classify_health_drops(vitals, actions)
+    zero_drops = [dc for dc in drops if int(h[dc[0]]) == 0]
+    if zero_drops:
+        return zero_drops[-1][2]
+    return 'unknown'
+
 
 def load_episodes(data_path):
     """Load eval_trajectory output: either all_episodes.pkl or a dir of
@@ -135,7 +199,58 @@ def get_unlocks(ep):
 # --------------------------------------------------------------------------- #
 # 1. Per-episode time-series overlay
 # --------------------------------------------------------------------------- #
-def plot_episode(ep, save_path, ep_idx):
+# Cache the rendered world per env_seed — all episodes in a fixed_seed run share
+# the same world, so we only pay the (slow) crafter render once.
+_WORLD_CACHE = {}
+
+
+def _get_world_img(meta):
+    """Return (world_img, env_seed, tile_size) for this run's world, cached by
+    env_seed. Returns (None, None, None) if crafter/render is unavailable."""
+    key = (meta or {}).get('env_seed')
+    if key in _WORLD_CACHE:
+        return _WORLD_CACHE[key]
+    try:
+        from plot_trajectories import _render_crafter_world
+        result = _render_crafter_world(meta or {}, tile_size=8)
+    except Exception as e:  # crafter missing / render failure
+        print(f'  (world map unavailable: {e})')
+        result = (None, None, None)
+    _WORLD_CACHE[key] = result
+    return result
+
+
+def _draw_episode_map(ax, ep, meta, drops):
+    """Draw the episode's trajectory on the crafter world map (path colored by
+    time; start/end + hurt locations marked). Returns True if drawn. NOTE: the
+    world image is stock worldgen from env_seed and is NOT fixed_layout-aware, so
+    on fixed_layout runs the terrain shown is the natural world, not what the
+    agent saw (positions are still correct)."""
+    pos = np.asarray(ep.get('player_pos'))
+    if pos is None or pos.ndim != 2 or pos.shape[0] == 0:
+        return False
+    world_img, env_seed, ts = _get_world_img(meta)
+    if world_img is None:
+        return False
+    ax.imshow(world_img)
+    px = pos[:, 0] * ts + ts // 2
+    py = world_img.shape[0] - (pos[:, 1] * ts + ts // 2)
+    ax.plot(px, py, '-', color='white', lw=0.6, alpha=0.45, zorder=2)
+    ax.scatter(px, py, c=np.arange(len(px)), cmap='viridis', s=7, zorder=3)
+    ax.plot(px[0], py[0], 'o', color='lime', ms=8, mec='k', zorder=5, label='start')
+    ax.plot(px[-1], py[-1], 'X', color='red', ms=9, mec='k', zorder=5, label='end')
+    for (t, d, cause) in drops:                      # mark where it took damage
+        if t < len(px):
+            col = HURT_CAUSE_COLORS.get(cause.split('+')[0], 'k')
+            ax.plot(px[t], py[t], marker='v', color=col, ms=6, mec='k',
+                    mew=0.4, zorder=4)
+    ax.set_title(f'trajectory (seed={env_seed})', fontsize=9)
+    ax.axis('off')
+    ax.legend(loc='upper right', fontsize=6, framealpha=0.85)
+    return True
+
+
+def plot_episode(ep, save_path, ep_idx, meta=None):
     vitals = get_vitals(ep)
     if vitals is None:
         return False
@@ -143,8 +258,16 @@ def plot_episode(ep, save_path, ep_idx):
     unlocks = get_unlocks(ep)
     T = len(next(iter(vitals.values())))
     steps = np.arange(T)
+    drops = classify_health_drops(vitals, actions)
+    death = cause_of_death(vitals, actions)
 
-    fig, ax = plt.subplots(figsize=(max(8, T / 40), 4.5))
+    # Figure: wide time-series (left) + square world map (right).
+    ts_w = max(8, T / 40)
+    fig = plt.figure(figsize=(ts_w + 5.2, 5.0))
+    gs = fig.add_gridspec(1, 2, width_ratios=[ts_w, 5.0], wspace=0.12)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_map = fig.add_subplot(gs[0, 1])
+
     for v in VITALS:
         ax.plot(steps, vitals[v], color=VITAL_COLORS[v], lw=1.6, label=v)
     ax.set_ylim(-0.5, VITAL_MAX + 0.5)
@@ -162,21 +285,37 @@ def plot_episode(ep, save_path, ep_idx):
                         va='bottom', ha='center',
                         color='k' if is_vital else '0.5')
 
+    # cause-of-hurt markers on the health curve (one legend entry per cause)
+    hy = np.asarray(vitals['health'])
+    seen = set()
+    for (t, d, cause) in drops:
+        col = HURT_CAUSE_COLORS.get(cause.split('+')[0], 'k')
+        lbl = f'hurt: {cause}' if cause not in seen else None
+        seen.add(cause)
+        ax.scatter([t], [hy[t]], marker='v', color=col, s=48, edgecolors='k',
+                   linewidths=0.5, zorder=6, label=lbl)
+
     # vital-relevant action lane below the axis
     ymarks = {'do': -0.25, 'sleep': -0.42}
     for aname, aidx in VITAL_ACTIONS.items():
-        ts = steps[actions == aidx] if len(actions) == T else []
-        if len(ts):
-            ax.scatter(ts, np.full(len(ts), ymarks[aname]), marker='|',
+        tsx = steps[actions == aidx] if len(actions) == T else []
+        if len(tsx):
+            ax.scatter(tsx, np.full(len(tsx), ymarks[aname]), marker='|',
                        s=40, color=ACTION_CLASS_COLORS.get(aname, 'k'),
                        label=f'action={aname}')
 
-    ax.legend(loc='lower right', fontsize=7, ncol=3, framealpha=0.9)
-    ax.set_title(f'Episode {ep.get("episode", ep_idx)} — vitals, achievements, actions',
-                 pad=22)
-    fig.tight_layout()
+    ax.legend(loc='lower right', fontsize=6.5, ncol=3, framealpha=0.9)
+
+    if not _draw_episode_map(ax_map, ep, meta, drops):
+        ax_map.axis('off')
+        ax_map.text(0.5, 0.5, 'world map\nunavailable', ha='center', va='center',
+                    fontsize=10, color='grey', transform=ax_map.transAxes)
+
+    fig.suptitle(
+        f'Episode {ep.get("episode", ep_idx)}  ·  length={T}  ·  outcome: {death}',
+        fontsize=12, fontweight='bold', y=1.04)
     out = Path(save_path) / f'vitals_episode_{ep_idx:03d}.png'
-    fig.savefig(out, dpi=130)
+    fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
     return True
 
@@ -323,6 +462,159 @@ def plot_event_triggered(evstats, save_path):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# 4. Averaged vitals over time (across episodes; clipped to min episode length)
+# --------------------------------------------------------------------------- #
+def compute_averaged_vitals(episodes, clip_pct=0):
+    """Mean/std of each vital at each step across episodes, clipped to a common
+    length so every step averages the SAME episode set (no survivorship bias).
+
+    Episodes vary in length, so we clip to `L`: the minimum episode length
+    (clip_pct=0, the default — faithful but sensitive to a single short episode),
+    or the clip_pct-th percentile length (e.g. clip_pct=5 ignores the shortest
+    5% of episodes so one early death doesn't collapse the window). Only episodes
+    with length >= L contribute. Returns (stats, L)."""
+    per_ep = {v: [] for v in VITALS}
+    lengths = []
+    for ep in episodes:
+        vit = get_vitals(ep)
+        if vit is None:
+            continue
+        lengths.append(len(vit['health']))
+        for v in VITALS:
+            per_ep[v].append(np.asarray(vit[v], float))
+    if not lengths:
+        return None, 0
+    lengths = np.asarray(lengths)
+    L = int(np.percentile(lengths, clip_pct)) if clip_pct > 0 else int(lengths.min())
+    L = max(1, L)
+    keep = lengths >= L
+    stats = {}
+    for v in VITALS:
+        arr = np.vstack([a[:L] for a, k in zip(per_ep[v], keep) if k])  # (n_kept, L)
+        stats[v] = {'mean': arr.mean(0), 'std': arr.std(0), 'n': arr.shape[0]}
+    return stats, L
+
+
+def plot_averaged_vitals(groups, save_path, fname='averaged_vitals.png'):
+    """One subplot per vital; overlays each group (label, stats, L). A single
+    group draws a ±1 std band; multiple groups (e.g. training phases) overlay as
+    lines distinguished by linestyle (color still encodes the vital)."""
+    groups = [g for g in groups if g[1] is not None]
+    if not groups:
+        return None
+    styles = ['-', '--', ':', '-.']
+    multi = len(groups) > 1
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7))
+    for ax, v in zip(axes.ravel(), VITALS):
+        for gi, (label, stats, L) in enumerate(groups):
+            s = stats[v]
+            x = np.arange(len(s['mean']))
+            ls = styles[gi % len(styles)]
+            lbl = label if multi else f'{v} (n={s["n"]})'
+            ax.plot(x, s['mean'], color=VITAL_COLORS[v], ls=ls, lw=1.8, label=lbl)
+            if not multi:
+                ax.fill_between(x, s['mean'] - s['std'], s['mean'] + s['std'],
+                                color=VITAL_COLORS[v], alpha=0.18)
+        ax.set_title(v, color=VITAL_COLORS[v])
+        ax.set_ylim(-0.5, VITAL_MAX + 0.5)
+        ax.set_xlabel('step (clipped to common episode length)')
+        ax.set_ylabel('vital level (0-9)')
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7, framealpha=0.85)
+    sub = ('mean ±1 std across episodes' if not multi
+           else 'mean across episodes, by phase (linestyle) — color = vital')
+    fig.suptitle(f'Averaged vitals over time ({sub})', fontsize=12)
+    fig.tight_layout()
+    out = Path(save_path) / fname
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 5. Empirical p(achievement unlock within horizon | vital level)
+# --------------------------------------------------------------------------- #
+def compute_achievement_rate_vs_vital(episodes, horizon=15):
+    """For each vital and level L, P(achievement a unlocks within the next
+    `horizon` steps | vital == L), pooled over all steps/episodes. This is the
+    OBSERVATIONAL conditional (correlational) — the policy net has no achievement
+    head, so this comes from behavior, not a forward pass. Returns {vital:
+    {'levels', 'ach', 'P'(n_ach,n_levels), 'counts'(n_levels)}}."""
+    levels = np.arange(VITAL_MAX + 1)
+    ach_names = sorted({a for ep in episodes for a in get_unlocks(ep)})
+    idx = {a: i for i, a in enumerate(ach_names)}
+    acc = {v: {'hit': np.zeros((len(ach_names), len(levels))),
+               'tot': np.zeros(len(levels))} for v in VITALS}
+    for ep in episodes:
+        vit = get_vitals(ep)
+        if vit is None or not ach_names:
+            continue
+        T = len(vit['health'])
+        unlocks = get_unlocks(ep)
+        # future[a, t] = achievement a unlocks at some t0 in [t, t+horizon]
+        future = np.zeros((len(ach_names), T), dtype=bool)
+        for a, tlist in unlocks.items():
+            ai = idx.get(a)
+            if ai is None:
+                continue
+            for t0 in tlist:
+                lo = max(0, t0 - horizon)
+                future[ai, lo:t0 + 1] = True
+        for v in VITALS:
+            vv = np.asarray(vit[v])[:T]
+            for lvl in levels:
+                mask = vv == lvl
+                n = int(mask.sum())
+                if n == 0:
+                    continue
+                acc[v]['tot'][lvl] += n
+                acc[v]['hit'][:, lvl] += future[:, mask].sum(axis=1)
+    out = {}
+    for v in VITALS:
+        tot = acc[v]['tot']
+        with np.errstate(invalid='ignore', divide='ignore'):
+            P = np.where(tot > 0, acc[v]['hit'] / tot, np.nan)
+        out[v] = {'levels': levels, 'ach': ach_names, 'P': P, 'counts': tot}
+    return out
+
+
+def plot_achievement_rate_vs_vital(stats, save_path, horizon):
+    """Heatmap per vital: rows = achievements, cols = vital level, color =
+    P(unlock within horizon | vital). Shared color scale across vitals."""
+    achs = stats[VITALS[0]]['ach']
+    if not achs:
+        return None
+    vmax = max([np.nanmax(stats[v]['P']) for v in VITALS
+                if np.isfinite(stats[v]['P']).any()] + [1e-9])
+    fig, axes = plt.subplots(1, len(VITALS), sharey=True,
+                             figsize=(3.6 * len(VITALS), max(4.0, 0.32 * len(achs))))
+    axes = np.atleast_1d(axes)
+    im = None
+    for ax, v in zip(axes, VITALS):
+        s = stats[v]
+        im = ax.imshow(s['P'], aspect='auto', cmap='magma', vmin=0, vmax=vmax)
+        ax.set_xticks(range(len(s['levels'])))
+        ax.set_xticklabels(s['levels'], fontsize=7)
+        ax.set_xlabel('vital level')
+        ax.set_title(v, color=VITAL_COLORS[v])
+        # sample size under each column
+        for j, lvl in enumerate(s['levels']):
+            if s['counts'][j] > 0:
+                ax.annotate(f'{int(s["counts"][j])}', xy=(j, len(achs) - 0.4),
+                            fontsize=5, ha='center', va='top', color='0.6')
+    axes[0].set_yticks(range(len(achs)))
+    axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
+    fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
+                 label=f'P(unlock ≤ {horizon} steps | vital)')
+    fig.suptitle('p(achievement | vital) — empirical conditional '
+                 '(n below each column)', fontsize=12)
+    out = Path(save_path) / 'achievement_rate_vs_vital.png'
+    fig.savefig(out, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Observational analysis of vitals vs policy actions/events')
@@ -336,6 +628,19 @@ def main():
                         help='half-window (steps) for event-triggered averages')
     parser.add_argument('--no_agg', action='store_true',
                         help='skip aggregate stats (per-episode plots only)')
+    parser.add_argument('--achievement_horizon', type=int, default=15,
+                        help='horizon (steps) for p(achievement unlock | vital)')
+    parser.add_argument('--avg_clip_pct', type=float, default=5,
+                        help='averaged-vitals clip length: percentile of episode '
+                             'lengths to clip to (default 5 = ignore the shortest '
+                             '5%% so one early death does not collapse the window). '
+                             '0 = strict min episode length.')
+    parser.add_argument('--phase_data', type=str, nargs='*', default=None,
+                        help='labelled trajectory sets for the averaged-vitals '
+                             'overlay, e.g. early:./traj_ck1 mid:./traj_ck2 '
+                             'late:./traj_ck3 (each label:dir). When given, the '
+                             'averaged-vitals plot overlays one curve per phase '
+                             'instead of the single --data set.')
     args = parser.parse_args()
 
     data_path = Path(args.data)
@@ -352,13 +657,14 @@ def main():
         return
 
     outputs = []
-    # 1. per-episode plots
+    # 1. per-episode plots (now with cause-of-death, hurt markers, world map)
     n_plotted = 0
-    for i, ep in enumerate(episodes):
-        if args.max_episode_plots and n_plotted >= args.max_episode_plots:
-            break
-        if plot_episode(ep, save_dir, i):
-            n_plotted += 1
+    if args.max_episode_plots:                 # 0 = skip per-episode plots
+        for i, ep in enumerate(episodes):
+            if n_plotted >= args.max_episode_plots:
+                break
+            if plot_episode(ep, save_dir, i, meta=meta):
+                n_plotted += 1
     print(f'Wrote {n_plotted} per-episode plots')
     if n_plotted:
         outputs.append(str(save_dir / 'vitals_episode_*.png'))
@@ -380,6 +686,44 @@ def main():
             print(f'Wrote {out3}')
         else:
             print('No vital events found; skipping event-triggered plot')
+
+        # 4. averaged vitals over time (single set, or phase overlay)
+        if args.phase_data:
+            groups = []
+            for spec in args.phase_data:
+                label, _, d = spec.partition(':')
+                if not d:
+                    print(f'  WARN: --phase_data entry "{spec}" is not label:dir; skipping')
+                    continue
+                try:
+                    eps_p, _ = load_episodes(d)
+                except Exception as e:
+                    print(f'  WARN: could not load phase "{label}" from {d}: {e}')
+                    continue
+                st, L = compute_averaged_vitals(eps_p, clip_pct=args.avg_clip_pct)
+                groups.append((label, st, L))
+                print(f'  phase "{label}": {st[VITALS[0]]["n"] if st else 0} eps, clip_len={L}')
+        else:
+            st, L = compute_averaged_vitals(episodes, clip_pct=args.avg_clip_pct)
+            groups = [('all episodes', st, L)]
+            print(f'  averaged vitals: {st[VITALS[0]]["n"] if st else 0} eps, clip_len={L}')
+        out4 = plot_averaged_vitals(groups, save_dir)
+        results['averaged_vitals'] = {lbl: st for lbl, st, _ in groups}
+        if out4:
+            outputs.append(str(out4))
+            print(f'Wrote {out4}')
+
+        # 5. p(achievement | vital) — empirical conditional
+        av_stats = compute_achievement_rate_vs_vital(
+            episodes, horizon=args.achievement_horizon)
+        out5 = plot_achievement_rate_vs_vital(
+            av_stats, save_dir, args.achievement_horizon)
+        results['achievement_rate_vs_vital'] = av_stats
+        if out5:
+            outputs.append(str(out5))
+            print(f'Wrote {out5}')
+        else:
+            print('No achievement unlocks found; skipping p(achievement|vital)')
 
     res_file = save_dir / 'vital_dynamics_results.pkl'
     with open(res_file, 'wb') as f:

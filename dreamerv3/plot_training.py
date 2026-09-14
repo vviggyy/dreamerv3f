@@ -201,6 +201,22 @@ def plot_episode_score(ax, steps, scores, smooth_window):
     style_ax(ax)
 
 
+def plot_episode_duration(ax, steps, lengths, smooth_window):
+    """Per-episode length (steps survived) vs training step: scatter + smoothed,
+    mirroring the episode-score panel. Longer episodes = the agent surviving
+    longer (fewer early deaths from starvation/combat/lava)."""
+    ax.scatter(steps, lengths, alpha=0.25, s=6, color=GREEN, label='Per episode')
+    if smooth_window > 1 and len(steps) > smooth_window:
+        sx, sy = smooth(steps, lengths, smooth_window)
+        ax.plot(sx, sy, color=GREEN, linewidth=1.8,
+                label=f'Smoothed (w={smooth_window})')
+    ax.set_ylabel('Episode length (steps)', fontsize=11)
+    ax.set_ylim(bottom=0)
+    ax.set_title('Episode Duration', fontsize=13)
+    ax.legend(fontsize=9, framealpha=0.7)
+    style_ax(ax)
+
+
 def plot_cumulative_reward(ax, steps, scores):
     cumulative = np.cumsum(scores)
     ax.plot(steps, cumulative, color=GREEN, linewidth=1.8)
@@ -437,12 +453,16 @@ def main():
 
     score_records = []
     ep_steps, ep_scores = np.array([]), np.array([])
+    ep_len_steps, ep_lengths = np.array([]), np.array([])
     if scores_path.exists():
         print(f'Loading {scores_path}')
         score_records = load_jsonl(scores_path)
         ep_steps, ep_scores = records_to_series(score_records, 'episode/score')
+        ep_len_steps, ep_lengths = records_to_series(score_records, 'episode/length')
         if len(ep_steps):
             print(f'  {len(ep_steps)} episodes, score [{ep_scores.min():.2f}, {ep_scores.max():.2f}]')
+        if len(ep_lengths):
+            print(f'  episode length [{ep_lengths.min():.0f}, {ep_lengths.max():.0f}] steps')
     else:
         print(f'Warning: {scores_path} not found')
 
@@ -460,13 +480,14 @@ def main():
     # Check if metrics.jsonl has training loss data
     has_train = any('train/loss/image' in r for r in metric_records)
 
-    # Row 1: episode score, crafter score, per-achievement unlock rate
-    # Row 2: cumulative reward, training losses, reward & value estimates
-    top_panels = ['score', 'crafter_score', 'achievements']
-    bot_panels = ['cumulative', 'losses', 'reward_value']
+    # Panels laid out in a 3-column grid (rows grow as needed):
+    #   score, duration, crafter score, per-achievement unlock rate,
+    #   cumulative reward, training losses, reward & value estimates
+    panels = ['score', 'duration', 'crafter_score', 'achievements',
+              'cumulative', 'losses', 'reward_value']
 
     n_cols = 3
-    n_rows = 2
+    n_rows = int(np.ceil(len(panels) / n_cols))
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.5 * n_rows))
     fig.suptitle(f'Training Progress — {logdir.name}', fontsize=14, fontweight='bold')
 
@@ -485,6 +506,11 @@ def main():
                 plot_episode_score(ax, ep_steps, ep_scores, args.smooth)
             else:
                 empty_panel(ax, 'Episode Score')
+        elif panel_type == 'duration':
+            if len(ep_len_steps):
+                plot_episode_duration(ax, ep_len_steps, ep_lengths, args.smooth)
+            else:
+                empty_panel(ax, 'Episode Duration')
         elif panel_type == 'cumulative':
             if len(ep_steps):
                 plot_cumulative_reward(ax, ep_steps, ep_scores)
@@ -517,10 +543,11 @@ def main():
                     p95 = np.percentile(smoothed_vals, 95)
                     ax.set_ylim(bottom=0, top=p95 * 1.2)
 
-    for i, panel_type in enumerate(top_panels):
-        render_panel(axes[0, i], panel_type)
-    for i, panel_type in enumerate(bot_panels):
-        render_panel(axes[1, i], panel_type)
+    axflat = axes.ravel()
+    for i, panel_type in enumerate(panels):
+        render_panel(axflat[i], panel_type)
+    for ax in axflat[len(panels):]:   # blank any unused grid cells
+        ax.axis('off')
 
     plt.tight_layout()
 
