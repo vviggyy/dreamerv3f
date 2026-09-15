@@ -524,6 +524,71 @@ def _compute_tile_stats(pos, pred, width, height):
     }
 
 
+def calculate_coverage(tile_visits, walkable_mask=None):
+    """pRNN-style occupancy coverage (port of prnn/analysis/trajectoryAnalysis.py
+    ::calculateCoverage).
+
+    Normalizes the visit grid to a probability distribution and compares it to a
+    uniform distribution over the *reachable* (walkable) tiles:
+
+        coverage = 1 - max|p_occ - p_uniform|      (L-inf uniformity, in [0, 1])
+
+    coverage=1 ⇒ the agent's occupancy is perfectly uniform over the reachable
+    map; lower ⇒ occupancy concentrated in a few tiles. If ``walkable_mask`` is
+    None (or shape-mismatched), the uniform reference spans the whole grid
+    (matches pRNN's mask=None path). Also returns pRNN's commented KL variant and
+    the literal visited-fraction of reachable tiles.
+
+    Returns a dict: coverage, kl_uniform, visited_fraction, n_visited, n_reachable.
+    All coords are the raw [x, y] occupancy frame (no transpose).
+    """
+    occ = np.asarray(tile_visits, dtype=float)
+    out = {'coverage': np.nan, 'kl_uniform': np.nan,
+           'visited_fraction': np.nan, 'n_visited': 0, 'n_reachable': 0}
+    total = occ.sum()
+    if total <= 0:
+        return out
+    p = occ / total
+
+    if (walkable_mask is not None and np.shape(walkable_mask) == occ.shape
+            and np.asarray(walkable_mask).any()):
+        support = np.asarray(walkable_mask, dtype=bool)
+    else:
+        support = np.ones_like(occ, dtype=bool)
+    unif = support.astype(float)
+    unif /= unif.sum()
+
+    # L-inf non-uniformity over the whole grid, so any occupancy mass landing off
+    # the reachable support is penalized too (pRNN's `nonuniformity`).
+    nonuniformity = float(np.max(np.abs(p - unif)))
+    out['coverage'] = 1.0 - nonuniformity
+
+    # KL(occ || uniform) over visited tiles that lie on the support.
+    on = (p > 0) & (unif > 0)
+    if on.any():
+        out['kl_uniform'] = float(np.sum(p[on] * np.log(p[on] / unif[on])))
+
+    visited = occ > 0
+    out['n_visited'] = int(visited.sum())
+    out['n_reachable'] = int(support.sum())
+    out['visited_fraction'] = float((visited & support).sum() / support.sum())
+    return out
+
+
+def _coverage_label(cov):
+    """One-line coverage summary for figure titles / stdout."""
+    if cov is None or not np.isfinite(cov.get('coverage', np.nan)):
+        return 'coverage: n/a'
+    vf = cov.get('visited_fraction', np.nan)
+    kl = cov.get('kl_uniform', np.nan)
+    txt = f"coverage={cov['coverage']:.3f}"
+    if np.isfinite(vf):
+        txt += f" | visited {vf*100:.0f}% of {cov['n_reachable']} reachable"
+    if np.isfinite(kl):
+        txt += f" | KL={kl:.2f}"
+    return txt
+
+
 def _get_world_img(metadata, width, height):
     """Load and flip the Crafter world map image. Returns (img, extent) or (None, extent)."""
     world_img = None
@@ -578,6 +643,30 @@ def _get_resource_tiles(metadata):
         return {}
 
 
+def _get_walkable_mask(metadata, width, height):
+    """Load the walkable-tile mask for the world (mirrors _get_resource_tiles'
+    import fallback). Returns a bool [width, height] array or None if unavailable
+    or shape-mismatched (caller then falls back to whole-grid uniform)."""
+    if metadata is None:
+        return None
+    try:
+        from plot_trajectories import _extract_walkable_mask
+    except Exception:
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from plot_trajectories import _extract_walkable_mask
+        except Exception:
+            return None
+    try:
+        mask = _extract_walkable_mask(metadata)
+    except Exception:
+        return None
+    if mask is None or mask.shape != (width, height):
+        return None
+    return mask
+
+
 def _overlay_resources(ax, resource_tiles, markersize=22, legend=True):
     """Scatter a distinct marker at each resource tile, on top of the heatmap.
     A white edge keeps markers legible over both the world and 'hot' colormap."""
@@ -595,13 +684,18 @@ def _overlay_resources(ax, resource_tiles, markersize=22, legend=True):
 
 
 def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
-                        repr_name, method, row_label, resource_tiles=None):
+                        repr_name, method, row_label, resource_tiles=None,
+                        walkable_mask=None):
     """Draw one row of the occupancy-vs-error figure (3 panels)."""
     ax_heat, ax_err_map, ax_scatter = axes
     tile_visits = stats['tile_visits']
     tile_mean_err = stats['tile_mean_err']
     sample_err = stats['sample_err']
     per_sample_occ = stats['per_sample_occ']
+
+    # pRNN-style occupancy coverage for this split (shown in the panel title).
+    cov = calculate_coverage(tile_visits, walkable_mask=walkable_mask)
+    print(f"  Occupancy coverage ({row_label}): {_coverage_label(cov)}")
 
     # Panel A: occupancy
     if world_img is not None:
@@ -617,7 +711,8 @@ def _plot_occupancy_row(axes, stats, width, height, world_img, world_extent,
     cbar.set_label('Visit count')
     ax_heat.set_xlabel('X')
     ax_heat.set_ylabel('Y')
-    ax_heat.set_title(f'Tile occupancy ({row_label})')
+    ax_heat.set_title(f'Tile occupancy ({row_label})\n{_coverage_label(cov)}',
+                      fontsize=10)
     ax_heat.set_xlim(world_extent[0], world_extent[1])
     ax_heat.set_ylim(world_extent[2], world_extent[3])
 
@@ -807,17 +902,19 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
 
     world_img, world_extent = _get_world_img(metadata, width, height)
     resource_tiles = _get_resource_tiles(metadata) if show_resources else {}
+    walkable_mask = _get_walkable_mask(metadata, width, height)
 
     test_stats = _compute_tile_stats(pos, pred, width, height)
     _plot_occupancy_row(axes[0], test_stats, width, height,
                         world_img, world_extent, repr_name, method, 'test',
-                        resource_tiles=resource_tiles)
+                        resource_tiles=resource_tiles, walkable_mask=walkable_mask)
 
     if has_train:
         train_stats = _compute_tile_stats(train_pos, train_pred, width, height)
         _plot_occupancy_row(axes[1], train_stats, width, height,
                             world_img, world_extent, repr_name, method, 'train',
-                            resource_tiles=resource_tiles)
+                            resource_tiles=resource_tiles,
+                            walkable_mask=walkable_mask)
         _plot_diff_row(axes[2], test_stats, train_stats, width, height,
                        world_img, world_extent, repr_name, method,
                        resource_tiles=resource_tiles)
@@ -837,6 +934,9 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
     in occupancy_vs_error. Single panel, same style. Saved as a NEW svg
     (occupancy_fullset_{repr}.svg)."""
     stats = _compute_tile_stats(pos_all, pos_all.astype(float), width, height)
+    walkable_mask = _get_walkable_mask(metadata, width, height)
+    cov = calculate_coverage(stats['tile_visits'], walkable_mask=walkable_mask)
+    print(f"  Occupancy coverage (full set): {_coverage_label(cov)}")
     world_img, world_extent = _get_world_img(metadata, width, height)
     fig, ax = plt.subplots(figsize=(6, 5.5))
     if world_img is not None:
@@ -853,7 +953,8 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
     ax.set_ylabel('Y')
     ax.set_xlim(world_extent[0], world_extent[1])
     ax.set_ylim(world_extent[2], world_extent[3])
-    ax.set_title(f'Tile occupancy (full set — {len(pos_all)} timesteps)')
+    ax.set_title(f'Tile occupancy (full set — {len(pos_all)} timesteps)\n'
+                 f'{_coverage_label(cov)}', fontsize=10)
     fig.tight_layout()
     fname = f'occupancy_fullset_{repr_name}.svg'
     fig.savefig(save_dir / fname, bbox_inches='tight')

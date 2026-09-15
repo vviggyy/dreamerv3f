@@ -417,6 +417,43 @@ def _extract_resource_tiles(metadata=None):
     return out
 
 
+def _extract_walkable_mask(metadata=None):
+    """Boolean [x, y] mask of walkable (grass/path/sand) tiles for the world, in
+    the same (x, y) frame as player_pos / the occupancy grid. None on failure.
+
+    Applies the island worldgen patch when metadata['island'] is set, matching
+    _render_crafter_world's background so the reachable-area reference is faithful
+    to the world the agent actually roamed. Used as the uniform-coverage support
+    in decode_position.calculate_coverage (pRNN-style occupancy coverage)."""
+    try:
+        import crafter
+        import crafter.constants as cc
+    except ImportError:
+        return None
+    env_seed = metadata.get('env_seed') if metadata else None
+    if env_seed is None:
+        env_seed = 42
+    area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
+    env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
+    island = metadata.get('island') if metadata else None
+    if island:
+        try:
+            from embodied.envs.crafter import _install_worldgen_patch, ISLAND_DEFAULTS
+            _install_worldgen_patch()
+            env._world._island = dict(ISLAND_DEFAULTS, **island)
+        except Exception as e:
+            print(f"Could not apply island worldgen to walkable mask: {e}")
+    env.reset()
+    world = env._world
+    mat_map = world._mat_map
+    walk = set(getattr(cc, 'walkable', ['grass', 'path', 'sand']))
+    mask = np.zeros(mat_map.shape, dtype=bool)
+    for mid, nm in world._mat_names.items():
+        if nm in walk:
+            mask |= (mat_map == mid)
+    return mask
+
+
 def plot_world_only(metadata=None, tile_size=8, save_path=None):
     """Render and save just the Crafter world map image (no trajectories)."""
     world_img, env_seed, tile_size = _render_crafter_world(metadata, tile_size)
