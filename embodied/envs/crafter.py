@@ -175,6 +175,26 @@ def _install_worldgen_patch():
 _install_fixed_layout_worldgen = _install_worldgen_patch
 
 
+def fixed_layout_simplex_seed(env_seed):
+  """OpenSimplex terrain seed that a fixed_layout world uses for its (frozen)
+  terrain shell.
+
+  It reproduces the base seed's `fixed_seed` world (episode 1): stock crafter
+  seeds the terrain noise with the first `world.random.randint()` draw off
+  `RandomState(hash((env_seed, episode)) % (2**31-1))`, and a fixed_seed run
+  freezes episode -> 1. Deriving the layout seed identically makes a fixed_layout
+  run share the SAME water/stone/sand skeleton as the non-fixed-layout net on the
+  same seed (so occupancy/decoding are comparable), while resources+mobs still
+  resample per episode from the separate content seed.
+
+  Shared by the Crafter env (world generation) and plot_trajectories
+  (`_reconstruct_crafter_env`, background + walkable mask) so the two can never
+  drift — the plot always reconstructs exactly the world the agent played in.
+  """
+  shell_world_seed = hash((int(env_seed), 1)) % (2 ** 31 - 1)
+  return int(np.random.RandomState(shell_world_seed).randint(0, 2 ** 31 - 1))
+
+
 class Crafter(embodied.Env):
 
   # Interoceptive vitals drawn on the status bar (each 0-9); logged per step.
@@ -222,14 +242,22 @@ class Crafter(embodied.Env):
     self._random_spawn = random_spawn
     self._seed = seed
     self._spawn_rng = np.random.RandomState(seed)
-    # fixed_layout: identical terrain every episode, but resources+mobs move.
-    # Terrain seed is derived from the base seed only (episode-independent). Use
-    # an int-only hash tuple (episode marker -1, never a real episode) so it is
-    # deterministic across processes — matching the repo's seed convention;
-    # hash() on tuples containing str is randomized by PYTHONHASHSEED.
+    # fixed_layout: identical terrain SHELL every episode, but resources+mobs
+    # move. The shell is driven by the OpenSimplex terrain noise, and stock
+    # crafter seeds that noise with `world.random.randint()` where world.random =
+    # RandomState(hash((seed, episode))). A `fixed_seed` run freezes episode -> 1,
+    # so its world is the hash((seed, 1)) shell. To make fixed_layout reproduce
+    # that SAME shell (so it's directly comparable to the fixed_seed / non-
+    # fixed-layout net on the same seed), derive the layout simplex seed the exact
+    # way stock crafter would for episode 1 — the first randint draw off
+    # RandomState(hash((seed, 1))). Resources/mobs then resample per episode from
+    # the separate _content_seed. (The old code used hash((seed, -1)) directly as
+    # the simplex seed, which produced a DIFFERENT world, not the base seed's.)
+    # All int-only hash tuples -> deterministic across processes (PYTHONHASHSEED
+    # only randomizes hashes of str/bytes).
     if fixed_layout:
       _install_worldgen_patch()
-      self._layout_seed = hash((seed, -1)) % (2 ** 31 - 1)
+      self._layout_seed = fixed_layout_simplex_seed(seed)
     # island_border: turn the square area into an irregular water-bordered island
     # (see _island_set_material). Composes with fixed_layout. The params dict is
     # stamped onto the World before each reset() so the patched worldgen sees it.

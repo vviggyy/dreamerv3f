@@ -162,10 +162,16 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
   # Pass random_spawn through from config if set
   env_overrides = dict(fixed_seed=True)
   island_meta = None
+  fixed_layout_meta = False
   if hasattr(args, 'env') and hasattr(args.env, 'crafter'):
     rs = getattr(args.env.crafter, 'random_spawn', False)
     if rs:
       env_overrides['random_spawn'] = True
+    # Record fixed_layout (if used) so plot backgrounds/masks rebuild the true
+    # terrain shell — stock worldgen puts water in the wrong tiles otherwise.
+    if getattr(args.env.crafter, 'fixed_layout', False):
+      fixed_layout_meta = True
+      env_overrides['fixed_layout'] = True
     # Record island-border params (if used) so plot backgrounds render the blob.
     if getattr(args.env.crafter, 'island_border', False):
       island_meta = {
@@ -231,6 +237,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
         'task': 'crafter',
         'area': area,
         'island': island_meta,   # None unless island_border was used
+        'fixed_layout': fixed_layout_meta,   # False unless fixed_layout was used
     }
     with open(str(all_file), 'wb') as f:
       pickle.dump(save_data, f)

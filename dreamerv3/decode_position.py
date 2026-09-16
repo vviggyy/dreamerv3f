@@ -1984,6 +1984,12 @@ if __name__ == '__main__':
                         help='Crafter world seed for rendering the world map '
                              'in probmap plots. Overrides any auto-detected '
                              'seed from metadata.')
+    parser.add_argument('--fixed_layout', action='store_true',
+                        help='Force fixed_layout world reconstruction for the '
+                             'occupancy background + walkable/coverage mask (use '
+                             'for older runs whose metadata did not record '
+                             'fixed_layout). Rebuilds the terrain shell from '
+                             'env_seed so occupancy is not scored against water.')
     parser.add_argument('--from_results', default=None,
                         help='Path to an existing layer_decode_results.pkl '
                              '(or layer_decode_checkpoint.pkl). Regenerates '
@@ -2073,6 +2079,11 @@ if __name__ == '__main__':
             if metadata is None:
                 metadata = {'area': [32, 32]}
             metadata['env_seed'] = args.env_seed
+        if args.fixed_layout:
+            if metadata is None:
+                metadata = {'area': [32, 32]}
+            metadata['fixed_layout'] = True
+            print("  [override] Occupancy background/mask uses fixed_layout=True")
 
         if args.min_bbox > 0:
             n_before = len(lightweight_eps)
@@ -2111,6 +2122,13 @@ if __name__ == '__main__':
     else:
         # --- Standard mode: full load (only needs deter/stoch) ---
         episodes, metadata = load_episodes(data_path, max_episodes=args.max_episodes)
+        if args.env_seed is not None:
+            metadata = dict(metadata or {'area': [32, 32]})
+            metadata['env_seed'] = args.env_seed
+        if args.fixed_layout:
+            metadata = dict(metadata or {'area': [32, 32]})
+            metadata['fixed_layout'] = True
+            print("  [override] Occupancy background/mask uses fixed_layout=True")
         print(f"  {len(episodes)} episodes loaded")
         if metadata:
             print(f"  Metadata: {metadata}")

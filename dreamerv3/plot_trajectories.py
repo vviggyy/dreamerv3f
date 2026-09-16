@@ -321,37 +321,65 @@ def plot_world_overlay(episodes, tile_size=7, save_path=None):
     plt.show()
 
 
-def _render_crafter_world(metadata=None, tile_size=8):
-    """Render the full Crafter world map image.
+def _reconstruct_crafter_env(metadata=None):
+    """Build + reset a crafter.Env matching the world the agent actually played,
+    applying the island and/or fixed_layout worldgen patches when metadata records
+    them. Returns (env, env_seed) or (None, None) on failure.
 
-    Returns (world_img, env_seed, tile_size) or (None, None, None) on failure.
+    Shared by _render_crafter_world (background image) and _extract_walkable_mask
+    (reachable-tile mask) so both are always reconstructed from the SAME world.
+
+    fixed_layout: the terrain shell (grass/water/sand/…) is driven by a fixed
+    layout seed derived from env_seed (matches crafter.py's hash((seed, -1))), so
+    stock worldgen would draw water in the WRONG tiles and occupancy dots land on
+    "water" — set metadata['fixed_layout'] (recorded by eval_trajectory, or via a
+    plotting-time override) to reconstruct the true shell. A content seed places
+    resources/mobs for a representative background snapshot. Best-effort: a plain
+    stock world is shown if the patch/params are unavailable.
     """
     try:
         import crafter
     except ImportError:
-        print("Crafter not installed, skipping fullworld plot")
-        return None, None, tile_size
+        print("Crafter not installed, skipping world reconstruction")
+        return None, None
 
     env_seed = metadata.get('env_seed') if metadata else None
     if env_seed is None:
         print("No env_seed in metadata, using seed=42 (world may not match)")
         env_seed = 42
+    env_seed = int(env_seed)
 
     area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
     env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
-    # island_border: if the run used the island generator, apply the same
-    # worldgen patch here so the background is a blob, not a box. Params flow via
-    # metadata['island'] (recorded by eval_trajectory). Best-effort — a plain box
-    # is shown if the patch/params are unavailable.
+
     island = metadata.get('island') if metadata else None
-    if island:
+    fixed_layout = bool(metadata.get('fixed_layout')) if metadata else False
+    if island or fixed_layout:
         try:
-            from embodied.envs.crafter import _install_worldgen_patch, ISLAND_DEFAULTS
+            from embodied.envs.crafter import (
+                _install_worldgen_patch, ISLAND_DEFAULTS, fixed_layout_simplex_seed)
             _install_worldgen_patch()
-            env._world._island = dict(ISLAND_DEFAULTS, **island)
+            if fixed_layout:
+                # Shared derivation with the env so the background/mask matches
+                # the exact terrain shell the agent played in.
+                env._world._layout_seed = fixed_layout_simplex_seed(env_seed)
+                env._world._content_seed = hash((env_seed, 1)) % (2 ** 31 - 1)
+            if island:
+                env._world._island = dict(ISLAND_DEFAULTS, **island)
         except Exception as e:
-            print(f"Could not apply island worldgen to background: {e}")
+            print(f"Could not apply worldgen patch to background: {e}")
     env.reset()
+    return env, env_seed
+
+
+def _render_crafter_world(metadata=None, tile_size=8):
+    """Render the full Crafter world map image.
+
+    Returns (world_img, env_seed, tile_size) or (None, None, None) on failure.
+    """
+    env, env_seed = _reconstruct_crafter_env(metadata)
+    if env is None:
+        return None, None, tile_size
 
     world = env._world
     textures = env._textures
@@ -421,29 +449,18 @@ def _extract_walkable_mask(metadata=None):
     """Boolean [x, y] mask of walkable (grass/path/sand) tiles for the world, in
     the same (x, y) frame as player_pos / the occupancy grid. None on failure.
 
-    Applies the island worldgen patch when metadata['island'] is set, matching
-    _render_crafter_world's background so the reachable-area reference is faithful
-    to the world the agent actually roamed. Used as the uniform-coverage support
-    in decode_position.calculate_coverage (pRNN-style occupancy coverage)."""
+    Reconstructs the SAME world as _render_crafter_world's background (island +
+    fixed_layout patches applied when metadata records them), so the reachable-area
+    reference is faithful to the world the agent actually roamed — critical for
+    fixed_layout runs, where stock worldgen puts water in the wrong tiles. Used as
+    the uniform-coverage support in decode_position.calculate_coverage."""
     try:
-        import crafter
         import crafter.constants as cc
     except ImportError:
         return None
-    env_seed = metadata.get('env_seed') if metadata else None
-    if env_seed is None:
-        env_seed = 42
-    area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
-    env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
-    island = metadata.get('island') if metadata else None
-    if island:
-        try:
-            from embodied.envs.crafter import _install_worldgen_patch, ISLAND_DEFAULTS
-            _install_worldgen_patch()
-            env._world._island = dict(ISLAND_DEFAULTS, **island)
-        except Exception as e:
-            print(f"Could not apply island worldgen to walkable mask: {e}")
-    env.reset()
+    env, _ = _reconstruct_crafter_env(metadata)
+    if env is None:
+        return None
     world = env._world
     mat_map = world._mat_map
     walk = set(getattr(cc, 'walkable', ['grass', 'path', 'sand']))
@@ -1144,10 +1161,20 @@ def main():
                         help='Save animations as MP4 instead of GIF (requires ffmpeg)')
     parser.add_argument('--max_episodes', type=int, default=0,
                         help='Limit number of episodes (0 = all)')
+    parser.add_argument('--fixed_layout', action='store_true',
+                        help='Force fixed_layout world reconstruction for the '
+                             'background/mask (use for older runs whose metadata '
+                             'did not record fixed_layout). Terrain shell is '
+                             'rebuilt from env_seed so water lands on the right '
+                             'tiles.')
     args = parser.parse_args()
 
     print(f"Loading episodes from {args.data}")
     episodes, metadata = load_episodes(args.data)
+    if args.fixed_layout:
+        metadata = dict(metadata or {})
+        metadata['fixed_layout'] = True
+        print("  [override] Reconstructing background/mask with fixed_layout=True")
     if args.max_episodes > 0:
         episodes = episodes[:args.max_episodes]
     print(f"Loaded {len(episodes)} episodes")
