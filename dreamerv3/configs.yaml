@@ -253,6 +253,26 @@ size400m: &size400m
   .*\.depth: 96
   .*\.units: 1536
 
+# Custom asymmetric preset: 50m baseline (crafter_small size50m) with a larger
+# world model + policy/value heads and a leaner encoder. The `<<: *size50m`
+# merge applies the size50m regex overrides FIRST; the literal leaf keys below
+# are processed AFTER, so they win (verified against elements.Config.update,
+# which iterates keys in insertion order and expands regex patterns in place).
+#   - world model (RSSM): bumped from 50m -> 200m width
+#   - policy + value: widened to 1024 units, 4 layers (rest stay 512 from size50m)
+#   - encoder conv depth + vector-MLP: shrunk to 12m level (decoder stays 50m)
+size50m_bigwm: &size50m_bigwm
+  <<: *size50m
+  agent.dyn.rssm.deter: 8192
+  agent.dyn.rssm.hidden: 1024
+  agent.dyn.rssm.classes: 64
+  agent.policy.units: 1024
+  agent.policy.layers: 4
+  agent.value.units: 1024
+  agent.value.layers: 4
+  agent.enc.simple.depth: 16
+  agent.enc.simple.units: 256
+
 minecraft:
   task: minecraft_diamond
 

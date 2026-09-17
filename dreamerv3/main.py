@@ -97,6 +97,7 @@ def main(argv=None):
       replay_activations=config.replay_activations,
       inspect_replay=config.inspect_replay,
       state_probe=config.state_probe,
+      env=config.env,  # so eval_trajectory can read args.env.crafter (fixed_layout/island metadata)
   )
 
   if config.script == 'train':
