@@ -1990,6 +1990,18 @@ if __name__ == '__main__':
                              'for older runs whose metadata did not record '
                              'fixed_layout). Rebuilds the terrain shell from '
                              'env_seed so occupancy is not scored against water.')
+    parser.add_argument('--island', action='store_true',
+                        help='Force island-border world reconstruction for the '
+                             'occupancy background + walkable/coverage mask (use '
+                             'for older runs whose metadata did not record island). '
+                             'Combine with --island_seed/--island_fill/'
+                             '--island_roughness to match the run.')
+    parser.add_argument('--island_seed', type=int, default=-1,
+                        help='Island shape seed for --island (default -1).')
+    parser.add_argument('--island_fill', type=float, default=0.72,
+                        help='Island land fraction for --island (default 0.72).')
+    parser.add_argument('--island_roughness', type=float, default=0.16,
+                        help='Island coastline roughness for --island (default 0.16).')
     parser.add_argument('--from_results', default=None,
                         help='Path to an existing layer_decode_results.pkl '
                              '(or layer_decode_checkpoint.pkl). Regenerates '
@@ -2084,6 +2096,14 @@ if __name__ == '__main__':
                 metadata = {'area': [32, 32]}
             metadata['fixed_layout'] = True
             print("  [override] Occupancy background/mask uses fixed_layout=True")
+        if args.island:
+            if metadata is None:
+                metadata = {'area': [32, 32]}
+            metadata['island'] = {'fill': args.island_fill,
+                                  'roughness': args.island_roughness,
+                                  'seed': args.island_seed}
+            print(f"  [override] Occupancy background/mask uses island="
+                  f"{metadata['island']}")
 
         if args.min_bbox > 0:
             n_before = len(lightweight_eps)
@@ -2129,6 +2149,13 @@ if __name__ == '__main__':
             metadata = dict(metadata or {'area': [32, 32]})
             metadata['fixed_layout'] = True
             print("  [override] Occupancy background/mask uses fixed_layout=True")
+        if args.island:
+            metadata = dict(metadata or {'area': [32, 32]})
+            metadata['island'] = {'fill': args.island_fill,
+                                  'roughness': args.island_roughness,
+                                  'seed': args.island_seed}
+            print(f"  [override] Occupancy background/mask uses island="
+                  f"{metadata['island']}")
         print(f"  {len(episodes)} episodes loaded")
         if metadata:
             print(f"  Metadata: {metadata}")

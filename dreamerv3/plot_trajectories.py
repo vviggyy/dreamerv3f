@@ -420,17 +420,19 @@ _RESOURCE_MATS = ('tree', 'stone', 'coal', 'iron', 'diamond', 'water', 'lava')
 def _extract_resource_tiles(metadata=None):
     """Return {material_name: (xs, ys)} tile coords for resource materials on the
     Crafter world map, in the same (x, y) frame as player_pos / the occupancy grid
-    (mat_map[x, y] -> plotted at data coord (x, y)). {} on failure."""
+    (mat_map[x, y] -> plotted at data coord (x, y)). {} on failure.
+
+    Reconstructs the SAME world as _render_crafter_world / _extract_walkable_mask
+    (island + fixed_layout patches applied when metadata records them), so resource
+    markers (esp. water) land on the true tiles. Without this, stock worldgen draws
+    water across an island's interior — markers that don't match the background."""
     try:
-        import crafter
+        import crafter  # noqa: F401  (ensure crafter importable before reconstruct)
     except ImportError:
         return {}
-    env_seed = metadata.get('env_seed') if metadata else None
-    if env_seed is None:
-        env_seed = 42
-    area = tuple(metadata.get('area', (64, 64))) if metadata else (64, 64)
-    env = crafter.Env(area=area, view=(9, 9), size=(64, 64), seed=env_seed)
-    env.reset()
+    env, _ = _reconstruct_crafter_env(metadata)
+    if env is None:
+        return {}
     world = env._world
     mat_map = world._mat_map
     inv = {v: k for k, v in world._mat_names.items() if v}
@@ -1167,6 +1169,17 @@ def main():
                              'did not record fixed_layout). Terrain shell is '
                              'rebuilt from env_seed so water lands on the right '
                              'tiles.')
+    parser.add_argument('--island', action='store_true',
+                        help='Force island-border world reconstruction for the '
+                             'background/mask (use for older runs whose metadata '
+                             'did not record island). Combine with --island_seed/'
+                             '--island_fill/--island_roughness to match the run.')
+    parser.add_argument('--island_seed', type=int, default=-1,
+                        help='Island shape seed for --island (default -1).')
+    parser.add_argument('--island_fill', type=float, default=0.72,
+                        help='Island land fraction for --island (default 0.72).')
+    parser.add_argument('--island_roughness', type=float, default=0.16,
+                        help='Island coastline roughness for --island (default 0.16).')
     args = parser.parse_args()
 
     print(f"Loading episodes from {args.data}")
@@ -1175,6 +1188,13 @@ def main():
         metadata = dict(metadata or {})
         metadata['fixed_layout'] = True
         print("  [override] Reconstructing background/mask with fixed_layout=True")
+    if args.island:
+        metadata = dict(metadata or {})
+        metadata['island'] = {'fill': args.island_fill,
+                              'roughness': args.island_roughness,
+                              'seed': args.island_seed}
+        print(f"  [override] Reconstructing background/mask with island="
+              f"{metadata['island']}")
     if args.max_episodes > 0:
         episodes = episodes[:args.max_episodes]
     print(f"Loaded {len(episodes)} episodes")
