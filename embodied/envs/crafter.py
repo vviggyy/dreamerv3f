@@ -215,19 +215,24 @@ class Crafter(embodied.Env):
       area = self._custom_area
     self._env = crafter.Env(
         area=area, size=size, reward=(task == 'reward'), seed=seed)
+    self._disable_mobs = disable_mobs
     if disable_mobs:
-      # Wrap _balance_chunk to remove hostile mobs (zombies, skeletons)
-      # while keeping passive ones (cows). Works by letting the original
-      # spawning run, then scrubbing hostiles from the world object list.
+      # Remove hostile mobs (zombies, skeletons, arrows) while keeping passive
+      # ones (cows). Hostiles enter the world from two places: procedural
+      # worldgen at reset, and the per-chunk balancer that runs every 10 steps.
+      # We scrub after BOTH so no hostile ever survives to attack the player:
+      #   - reset scrub (in step()'s reset branch) removes worldgen-placed
+      #     hostiles before the first step. Without it they live until the first
+      #     balance tick at step 10 and land ~10 steps of combat damage.
+      #   - balance wrap removes balancer-spawned hostiles in the same tick they
+      #     spawn. Since balancing runs AFTER obj.update() in env.step(), the
+      #     scrub happens before the next step, so they never update()/attack.
       import crafter.objects as _co
-      _hostile = (_co.Zombie, _co.Skeleton, _co.Arrow)
+      self._hostile_types = (_co.Zombie, _co.Skeleton, _co.Arrow)
       _orig_balance = self._env._balance_chunk
       def _peaceful_balance(chunk, objs):
         _orig_balance(chunk, objs)
-        world = self._env._world
-        for obj in list(world._objects):
-          if isinstance(obj, _hostile):
-            world.remove(obj)
+        self._scrub_hostiles()
       self._env._balance_chunk = _peaceful_balance
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
@@ -365,6 +370,11 @@ class Crafter(embodied.Env):
         # island. Composes with the fixed_layout seeds stamped just above.
         self._env._world._island = self._island_params
       image = self._env.reset()
+      if self._disable_mobs:
+        # Kill worldgen-placed hostiles before the first step (see __init__),
+        # then re-render so the is_first frame shows no zombies/skeletons.
+        self._scrub_hostiles()
+        image = self._env._obs()
       if self._custom_grid is not None:
         self._load_custom_world()
         image = self._env._obs()
@@ -389,6 +399,18 @@ class Crafter(embodied.Env):
         image, reward, info,
         is_last=self._done,
         is_terminal=info['discount'] == 0)
+
+  def _scrub_hostiles(self):
+    """Remove every hostile mob (zombie/skeleton/arrow) from the world.
+
+    Called after worldgen (reset) and after each balancer tick so hostiles
+    never survive to attack the player under ``disable_mobs``. ``_objects``
+    may contain ``None`` holes; isinstance skips them.
+    """
+    world = self._env._world
+    for obj in list(world._objects):
+      if isinstance(obj, self._hostile_types):
+        world.remove(obj)
 
   def _relocate_player(self):
     """Move player to a random walkable, unoccupied tile."""

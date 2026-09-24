@@ -273,6 +273,24 @@ size50m_bigwm: &size50m_bigwm
   agent.enc.simple.depth: 16
   agent.enc.simple.units: 256
 
+# Custom asymmetric preset: 25m baseline (crafter_small size25m) with a modestly
+# larger world model, policy/value left AT 25m, and a heavily shrunk encoder.
+# Same merge semantics as size50m_bigwm: the `<<: *size25m` regex overrides apply
+# FIRST, then the literal leaf keys below win (Config.update expands regexes in
+# insertion order). Net is SMALLER than 25m overall (the encoder cut dominates),
+# but with a slightly beefier RSSM — the opposite tradeoff from a big encoder.
+#   - world model (RSSM): bumped 25m -> 50m width (deter 3072->4096, classes 24->32)
+#   - policy + value: UNCHANGED from 25m (384 units, 3 layers) — no override needed
+#   - encoder conv depth + vector-MLP: cut hard (24->8 depth, 384->128 units)
+#   - decoder: stays at 25m (depth 24) so reconstruction quality is preserved
+bigwm_smallnet: &bigwm_smallnet
+  <<: *size25m
+  agent.dyn.rssm.deter: 4096
+  agent.dyn.rssm.hidden: 512
+  agent.dyn.rssm.classes: 32
+  agent.enc.simple.depth: 8
+  agent.enc.simple.units: 128
+
 minecraft:
   task: minecraft_diamond
 
