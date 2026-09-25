@@ -273,16 +273,33 @@ size50m_bigwm: &size50m_bigwm
   agent.enc.simple.depth: 16
   agent.enc.simple.units: 256
 
-# Custom asymmetric preset: 25m baseline (crafter_small size25m) with a modestly
-# larger world model, policy/value left AT 25m, and a heavily shrunk encoder.
+# Custom asymmetric preset: 25m baseline (crafter_small size25m) with a bumped
+# world model, policy/value layer-configs left AT 25m, and a heavily shrunk encoder.
 # Same merge semantics as size50m_bigwm: the `<<: *size25m` regex overrides apply
 # FIRST, then the literal leaf keys below win (Config.update expands regexes in
-# insertion order). Net is SMALLER than 25m overall (the encoder cut dominates),
-# but with a slightly beefier RSSM — the opposite tradeoff from a big encoder.
+# insertion order).
 #   - world model (RSSM): bumped 25m -> 50m width (deter 3072->4096, classes 24->32)
-#   - policy + value: UNCHANGED from 25m (384 units, 3 layers) — no override needed
+#   - policy + value: layer configs UNCHANGED from 25m (384 units, 3 layers) — but
+#     their param counts still GROW (they read [deter+stoch]; wider deter widens
+#     their first layer). No override needed.
 #   - encoder conv depth + vector-MLP: cut hard (24->8 depth, 384->128 units)
 #   - decoder: stays at 25m (depth 24) so reconstruction quality is preserved
+# NOTE: this net is BIGGER than 25m, not smaller (23.5M -> 35.1M measured). The
+# name is "big-WM, small-encoder", NOT "small overall". Cutting the encoder saves
+# almost nothing because it's a conv net (weight sharing): enc 0.49M -> 0.056M, a
+# 0.44M saving that is swamped by the WM bump (+9.66M in dyn) plus the downstream
+# head inflation the wider deter causes (+~2.4M across dec/pol/val/rew/con). The
+# param mass lives in the RSSM (~57-66%) and the MLP heads (~30%), NOT perception,
+# so trimming enc/dec cannot make a meaningfully smaller net. Measured breakdown:
+#   module   size25m   bigwm_smallnet
+#   dyn      13.45M    23.10M   (+9.66M, the WM bump — dyngru ~ 3*deter^2/blocks)
+#   dec       2.86M     3.25M   (+0.39M, wider feature input, NOT cut)
+#   val       1.87M     2.36M   (+0.49M, wider feature input)
+#   pol       1.78M     2.27M   (+0.49M, wider feature input)
+#   rew       1.57M     2.07M   (+0.50M, wider feature input)
+#   con       1.48M     1.97M   (+0.49M, wider feature input)
+#   enc       0.49M     0.056M  (-0.44M, the only saving — conv net is param-light)
+#   TOTAL    23.5M     35.1M    (+11.6M)
 bigwm_smallnet: &bigwm_smallnet
   <<: *size25m
   agent.dyn.rssm.deter: 4096
@@ -290,6 +307,29 @@ bigwm_smallnet: &bigwm_smallnet
   agent.dyn.rssm.classes: 32
   agent.enc.simple.depth: 8
   agent.enc.simple.units: 128
+
+# Asymmetric-head presets: 25m baseline with the SAME encoder cut as
+# bigwm_smallnet (depth 8, units 128) and the world model left AT 25m (deter
+# 3072, hidden 384, classes 24 — NOT bumped, unlike bigwm_smallnet). Exactly ONE
+# actor-critic head is widened to 1024 units / 4 layers (vs 384 units / 3 layers
+# at 25m); the other head stays at 25m. Same merge semantics as bigwm_smallnet:
+# `<<: *size25m` regex overrides (.*\.units, .*\.depth) apply FIRST, then the
+# literal leaf keys below win (Config.update expands regexes in insertion order).
+#   - bigpol: policy -> 1024 units / 4 layers; value stays 25m (384/3)
+#   - bigval: value  -> 1024 units / 4 layers; policy stays 25m (384/3)
+bigpol: &bigpol
+  <<: *size25m
+  agent.enc.simple.depth: 8
+  agent.enc.simple.units: 128
+  agent.policy.units: 1024
+  agent.policy.layers: 4
+
+bigval: &bigval
+  <<: *size25m
+  agent.enc.simple.depth: 8
+  agent.enc.simple.units: 128
+  agent.value.units: 1024
+  agent.value.layers: 4
 
 minecraft:
   task: minecraft_diamond
