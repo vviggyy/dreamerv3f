@@ -21,6 +21,7 @@ Usage:
 import argparse
 import pickle
 import pathlib
+from collections import Counter
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,6 +29,46 @@ import numpy as np
 from run_info import log_run_info
 # Reuse the training-plot palette + tech-tree tiers so the two figures match.
 from plot_training import ACHIEVEMENT_TIERS, TIER_LABELS, ACHIEVEMENT_COLORS, BLUE, GREEN
+# Reuse the observational vital analysis' death-cause heuristic + palette so the
+# eval summary and vital_dynamics label deaths identically.
+from vital_dynamics import (cause_of_death, get_vitals, get_actions,
+                            HURT_CAUSE_COLORS)
+
+
+SURVIVED = 'survived (timeout)'
+# Extend the hurt-cause palette with a "survived" color (green = alive).
+CAUSE_COLORS = dict(HURT_CAUSE_COLORS)
+CAUSE_COLORS[SURVIVED] = GREEN
+
+
+def _cause_color(cause):
+    """Color for a cause label, incl. combined necessities ('hunger+thirst' ->
+    color of the first component)."""
+    if cause in CAUSE_COLORS:
+        return CAUSE_COLORS[cause]
+    first = cause.split('+')[0]
+    return CAUSE_COLORS.get(first, CAUSE_COLORS['unknown'])
+
+
+def episode_causes(episodes):
+    """Per-episode cause-of-death / survival label using vital_dynamics'
+    heuristic. Returns a list aligned with `episodes`, or None if NO episode
+    recorded the per-step vitals (older pkls) so callers fall back to plain plots."""
+    causes, any_vitals = [], False
+    for ep in episodes:
+        vitals = get_vitals(ep)
+        if vitals is None:
+            causes.append('unknown')
+            continue
+        any_vitals = True
+        causes.append(cause_of_death(vitals, get_actions(ep)))
+    return causes if any_vitals else None
+
+
+def _cause_order(causes):
+    """Distinct causes ordered by frequency (most common first) for stable
+    stacking + legend order."""
+    return [c for c, _ in Counter(causes).most_common()]
 
 
 def load_episodes(data_path):
@@ -69,16 +110,49 @@ def _hist(ax, vals, color, xlabel, title):
     _style(ax)
 
 
-def plot_length_hist(ax, lengths):
-    _hist(ax, lengths, GREEN, 'Episode length (steps)', 'Episode length distribution')
+def plot_length_hist(ax, lengths, causes=None):
+    """Episode-length histogram. If `causes` is given, stack by cause of death
+    (green = survived-to-timeout, hurt colors otherwise)."""
+    if causes is None:
+        _hist(ax, lengths, GREEN, 'Episode length (steps)', 'Episode length distribution')
+        return
+    lengths = np.asarray(lengths, dtype=float)
+    causes = np.asarray(causes)
+    n = len(lengths)
+    bins = max(10, min(40, int(np.sqrt(n)) * 2))
+    edges = np.histogram_bin_edges(lengths, bins=bins)
+    order = _cause_order(causes)
+    groups = [lengths[causes == c] for c in order]
+    ax.hist(groups, bins=edges, stacked=True,
+            color=[_cause_color(c) for c in order],
+            label=[f'{c} ({len(g)})' for c, g in zip(order, groups)],
+            alpha=0.85, edgecolor='white', linewidth=0.3)
+    mean, med = float(np.mean(lengths)), float(np.median(lengths))
+    ax.axvline(mean, color='#ff0011', linewidth=1.6, label=f'mean {mean:.1f}')
+    ax.axvline(med, color='#111111', linewidth=1.4, linestyle='--', label=f'median {med:.1f}')
+    ax.set_xlabel('Episode length (steps)', fontsize=11)
+    ax.set_ylabel('# episodes', fontsize=11)
+    ax.set_title(f'Episode length by cause of death  (n={n})', fontsize=12)
+    ax.legend(fontsize=7, frameon=False)
+    _style(ax)
 
 
 def plot_reward_hist(ax, rewards):
     _hist(ax, rewards, BLUE, 'Total reward', 'Total reward distribution')
 
 
-def plot_length_vs_reward(ax, lengths, rewards):
-    ax.scatter(lengths, rewards, s=14, alpha=0.5, color='#0088aa', edgecolor='none')
+def plot_length_vs_reward(ax, lengths, rewards, causes=None):
+    lengths = np.asarray(lengths, dtype=float)
+    rewards = np.asarray(rewards, dtype=float)
+    if causes is None:
+        ax.scatter(lengths, rewards, s=14, alpha=0.5, color='#0088aa', edgecolor='none')
+    else:
+        causes = np.asarray(causes)
+        for c in _cause_order(causes):
+            m = causes == c
+            ax.scatter(lengths[m], rewards[m], s=16, alpha=0.6,
+                       color=_cause_color(c), edgecolor='none', label=c)
+        ax.legend(fontsize=7, frameon=False, title='cause')
     if len(lengths) > 2:
         r = np.corrcoef(lengths, rewards)[0, 1]
         ax.set_title(f'Length vs reward  (Pearson r={r:.2f})', fontsize=12)
@@ -142,6 +216,8 @@ def main():
                         help='Output dir (default: alongside --data)')
     parser.add_argument('--no_achievements', action='store_true',
                         help='Skip the per-achievement panel')
+    parser.add_argument('--no_cause', action='store_true',
+                        help='Do not color the length/scatter panels by cause of death')
     args = parser.parse_args()
 
     episodes, meta = load_episodes(args.data)
@@ -149,6 +225,12 @@ def main():
         raise SystemExit('No episodes found.')
     lengths = [ep['length'] for ep in episodes]
     rewards = [ep.get('total_reward', float(np.sum(ep['reward']))) for ep in episodes]
+
+    # Cause of death per episode (None if no episode recorded per-step vitals).
+    causes = None if args.no_cause else episode_causes(episodes)
+    if causes is None and not args.no_cause:
+        print('  (no per-step vitals in these episodes -> plain length plots, '
+              'no cause-of-death coloring)')
 
     save_dir = pathlib.Path(args.save) if args.save else pathlib.Path(args.data)
     if save_dir.suffix == '.pkl':
@@ -168,9 +250,9 @@ def main():
         fig, (ax_len, ax_rew, ax_sc) = plt.subplots(1, 3, figsize=(16, 4.5))
         fig.subplots_adjust(wspace=0.3)
 
-    plot_length_hist(ax_len, lengths)
+    plot_length_hist(ax_len, lengths, causes)
     plot_reward_hist(ax_rew, rewards)
-    plot_length_vs_reward(ax_sc, lengths, rewards)
+    plot_length_vs_reward(ax_sc, lengths, rewards, causes)
 
     # Title carries the run context (world, area, island/fixed-layout, n episodes).
     bits = [f'{len(episodes)} eval episodes']
@@ -185,6 +267,10 @@ def main():
         bits.append('fixed_layout')
     bits.append(f'len: mean {np.mean(lengths):.0f} / median {np.median(lengths):.0f} '
                 f'/ [{min(lengths)}, {max(lengths)}]')
+    if causes is not None:
+        n_surv = sum(1 for c in causes if c == SURVIVED)
+        bits.append(f'survived {n_surv}/{len(causes)} '
+                    f'({100.0 * n_surv / len(causes):.0f}%)')
     fig.suptitle('Eval trajectory summary  —  ' + '  |  '.join(bits),
                  fontsize=13, y=0.98)
 
@@ -199,7 +285,9 @@ def main():
                         'length_median': float(np.median(lengths)),
                         'length_min': int(min(lengths)),
                         'length_max': int(max(lengths)),
-                        'reward_mean': float(np.mean(rewards))})
+                        'reward_mean': float(np.mean(rewards)),
+                        'cause_of_death_counts': (dict(Counter(causes))
+                                                  if causes is not None else None)})
 
 
 if __name__ == '__main__':
