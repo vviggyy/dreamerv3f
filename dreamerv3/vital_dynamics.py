@@ -261,13 +261,52 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
     drops = classify_health_drops(vitals, actions)
     death = cause_of_death(vitals, actions)
 
-    # Figure: wide time-series (left) + square world map (right).
+    # Figure: left column split into two stacked time-series panels sharing the
+    # step axis — TOP = events (achievement unlocks + vital-relevant actions),
+    # BOTTOM = vital trajectories — and a square world map (right) spanning both.
     ts_w = max(8, T / 40)
-    fig = plt.figure(figsize=(ts_w + 5.2, 5.0))
-    gs = fig.add_gridspec(1, 2, width_ratios=[ts_w, 5.0], wspace=0.12)
-    ax = fig.add_subplot(gs[0, 0])
-    ax_map = fig.add_subplot(gs[0, 1])
+    fig = plt.figure(figsize=(ts_w + 5.2, 6.0))
+    gs = fig.add_gridspec(2, 2, width_ratios=[ts_w, 5.0],
+                          height_ratios=[1.0, 1.4], wspace=0.12, hspace=0.10)
+    ax_ev = fig.add_subplot(gs[0, 0])                    # achievements + actions
+    ax = fig.add_subplot(gs[1, 0], sharex=ax_ev)         # vital trajectories
+    ax_map = fig.add_subplot(gs[:, 1])                   # world map (both rows)
 
+    # ---- TOP: event lanes inside the frame — an achievements lane (one dot per
+    #          unlock, colored vital-relevant vs other, with only the FIRST
+    #          occurrence of each achievement name labeled) above the do/sleep
+    #          action lanes. ----
+    ACH_LANE, DO_LANE, SLEEP_LANE = 0.80, 0.45, 0.15
+    labeled_ach = {'vital': False, 'other': False}
+    for name, when in unlocks.items():
+        if not when:
+            continue
+        is_vital = name in VITAL_EVENTS
+        col = 'k' if is_vital else '0.6'
+        grp = 'vital' if is_vital else 'other'
+        lbl = f'achievement ({grp})' if not labeled_ach[grp] else None
+        labeled_ach[grp] = True
+        ax_ev.scatter(when, np.full(len(when), ACH_LANE), marker='o',
+                      s=20 if is_vital else 12, color=col, edgecolors='none',
+                      zorder=4, label=lbl)
+        # label only the first unlock of each achievement type
+        ax_ev.annotate(name, xy=(when[0], ACH_LANE + 0.04), rotation=90,
+                       fontsize=6, va='bottom', ha='center', color=col)
+    a_marks = {'do': DO_LANE, 'sleep': SLEEP_LANE}
+    for aname, aidx in VITAL_ACTIONS.items():
+        tsx = steps[actions == aidx] if len(actions) == T else []
+        if len(tsx):
+            ax_ev.scatter(tsx, np.full(len(tsx), a_marks[aname]), marker='|',
+                          s=40, color=ACTION_CLASS_COLORS.get(aname, 'k'),
+                          label=f'action={aname}')
+    ax_ev.set_ylim(0, 1.0)
+    ax_ev.set_yticks([ACH_LANE, DO_LANE, SLEEP_LANE])
+    ax_ev.set_yticklabels(['achiev.', 'do', 'sleep'], fontsize=7)
+    ax_ev.set_ylabel('events')
+    ax_ev.tick_params(labelbottom=False)                 # x shared with bottom
+    ax_ev.legend(loc='upper right', fontsize=6.5, ncol=3, framealpha=0.9)
+
+    # ---- BOTTOM: vital trajectories (+ cause-of-hurt markers on health). ----
     for v in VITALS:
         ax.plot(steps, vitals[v], color=VITAL_COLORS[v], lw=1.6, label=v)
     ax.set_ylim(-0.5, VITAL_MAX + 0.5)
@@ -275,17 +314,6 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
     ax.set_xlabel('step')
     ax.set_xlim(0, max(1, T - 1))
 
-    # achievement unlock markers (vertical lines + rotated labels)
-    for name, when in unlocks.items():
-        for t in when:
-            is_vital = name in VITAL_EVENTS
-            ax.axvline(t, color='k' if is_vital else '0.7',
-                       ls='--' if is_vital else ':', lw=0.9, alpha=0.7, zorder=0)
-            ax.annotate(name, xy=(t, VITAL_MAX + 0.4), rotation=90, fontsize=6,
-                        va='bottom', ha='center',
-                        color='k' if is_vital else '0.5')
-
-    # cause-of-hurt markers on the health curve (one legend entry per cause)
     hy = np.asarray(vitals['health'])
     seen = set()
     for (t, d, cause) in drops:
@@ -294,16 +322,6 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
         seen.add(cause)
         ax.scatter([t], [hy[t]], marker='v', color=col, s=48, edgecolors='k',
                    linewidths=0.5, zorder=6, label=lbl)
-
-    # vital-relevant action lane below the axis
-    ymarks = {'do': -0.25, 'sleep': -0.42}
-    for aname, aidx in VITAL_ACTIONS.items():
-        tsx = steps[actions == aidx] if len(actions) == T else []
-        if len(tsx):
-            ax.scatter(tsx, np.full(len(tsx), ymarks[aname]), marker='|',
-                       s=40, color=ACTION_CLASS_COLORS.get(aname, 'k'),
-                       label=f'action={aname}')
-
     ax.legend(loc='lower right', fontsize=6.5, ncol=3, framealpha=0.9)
 
     if not _draw_episode_map(ax_map, ep, meta, drops):
