@@ -167,7 +167,35 @@ def _install_worldgen_patch():
       for y in range(world.area[1]):
         wg._set_object(world, (x, y), player, tunnels)
 
+  # Initial (world-gen) cow-density lever: scale the per-tile cow placement
+  # probability by ``world._cow_worldgen_scale`` (default 1.0 -> stock). Stock
+  # crafter places a cow on an eligible grass tile when uniform() > 0.985
+  # (~1.5%); scaling S raises that to ~1.5*S%. Patched at the module level so
+  # BOTH the stock fallback generate_world and the patched one above pick it up
+  # (they call the bare module global ``_set_object``). Draws exactly one
+  # uniform() per eligible tile just like stock, so fixed_layout/content-seed
+  # RNG streams are preserved — only the cow threshold moves. No-op at scale 1.0.
+  _orig_set_object = wg._set_object
+  def _set_object(world, pos, player, tunnels):
+    scale = getattr(world, '_cow_worldgen_scale', 1.0)
+    if scale == 1.0:
+      return _orig_set_object(world, pos, player, tunnels)
+    x, y = pos
+    uniform = world.random.uniform
+    dist = np.sqrt((x - player.pos[0]) ** 2 + (y - player.pos[1]) ** 2)
+    material, _ = world[x, y]
+    cow_thresh = 1.0 - min(1.0, scale * (1.0 - 0.985))
+    if material not in wg.constants.walkable:
+      pass
+    elif dist > 3 and material == 'grass' and uniform() > cow_thresh:
+      world.add(wg.objects.Cow(world, (x, y)))
+    elif dist > 10 and uniform() > 0.993:
+      world.add(wg.objects.Zombie(world, (x, y), player))
+    elif material == 'path' and tunnels[x, y] and uniform() > 0.95:
+      world.add(wg.objects.Skeleton(world, (x, y), player))
+
   wg.generate_world = generate_world
+  wg._set_object = _set_object
   wg._worldgen_patched = True
 
 
@@ -204,7 +232,9 @@ class Crafter(embodied.Env):
                logdir=None, seed=None, fixed_seed=False, random_spawn=False,
                egocentric_view=None, disable_mobs=False, upright_sprites=False,
                custom_world='', fixed_layout=False, island_border=False,
-               island_fill=0.72, island_roughness=0.16, island_seed=-1):
+               island_fill=0.72, island_roughness=0.16, island_seed=-1,
+               cow_spawn_prob=0.01, cow_span_dist=5, cow_target_scale=1.0,
+               cow_worldgen_scale=1.0):
     assert task in ('reward', 'noreward')
     # Parse custom world file before creating env (may override area)
     self._custom_world = custom_world
@@ -234,6 +264,38 @@ class Crafter(embodied.Env):
         _orig_balance(chunk, objs)
         self._scrub_hostiles()
       self._env._balance_chunk = _peaceful_balance
+    # --- Cow-density boost (crafter balancer knobs) -----------------------
+    # Raise cow availability to test whether hunger deaths are driven by cow
+    # scarcity. All three runtime levers live in crafter's per-chunk balancer
+    # (``_balance_object`` for Cow, run every ~10 steps):
+    #   cow_spawn_prob   -> per-tick spawn-attempt probability (the "rate")
+    #   cow_span_dist    -> spawn exclusion radius from the player (lower=closer)
+    #   cow_target_scale -> multiplies the (min,max) per-chunk cow population cap
+    # We intercept ``_balance_object`` at the INSTANCE level so only the Cow
+    # call is changed (zombie/skeleton untouched). It composes with the
+    # disable_mobs ``_balance_chunk`` wrap above — both are instance attrs on
+    # self._env, so the peaceful wrapper's ``self._balance_object(...)`` resolves
+    # to this override. A one-off initial-population lever (cow_worldgen_scale)
+    # is applied separately in worldgen (see _install_worldgen_patch). Defaults
+    # equal stock crafter, so this is a no-op unless a knob is changed.
+    self._cow_worldgen_scale = cow_worldgen_scale
+    if (cow_spawn_prob != 0.01 or cow_span_dist != 5 or
+        cow_target_scale != 1.0):
+      import crafter.objects as _co
+      _Cow = _co.Cow
+      _orig_bo = self._env._balance_object
+      _csp, _csd, _cts = cow_spawn_prob, cow_span_dist, cow_target_scale
+      def _cow_balance_object(chunk, objs, cls, material, span_dist, despan_dist,
+                              spawn_prob, despawn_prob, ctor, target_fn):
+        if cls is _Cow:
+          span_dist, spawn_prob = _csd, _csp
+          _tf = target_fn
+          target_fn = lambda num, space: tuple(_cts * np.asarray(_tf(num, space)))
+        return _orig_bo(chunk, objs, cls, material, span_dist, despan_dist,
+                        spawn_prob, despawn_prob, ctor, target_fn)
+      self._env._balance_object = _cow_balance_object
+    if cow_worldgen_scale != 1.0:
+      _install_worldgen_patch()
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
     self._logdir and self._logdir.mkdir()
@@ -369,6 +431,10 @@ class Crafter(embodied.Env):
         # Read by the patched worldgen inside self._env.reset() to carve the
         # island. Composes with the fixed_layout seeds stamped just above.
         self._env._world._island = self._island_params
+      if self._cow_worldgen_scale != 1.0:
+        # Read by the patched worldgen._set_object (inside self._env.reset()) to
+        # scale the one-off initial cow density. No-op at the stock scale of 1.0.
+        self._env._world._cow_worldgen_scale = self._cow_worldgen_scale
       image = self._env.reset()
       if self._disable_mobs:
         # Kill worldgen-placed hostiles before the first step (see __init__),

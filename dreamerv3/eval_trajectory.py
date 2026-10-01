@@ -108,11 +108,16 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     if current_achievements:
       episode_data['achievements'].append(current_achievements.copy())
 
-    # Record world model activations if available (legacy replay_context path)
-    if 'dyn/deter' in tran:
-      episode_data['deter'].append(tran['dyn/deter'].copy())
-    if 'dyn/stoch' in tran:
-      episode_data['stoch'].append(tran['dyn/stoch'].copy())
+    # Record world model activations if available (legacy replay_context path).
+    # Skipped when record_activations=False (e.g. vitals/achievement-only runs):
+    # deter/stoch are ~12KB/step each, so dropping them roughly halves what's
+    # left after the per-layer act/* arrays are off — matters for disk AND for
+    # the RAM used when vital_dynamics loads every episode at once.
+    if et_config.record_activations:
+      if 'dyn/deter' in tran:
+        episode_data['deter'].append(tran['dyn/deter'].copy())
+      if 'dyn/stoch' in tran:
+        episode_data['stoch'].append(tran['dyn/stoch'].copy())
 
     # Record per-layer activations (record_activations=True path)
     for key in tran:
