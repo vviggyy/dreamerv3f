@@ -79,7 +79,11 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     episode_data['player_pos'].append(tran['player_pos'].copy())
     episode_data['reward'].append(float(tran['reward']))
     episode_data['action'].append(tran.get('action', 0))
-    episode_data['image'].append(tran['image'].copy())
+    # image is ~12KB/step and vital_dynamics never uses it (its world map is
+    # reconstructed from the env seed, not the recorded frame). Skip it in
+    # vitals_only mode so long more-cows episodes don't blow up RAM/disk.
+    if not et_config.vitals_only:
+      episode_data['image'].append(tran['image'].copy())
     if 'log/player_facing_x' in tran:
       facing = np.array([tran['log/player_facing_x'], tran['log/player_facing_y']], dtype=np.int32)
       episode_data['player_facing'].append(facing)

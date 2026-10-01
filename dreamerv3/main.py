@@ -128,8 +128,9 @@ def main(argv=None):
         args)
 
   elif config.script == 'eval_trajectory':
-    config = config.update(
-        {'agent.record_activations': config.eval_trajectory.record_activations})
+    _rec_act = (config.eval_trajectory.record_activations
+                and not config.eval_trajectory.vitals_only)
+    config = config.update({'agent.record_activations': _rec_act})
     from . import eval_trajectory
     eval_trajectory.eval_trajectory(
         bind(make_agent, config),

@@ -51,6 +51,7 @@ defaults:
     save_path: ''
     load_checkpoint: True
     record_activations: True   # False -> skip per-layer activations (enc/cnn*, ~88% of traj size); use for vitals/achievement-only runs
+    vitals_only: False         # True -> record ONLY pos/vitals/actions/achievements (also drops image + forces no activations); ~1.5KB/step for vital_dynamics-only runs
 
   dream_decode:
     num_batches: 5
