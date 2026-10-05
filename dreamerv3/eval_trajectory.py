@@ -94,6 +94,15 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       if key in tran:
         episode_data[f'vital_{vital}'].append(int(tran[key]))
 
+    # Record cow counters per step, if logged (crafter wrapper emits these).
+    # num_cows_worldgen is constant across the episode (initial supply); world/
+    # inview track the live total + the subset the agent can actually see. Tiny
+    # ints, so recorded even in vitals_only mode.
+    for cow_key in ('num_cows_worldgen', 'num_cows_world', 'num_cows_inview'):
+      key = f'log/{cow_key}'
+      if key in tran:
+        episode_data[cow_key].append(int(tran[key]))
+
     # Track achievements and print when new ones are unlocked
     current_achievements = {}
     for key in tran:
@@ -117,7 +126,7 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
     # deter/stoch are ~12KB/step each, so dropping them roughly halves what's
     # left after the per-layer act/* arrays are off — matters for disk AND for
     # the RAM used when vital_dynamics loads every episode at once.
-    if et_config.record_activations:
+    if et_config.record_activations and not et_config.vitals_only:
       if 'dyn/deter' in tran:
         episode_data['deter'].append(tran['dyn/deter'].copy())
       if 'dyn/stoch' in tran:

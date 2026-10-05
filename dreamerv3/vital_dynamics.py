@@ -46,6 +46,8 @@ VITAL_COLORS = {
     'health': '#d62728', 'food': '#ff7f0e',
     'drink': '#1f77b4', 'energy': '#2ca02c'}
 VITAL_MAX = 9  # crafter vitals are ints in [0, 9]
+# Cow-count overlay color (distinct from the vital + hunger-cause palette).
+COW_COLOR = '#5c4033'
 
 # crafter action index -> name (crafter.constants.actions)
 ACTION_NAMES = [
@@ -178,6 +180,21 @@ def get_vitals(ep):
 
 def get_actions(ep):
     return np.asarray(ep.get('action', [])).astype(int).ravel()
+
+
+def get_cows(ep):
+    """Return {worldgen, world, inview: np.array(T)} per-step cow counts (from the
+    crafter wrapper's log/num_cows_* counters), or None if not recorded (older
+    pkls). worldgen is constant within an episode (initial supply); world is the
+    live map total; inview is the subset the agent can actually see."""
+    src = {'worldgen': 'num_cows_worldgen', 'world': 'num_cows_world',
+           'inview': 'num_cows_inview'}
+    out = {}
+    for k, key in src.items():
+        if key not in ep or len(ep[key]) == 0:
+            return None
+        out[k] = np.asarray(ep[key])
+    return out
 
 
 def get_unlocks(ep):
@@ -314,6 +331,22 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
     ax.set_xlabel('step')
     ax.set_xlim(0, max(1, T - 1))
 
+    # ---- Cows over time: overlay the in-view cow count (exposure) on a twin
+    #      axis. In-view is what the agent can act on (eat_cow -> food), so it
+    #      reads naturally against the food trace; the much larger world-total
+    #      and worldgen supply go in the title instead of crowding the axis. ----
+    cows = get_cows(ep)
+    ax_cow = None
+    if cows is not None:
+        ax_cow = ax.twinx()
+        ax_cow.plot(steps, cows['inview'], color=COW_COLOR, lw=1.4, alpha=0.9,
+                    label='cows in view', zorder=1)
+        ax_cow.fill_between(steps, 0, cows['inview'], color=COW_COLOR, alpha=0.12)
+        ax_cow.set_ylim(0, max(1, int(np.max(cows['inview']))) + 1)
+        ax_cow.set_ylabel('cows in view', color=COW_COLOR, fontsize=9)
+        ax_cow.tick_params(axis='y', labelcolor=COW_COLOR)
+        ax_cow.spines['top'].set_visible(False)
+
     hy = np.asarray(vitals['health'])
     seen = set()
     for (t, d, cause) in drops:
@@ -322,15 +355,26 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
         seen.add(cause)
         ax.scatter([t], [hy[t]], marker='v', color=col, s=48, edgecolors='k',
                    linewidths=0.5, zorder=6, label=lbl)
-    ax.legend(loc='lower right', fontsize=6.5, ncol=3, framealpha=0.9)
+    handles, labels = ax.get_legend_handles_labels()
+    if ax_cow is not None:
+        h2, l2 = ax_cow.get_legend_handles_labels()
+        handles += h2
+        labels += l2
+    ax.legend(handles, labels, loc='lower right', fontsize=6.5, ncol=3,
+              framealpha=0.9)
 
     if not _draw_episode_map(ax_map, ep, meta, drops):
         ax_map.axis('off')
         ax_map.text(0.5, 0.5, 'world map\nunavailable', ha='center', va='center',
                     fontsize=10, color='grey', transform=ax_map.transAxes)
 
+    cow_bit = ''
+    if cows is not None:
+        cow_bit = (f'  ·  cows: worldgen {int(cows["worldgen"][0])}, '
+                   f'world~{np.mean(cows["world"]):.0f}, in-view~{np.mean(cows["inview"]):.1f}')
     fig.suptitle(
-        f'Episode {ep.get("episode", ep_idx)}  ·  length={T}  ·  outcome: {death}',
+        f'Episode {ep.get("episode", ep_idx)}  ·  length={T}  ·  outcome: {death}'
+        f'{cow_bit}',
         fontsize=12, fontweight='bold', y=1.04)
     out = Path(save_path) / f'vitals_episode_{ep_idx:03d}.png'
     fig.savefig(out, dpi=130, bbox_inches='tight')

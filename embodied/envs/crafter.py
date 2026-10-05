@@ -299,6 +299,13 @@ class Crafter(embodied.Env):
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
     self._logdir and self._logdir.mkdir()
+    # Stable Cow type reference for the per-episode / per-step cow counters
+    # (log/num_cows_worldgen, log/num_cows_world, log/num_cows_inview). Imported
+    # unconditionally so counting works regardless of the disable_mobs/boost
+    # branches above. _worldgen_cows is stamped at each reset (see step()).
+    import crafter.objects as _co_count
+    self._cow_type = _co_count.Cow
+    self._worldgen_cows = 0
     self._episode = 0
     self._length = None
     self._reward = None
@@ -398,6 +405,18 @@ class Crafter(embodied.Env):
     # player.inventory the status bar is drawn from (see state_probe.py).
     spaces.update({
         f'log/{v}': elements.Space(np.int32) for v in self._VITALS})
+    # Cow counters (log/ prefix = ignored by agent). num_cows_worldgen is the
+    # one-off count placed at reset (initial supply, constant across the episode);
+    # num_cows_world is the live total anywhere on the map (tracks balancer
+    # spawn/despawn); num_cows_inview is the subset inside the agent's view window
+    # (actual exposure). worldgen deviates from world/inview because the balancer
+    # regulates toward ~1-2.5 cows/chunk map-wide every 10 steps, and the agent
+    # only sees its local window — see CLAUDE.md / cow-density discussion.
+    spaces.update({
+        'log/num_cows_worldgen': elements.Space(np.int32),
+        'log/num_cows_world': elements.Space(np.int32),
+        'log/num_cows_inview': elements.Space(np.int32),
+    })
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     spaces.update({
         f'log/achievement_{k}': elements.Space(np.int32)
@@ -452,6 +471,10 @@ class Crafter(embodied.Env):
       mat, _ = self._env._world[player_pos]
       assert mat in ('grass', 'path', 'sand'), (
           f"Player spawned on non-walkable material '{mat}' at {player_pos}")
+      # Initial cow supply: count once after all reset-time mutations (worldgen +
+      # disable_mobs scrub + custom world + respawn). Constant for the episode;
+      # re-emitted every step via _obs so it lands in each trajectory row.
+      self._worldgen_cows = self._count_cows()[0]
       return self._obs(image, 0.0, {}, is_first=True)
     act = action['action']
     if self._egocentric_view is not None and act in (1, 2, 3, 4):
@@ -465,6 +488,30 @@ class Crafter(embodied.Env):
         image, reward, info,
         is_last=self._done,
         is_terminal=info['discount'] == 0)
+
+  def _count_cows(self):
+    """Return (total cows in world, cows inside the agent's view window).
+
+    Total iterates ``world._objects`` (may contain None holes; isinstance skips
+    them), matching _scrub_hostiles. In-view uses the half-extent of the render
+    view centered on the player — the egocentric V×V window when ego mode is on,
+    else crafter's allocentric ``_view`` (default 9×9). A cow at (cx,cy) is
+    in-view when |cx-px| <= vhx and |cy-py| <= vhy. This is the exposure measure;
+    it deviates from the world total because most of the 64×64 map is off-screen.
+    """
+    world = self._env._world
+    cows = [o for o in world._objects if isinstance(o, self._cow_type)]
+    total = len(cows)
+    if self._egocentric_view is not None:
+      vhx = vhy = self._ego_V // 2
+    else:
+      vx, vy = self._env._view
+      vhx, vhy = vx // 2, vy // 2
+    px, py = self._env._player.pos
+    inview = sum(
+        1 for o in cows
+        if abs(o.pos[0] - px) <= vhx and abs(o.pos[1] - py) <= vhy)
+    return total, inview
 
   def _scrub_hostiles(self):
     """Remove every hostile mob (zombie/skeleton/arrow) from the world.
@@ -614,6 +661,13 @@ class Crafter(embodied.Env):
     inv = self._env._player.inventory
     obs.update({
         f'log/{v}': np.int32(inv.get(v, 0)) for v in self._VITALS})
+    # Cow counters: worldgen (constant, stamped at reset) + live world/in-view.
+    world_cows, inview_cows = self._count_cows()
+    obs.update({
+        'log/num_cows_worldgen': np.int32(self._worldgen_cows),
+        'log/num_cows_world': np.int32(world_cows),
+        'log/num_cows_inview': np.int32(inview_cows),
+    })
     return obs
 
   def _render_egocentric(self, raw_image):

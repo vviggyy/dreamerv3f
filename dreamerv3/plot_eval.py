@@ -163,6 +163,73 @@ def plot_length_vs_reward(ax, lengths, rewards, causes=None):
     _style(ax)
 
 
+def episode_cow_summary(episodes):
+    """Per-episode cow stats from the crafter wrapper's log/num_cows_* counters.
+
+    Returns a dict of arrays aligned with `episodes`:
+      worldgen    -- initial supply placed at reset (constant within an episode)
+      world_mean  -- mean live cows anywhere on the map over the episode
+      inview_mean -- mean cows inside the agent's view window (actual exposure)
+    or None if NO episode recorded cow counts (older pkls). NaN-fills episodes
+    that happen to lack the fields so the arrays stay length-aligned."""
+    wg, wm, im = [], [], []
+    any_cows = False
+    for ep in episodes:
+        has = 'num_cows_worldgen' in ep and len(ep['num_cows_worldgen'])
+        if has:
+            any_cows = True
+            wg.append(float(np.mean(ep['num_cows_worldgen'])))  # constant -> mean==value
+            wm.append(float(np.mean(ep['num_cows_world']))
+                      if 'num_cows_world' in ep and len(ep['num_cows_world']) else np.nan)
+            im.append(float(np.mean(ep['num_cows_inview']))
+                      if 'num_cows_inview' in ep and len(ep['num_cows_inview']) else np.nan)
+        else:
+            wg.append(np.nan); wm.append(np.nan); im.append(np.nan)
+    if not any_cows:
+        return None
+    return {'worldgen': np.array(wg), 'world_mean': np.array(wm),
+            'inview_mean': np.array(im)}
+
+
+def plot_cows(ax, cows, lengths):
+    """Episode length vs per-episode cow counts — the combined cow metric.
+
+    Two measures on a twin axis because they live on very different scales:
+    world-total (supply/realized, ~tens) on the left, in-view (exposure, ~units)
+    on the right. Pearson r of length against each is in the title; in-view is the
+    causal variable of interest (what the agent can actually act on), world-total
+    is context. Worldgen mean is annotated too (initial supply)."""
+    lengths = np.asarray(lengths, dtype=float)
+    world, inview, wg = cows['world_mean'], cows['inview_mean'], cows['worldgen']
+
+    ax.scatter(lengths, world, s=16, alpha=0.5, color='#999999',
+               edgecolor='none', label='world total (ep mean)')
+    ax.set_xlabel('Episode length (steps)', fontsize=11)
+    ax.set_ylabel('Cows in world (ep mean)', fontsize=11, color='#666666')
+    ax.tick_params(axis='y', labelcolor='#666666')
+    _style(ax)
+
+    ax2 = ax.twinx()
+    ax2.scatter(lengths, inview, s=16, alpha=0.65, color='#0088aa',
+                edgecolor='none', label='in-view (ep mean)')
+    ax2.set_ylabel('Cows in view (ep mean)', fontsize=11, color='#0088aa')
+    ax2.tick_params(axis='y', labelcolor='#0088aa')
+    ax2.spines['top'].set_visible(False)
+
+    def _r(y):
+        m = np.isfinite(lengths) & np.isfinite(y)
+        return np.corrcoef(lengths[m], y[m])[0, 1] if m.sum() > 2 else float('nan')
+    r_in, r_wld = _r(inview), _r(world)
+    ax.set_title(
+        f'Episode length vs cows  (r$_{{inview}}$={r_in:.2f}, '
+        f'r$_{{world}}$={r_wld:.2f})\n'
+        f'means — worldgen {np.nanmean(wg):.0f} | world {np.nanmean(world):.0f} | '
+        f'in-view {np.nanmean(inview):.2f}', fontsize=11)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8, frameon=False, loc='best')
+
+
 def compute_success_rates(episodes):
     """Fraction of episodes that unlocked each achievement at least once."""
     names = sorted({k for ep in episodes for k in ep.get('final_achievements', {})})
@@ -218,6 +285,8 @@ def main():
                         help='Skip the per-achievement panel')
     parser.add_argument('--no_cause', action='store_true',
                         help='Do not color the length/scatter panels by cause of death')
+    parser.add_argument('--no_cows', action='store_true',
+                        help='Skip the per-episode cow-count panel')
     args = parser.parse_args()
 
     episodes, meta = load_episodes(args.data)
@@ -232,27 +301,40 @@ def main():
         print('  (no per-step vitals in these episodes -> plain length plots, '
               'no cause-of-death coloring)')
 
+    # Per-episode cow counts (None if these episodes predate the cow counters).
+    cows = None if args.no_cows else episode_cow_summary(episodes)
+    if cows is None and not args.no_cows:
+        print('  (no cow counters in these episodes -> skipping cow panel; '
+              're-run eval_trajectory to record log/num_cows_*)')
+    show_cows = cows is not None
+
     save_dir = pathlib.Path(args.save) if args.save else pathlib.Path(args.data)
     if save_dir.suffix == '.pkl':
         save_dir = save_dir.parent
     save_dir.mkdir(parents=True, exist_ok=True)
 
     show_ach = not args.no_achievements and any(ep.get('final_achievements') for ep in episodes)
+    # Left column always has length/reward/length-vs-reward; the cow panel is a
+    # 4th left panel when cow data is present.
+    n_left = 3 + (1 if show_cows else 0)
     if show_ach:
-        fig = plt.figure(figsize=(15, 9))
-        gs = fig.add_gridspec(3, 2, width_ratios=[1.0, 1.15], hspace=0.42, wspace=0.28)
-        ax_len = fig.add_subplot(gs[0, 0])
-        ax_rew = fig.add_subplot(gs[1, 0])
-        ax_sc = fig.add_subplot(gs[2, 0])
+        fig = plt.figure(figsize=(15, 3 * n_left))
+        gs = fig.add_gridspec(n_left, 2, width_ratios=[1.0, 1.15],
+                              hspace=0.42, wspace=0.28)
+        left_axes = [fig.add_subplot(gs[i, 0]) for i in range(n_left)]
         ax_ach = fig.add_subplot(gs[:, 1])
         plot_achievement_rates(ax_ach, episodes)
     else:
-        fig, (ax_len, ax_rew, ax_sc) = plt.subplots(1, 3, figsize=(16, 4.5))
+        fig, axs = plt.subplots(1, n_left, figsize=(5.3 * n_left, 4.5))
+        left_axes = list(np.atleast_1d(axs))
         fig.subplots_adjust(wspace=0.3)
 
+    ax_len, ax_rew, ax_sc = left_axes[0], left_axes[1], left_axes[2]
     plot_length_hist(ax_len, lengths, causes)
     plot_reward_hist(ax_rew, rewards)
     plot_length_vs_reward(ax_sc, lengths, rewards, causes)
+    if show_cows:
+        plot_cows(left_axes[3], cows, lengths)
 
     # Title carries the run context (world, area, island/fixed-layout, n episodes).
     bits = [f'{len(episodes)} eval episodes']
@@ -287,7 +369,13 @@ def main():
                         'length_max': int(max(lengths)),
                         'reward_mean': float(np.mean(rewards)),
                         'cause_of_death_counts': (dict(Counter(causes))
-                                                  if causes is not None else None)})
+                                                  if causes is not None else None),
+                        'cows_worldgen_mean': (float(np.nanmean(cows['worldgen']))
+                                               if show_cows else None),
+                        'cows_world_mean': (float(np.nanmean(cows['world_mean']))
+                                            if show_cows else None),
+                        'cows_inview_mean': (float(np.nanmean(cows['inview_mean']))
+                                             if show_cows else None)})
 
 
 if __name__ == '__main__':
