@@ -68,6 +68,7 @@ def get_episode(cache_dir, ep_num):
 
 # Pure rendering helpers live in the backend (no Streamlit -> unit-testable).
 draw_trajectory = B.draw_trajectory
+draw_vitals_timeline = B.draw_vitals_timeline
 vitals_at = B.vitals_at
 
 
@@ -76,7 +77,7 @@ vitals_at = B.vitals_at
 # ============================================================================
 
 st.set_page_config(page_title='DreamerV3 behavior dashboard', layout='wide')
-st.title('🌍 Environment → Behavior dashboard')
+st.title('Environment → Behavior dashboard')
 st.caption('Load a net · set env knobs · generate trajectories · scrub frames')
 
 ss = st.session_state
@@ -289,3 +290,15 @@ with right:
     plt.close(fig)
     st.caption(f"cause of death: **{eps[chosen]['cause_of_death']}** · "
                f"world_seed {index.get('world_seed')}")
+
+# ---- vitals timeline (full width, step cursor tracks the scrubber) ----
+st.subheader('Vitals over time')
+vfig = draw_vitals_timeline(ep, step)
+if vfig is not None:
+    st.pyplot(vfig, use_container_width=True)
+    plt.close(vfig)
+    st.caption('Top: achievement unlocks + do/sleep actions. Bottom: vital '
+               'traces (0-9) with cause-of-hurt markers on health. Red line = '
+               'current step.')
+else:
+    st.caption('No vitals recorded for this episode.')

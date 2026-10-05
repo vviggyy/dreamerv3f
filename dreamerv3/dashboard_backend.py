@@ -444,6 +444,98 @@ def draw_trajectory(ep, step, area=None):
     return fig
 
 
+def unlocks_when(ep):
+    """From the per-step ragged `unlocks` list, build {achievement: [steps]}."""
+    out = defaultdict(list)
+    for t, names in enumerate(ep.get('unlocks', []) or []):
+        for name in (names or []):
+            out[name].append(t)
+    return dict(out)
+
+
+def draw_vitals_timeline(ep, step):
+    """Two stacked, x-shared panels over the episode step axis with a vertical
+    cursor at `step` (advances as the scrubber moves):
+      TOP  — event lanes: achievement unlocks (vital-relevant vs other) and the
+             vital-relevant raw actions (do / sleep).
+      BOTTOM — the four vital traces (0-9), with cause-of-hurt markers on health.
+    Returns a matplotlib Figure (caller closes it). Returns None if the episode
+    has no recorded vitals.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from dreamerv3.vital_dynamics import (
+        VITAL_ACTIONS, VITAL_EVENTS, ACTION_CLASS_COLORS, HURT_CAUSE_COLORS,
+        classify_health_drops)
+
+    vitals = {v: ep.get(f'vital_{v}') for v in VITALS}
+    if not all(vitals[v] is not None and len(vitals[v]) for v in VITALS):
+        return None
+    vitals = {v: np.asarray(vitals[v]).astype(int) for v in VITALS}
+    T = len(vitals['health'])
+    steps = np.arange(T)
+    actions = np.asarray(ep.get('action', []))
+    drops = classify_health_drops(vitals, actions)
+    unlocks = unlocks_when(ep)
+    s = int(np.clip(step, 0, T - 1))
+
+    fig, (ax_ev, ax) = plt.subplots(
+        2, 1, figsize=(7.5, 4.2), sharex=True, layout='constrained',
+        gridspec_kw=dict(height_ratios=[1.0, 1.6]))
+
+    # ---- TOP: event lanes ----
+    ACH_LANE, DO_LANE, SLEEP_LANE = 0.80, 0.45, 0.15
+    labeled_ach = {'vital': False, 'other': False}
+    for name, when in unlocks.items():
+        if not when:
+            continue
+        is_vital = name in VITAL_EVENTS
+        col = 'k' if is_vital else '0.6'
+        grp = 'vital' if is_vital else 'other'
+        lbl = f'achievement ({grp})' if not labeled_ach[grp] else None
+        labeled_ach[grp] = True
+        ax_ev.scatter(when, np.full(len(when), ACH_LANE), marker='o',
+                      s=22 if is_vital else 13, color=col, edgecolors='none',
+                      zorder=4, label=lbl)
+        ax_ev.annotate(name, xy=(when[0], ACH_LANE + 0.04), rotation=90,
+                       fontsize=6, va='bottom', ha='center', color=col)
+    a_marks = {'do': DO_LANE, 'sleep': SLEEP_LANE}
+    for aname, aidx in VITAL_ACTIONS.items():
+        tsx = steps[actions == aidx] if len(actions) == T else []
+        if len(tsx):
+            ax_ev.scatter(tsx, np.full(len(tsx), a_marks[aname]), marker='|',
+                          s=40, color=ACTION_CLASS_COLORS.get(aname, 'k'),
+                          label=f'action={aname}')
+    ax_ev.set_ylim(0, 1.0)
+    ax_ev.set_yticks([ACH_LANE, DO_LANE, SLEEP_LANE])
+    ax_ev.set_yticklabels(['achiev.', 'do', 'sleep'], fontsize=7)
+    ax_ev.set_ylabel('events', fontsize=8)
+    ax_ev.legend(loc='upper right', fontsize=6.0, ncol=3, framealpha=0.9)
+
+    # ---- BOTTOM: vital traces + hurt markers ----
+    for v in VITALS:
+        ax.plot(steps, vitals[v], color=VITAL_COLORS[v], lw=1.6, label=v)
+    ax.set_ylim(-0.5, 9.5)
+    ax.set_ylabel('vital level (0-9)', fontsize=8)
+    ax.set_xlabel('step')
+    ax.set_xlim(0, max(1, T - 1))
+    hy = vitals['health']
+    seen = set()
+    for (t, d, cause) in drops:
+        col = HURT_CAUSE_COLORS.get(cause.split('+')[0], 'k')
+        lbl = f'hurt: {cause}' if cause not in seen else None
+        seen.add(cause)
+        ax.scatter([t], [hy[t]], marker='v', color=col, s=42, edgecolors='k',
+                   linewidths=0.5, zorder=6, label=lbl)
+    ax.legend(loc='lower right', fontsize=6.0, ncol=3, framealpha=0.9)
+
+    # ---- step cursor on both panels ----
+    for a in (ax_ev, ax):
+        a.axvline(s, color='red', lw=1.3, alpha=0.9, zorder=10)
+    return fig
+
+
 def list_runs(logdir, cache_root=None):
     """Enumerate previously-generated cached runs for a logdir (for a 'reload
     past run' picker). Returns list of (cache_dir, index) newest-first."""
