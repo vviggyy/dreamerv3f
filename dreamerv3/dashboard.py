@@ -69,6 +69,7 @@ def get_episode(cache_dir, ep_num):
 # Pure rendering helpers live in the backend (no Streamlit -> unit-testable).
 draw_trajectory = B.draw_trajectory
 draw_vitals_timeline = B.draw_vitals_timeline
+draw_event_strip = B.draw_event_strip
 vitals_at = B.vitals_at
 
 
@@ -235,17 +236,36 @@ ep = get_episode(cache_dir, ep_num)
 T = int(ep['length'])
 
 # ---- step scrubber ----
-sc = st.columns([1, 1, 8, 1, 1])
+events = B.episode_events(ep)
+event_steps = sorted({e['step'] for e in events})
+
+# Buttons run before the slider widget is instantiated, so they can nudge
+# ss['step'] (which seeds the slider's value) this rerun.
+sc = st.columns([1, 1, 1, 6, 1, 1, 1])
+cur = ss.get('step', 0)
 if sc[0].button('⏮', help='first'):
     ss['step'] = 0
-if sc[1].button('◀', help='prev'):
-    ss['step'] = max(0, ss.get('step', 0) - 1)
-if sc[3].button('▶', help='next'):
-    ss['step'] = min(T - 1, ss.get('step', 0) + 1)
-if sc[4].button('⏭', help='last'):
+if sc[1].button('◀', help='prev step'):
+    ss['step'] = max(0, cur - 1)
+if sc[2].button('◀⚑', help='prev event'):
+    prev_ev = [e for e in event_steps if e < cur]
+    if prev_ev:
+        ss['step'] = prev_ev[-1]
+if sc[4].button('⚑▶', help='next event'):
+    next_ev = [e for e in event_steps if e > cur]
+    if next_ev:
+        ss['step'] = next_ev[0]
+if sc[5].button('▶', help='next step'):
+    ss['step'] = min(T - 1, cur + 1)
+if sc[6].button('⏭', help='last'):
     ss['step'] = T - 1
-step = sc[2].slider('step', 0, max(T - 1, 0), min(ss.get('step', 0), T - 1),
+step = sc[3].slider('step', 0, max(T - 1, 0), min(ss.get('step', 0), T - 1),
                     key='step')
+
+# ---- event strip (markers aligned to the step axis, cursor at current step) ----
+esfig = draw_event_strip(ep, step, events=events)
+st.pyplot(esfig, use_container_width=True)
+plt.close(esfig)
 
 # ---- panels ----
 left, right = st.columns([1, 1])

@@ -453,6 +453,88 @@ def unlocks_when(ep):
     return dict(out)
 
 
+def episode_events(ep):
+    """Notable events for the scrubber strip / jump controls, as a sorted list of
+    {step, kind, label, color, marker}:
+      * hurt     — health-drop steps, colored by inferred cause (▼)
+      * drink    — first collect_drink unlock (●)
+      * eat      — first eat_cow / eat_plant unlock (●)
+      * wake     — first wake_up unlock (●)
+      * defeat   — first defeat_zombie / defeat_skeleton unlock (★)
+      * achievement — first unlock of any other achievement (★)
+    Achievements use the FIRST step they were unlocked this episode (first-time)."""
+    from dreamerv3.vital_dynamics import (
+        HURT_CAUSE_COLORS, classify_health_drops)
+    events = []
+    vitals = {v: ep.get(f'vital_{v}') for v in VITALS}
+    if all(vitals[v] is not None and len(vitals[v]) for v in VITALS):
+        vv = {v: np.asarray(vitals[v]).astype(int) for v in VITALS}
+        actions = np.asarray(ep.get('action', []))
+        for (t, d, cause) in classify_health_drops(vv, actions):
+            events.append({
+                'step': int(t), 'kind': 'hurt', 'label': f'hurt: {cause}',
+                'color': HURT_CAUSE_COLORS.get(cause.split('+')[0], 'k'),
+                'marker': 'v'})
+    # first-time achievement unlocks, categorized
+    cat = {
+        'collect_drink': ('drink', VITAL_COLORS['drink'], 'o'),
+        'eat_cow': ('eat', VITAL_COLORS['food'], 'o'),
+        'eat_plant': ('eat', VITAL_COLORS['food'], 'o'),
+        'wake_up': ('wake', VITAL_COLORS['energy'], 'o'),
+    }
+    for name, whens in unlocks_when(ep).items():
+        if not whens:
+            continue
+        t0 = int(whens[0])
+        if name in cat:
+            kind, color, marker = cat[name]
+        elif name.startswith('defeat_'):
+            kind, color, marker = 'defeat', VITAL_COLORS['health'], '*'
+        else:
+            kind, color, marker = 'achievement', '0.4', '*'
+        events.append({'step': t0, 'kind': kind, 'label': name,
+                       'color': color, 'marker': marker})
+    events.sort(key=lambda e: e['step'])
+    return events
+
+
+def draw_event_strip(ep, step, events=None):
+    """A thin one-lane strip over the episode step axis marking notable events
+    (hurt / drink / eat / wake / defeat / achievement), with a red cursor at
+    `step`. Meant to sit directly under the scrubber so markers align with the
+    slider track. Returns a matplotlib Figure (caller closes it)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    if events is None:
+        events = episode_events(ep)
+    T = int(ep.get('length') or len(ep.get('player_pos', [])) or 1)
+    s = int(np.clip(step, 0, max(T - 1, 0)))
+
+    fig, ax = plt.subplots(figsize=(7.5, 0.9), layout='constrained')
+    ax.axhline(0, color='0.85', lw=1.0, zorder=0)
+    seen = set()
+    for e in events:
+        lbl = e['kind'] if e['kind'] not in seen else None
+        seen.add(e['kind'])
+        ax.scatter([e['step']], [0], marker=e['marker'], s=60, color=e['color'],
+                   edgecolors='k', linewidths=0.4, zorder=3, label=lbl)
+    ax.axvline(s, color='red', lw=1.6, zorder=5)
+    ax.set_xlim(-0.5, max(1, T - 1) + 0.5)
+    ax.set_ylim(-1, 1)
+    ax.margins(x=0)
+    ax.set_yticks([])
+    ax.set_xlabel('step', fontsize=8)
+    ax.tick_params(labelsize=7)
+    for sp in ('top', 'right', 'left'):
+        ax.spines[sp].set_visible(False)
+    if seen:
+        ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.0),
+                  ncol=len(seen), fontsize=6.5, framealpha=0.9,
+                  handletextpad=0.2, columnspacing=0.8)
+    return fig
+
+
 def draw_vitals_timeline(ep, step):
     """Two stacked, x-shared panels over the episode step axis with a vertical
     cursor at `step` (advances as the scrubber moves):
