@@ -82,6 +82,9 @@ KNOB_DEFAULTS = {
     'cow_span_dist': 5,
     'cow_target_scale': 1.0,
     'cow_worldgen_scale': 1.0,
+    'mob_spawn_prob_scale': 1.0,
+    'mob_target_scale': 1.0,
+    'mob_worldgen_scale': 1.0,
     'egocentric_view': 0,
 }
 

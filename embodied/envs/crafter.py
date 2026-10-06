@@ -177,21 +177,28 @@ def _install_worldgen_patch():
   # RNG streams are preserved — only the cow threshold moves. No-op at scale 1.0.
   _orig_set_object = wg._set_object
   def _set_object(world, pos, player, tunnels):
-    scale = getattr(world, '_cow_worldgen_scale', 1.0)
-    if scale == 1.0:
+    cow_scale = getattr(world, '_cow_worldgen_scale', 1.0)
+    mob_scale = getattr(world, '_mob_worldgen_scale', 1.0)
+    if cow_scale == 1.0 and mob_scale == 1.0:
       return _orig_set_object(world, pos, player, tunnels)
     x, y = pos
     uniform = world.random.uniform
     dist = np.sqrt((x - player.pos[0]) ** 2 + (y - player.pos[1]) ** 2)
     material, _ = world[x, y]
-    cow_thresh = 1.0 - min(1.0, scale * (1.0 - 0.985))
+    # Scale each creature's placement probability by shifting its uniform()
+    # threshold: stock places when uniform() > t (prob 1-t); scaling by S gives
+    # prob S*(1-t), i.e. threshold 1-S*(1-t). S=0 -> threshold 1.0 -> never. The
+    # if/elif draw order is identical to stock so content-seed RNG is preserved.
+    cow_thresh = 1.0 - min(1.0, cow_scale * (1.0 - 0.985))
+    zombie_thresh = 1.0 - min(1.0, mob_scale * (1.0 - 0.993))
+    skeleton_thresh = 1.0 - min(1.0, mob_scale * (1.0 - 0.95))
     if material not in wg.constants.walkable:
       pass
     elif dist > 3 and material == 'grass' and uniform() > cow_thresh:
       world.add(wg.objects.Cow(world, (x, y)))
-    elif dist > 10 and uniform() > 0.993:
+    elif dist > 10 and uniform() > zombie_thresh:
       world.add(wg.objects.Zombie(world, (x, y), player))
-    elif material == 'path' and tunnels[x, y] and uniform() > 0.95:
+    elif material == 'path' and tunnels[x, y] and uniform() > skeleton_thresh:
       world.add(wg.objects.Skeleton(world, (x, y), player))
 
   wg.generate_world = generate_world
@@ -234,7 +241,9 @@ class Crafter(embodied.Env):
                custom_world='', fixed_layout=False, island_border=False,
                island_fill=0.72, island_roughness=0.16, island_seed=-1,
                cow_spawn_prob=0.01, cow_span_dist=5, cow_target_scale=1.0,
-               cow_worldgen_scale=1.0, vital_reward=False):
+               cow_worldgen_scale=1.0, mob_spawn_prob_scale=1.0,
+               mob_target_scale=1.0, mob_worldgen_scale=1.0,
+               vital_reward=False):
     assert task in ('reward', 'noreward')
     # Reward shaping: stock crafter rewards only the health delta (±0.1/point,
     # i.e. (health-last_health)/10) plus +1 per new achievement. `vital_reward`
@@ -289,22 +298,47 @@ class Crafter(embodied.Env):
     # is applied separately in worldgen (see _install_worldgen_patch). Defaults
     # equal stock crafter, so this is a no-op unless a knob is changed.
     self._cow_worldgen_scale = cow_worldgen_scale
-    if (cow_spawn_prob != 0.01 or cow_span_dist != 5 or
-        cow_target_scale != 1.0):
+    # --- Hostile-mob density (crafter balancer knobs) ---------------------
+    # Make the threat level tunable so a run can learn to avoid hostiles while
+    # still getting room to explore/eat/drink/mine without constant combat. All
+    # knobs are UNIFIED scales over BOTH zombies and skeletons, applied as
+    # multipliers on crafter's stock per-chunk balancer so its natural dynamics
+    # are preserved (e.g. zombies still track darkness through their target_fn —
+    # the scale just amplifies/damps the whole night curve):
+    #   mob_spawn_prob_scale -> x the per-tick spawn-attempt probability (rate)
+    #   mob_target_scale     -> x the (min,max) per-chunk population cap
+    #                           (0 -> balancer holds zero hostiles; 2 -> double)
+    #   mob_worldgen_scale    -> x the one-off initial hostile placement at reset
+    #                           (applied in worldgen, mirrors cow_worldgen_scale)
+    # disable_mobs still takes precedence: its _balance_chunk wrap scrubs every
+    # hostile after balancing regardless of these scales.
+    self._mob_worldgen_scale = mob_worldgen_scale
+    cow_changed = (cow_spawn_prob != 0.01 or cow_span_dist != 5 or
+                   cow_target_scale != 1.0)
+    mob_changed = (mob_spawn_prob_scale != 1.0 or mob_target_scale != 1.0)
+    # A single instance-level _balance_object handles Cow (cow knobs) and
+    # Zombie/Skeleton (mob knobs); other classes pass through untouched.
+    if cow_changed or mob_changed:
       import crafter.objects as _co
-      _Cow = _co.Cow
+      _Cow, _Zombie, _Skeleton = _co.Cow, _co.Zombie, _co.Skeleton
       _orig_bo = self._env._balance_object
       _csp, _csd, _cts = cow_spawn_prob, cow_span_dist, cow_target_scale
-      def _cow_balance_object(chunk, objs, cls, material, span_dist, despan_dist,
-                              spawn_prob, despawn_prob, ctor, target_fn):
-        if cls is _Cow:
+      _msps, _mts = mob_spawn_prob_scale, mob_target_scale
+      def _scaled_balance_object(chunk, objs, cls, material, span_dist,
+                                 despan_dist, spawn_prob, despawn_prob, ctor,
+                                 target_fn):
+        if cls is _Cow and cow_changed:
           span_dist, spawn_prob = _csd, _csp
           _tf = target_fn
           target_fn = lambda num, space: tuple(_cts * np.asarray(_tf(num, space)))
+        elif cls in (_Zombie, _Skeleton) and mob_changed:
+          spawn_prob = spawn_prob * _msps
+          _tf = target_fn
+          target_fn = lambda num, space: tuple(_mts * np.asarray(_tf(num, space)))
         return _orig_bo(chunk, objs, cls, material, span_dist, despan_dist,
                         spawn_prob, despawn_prob, ctor, target_fn)
-      self._env._balance_object = _cow_balance_object
-    if cow_worldgen_scale != 1.0:
+      self._env._balance_object = _scaled_balance_object
+    if cow_worldgen_scale != 1.0 or mob_worldgen_scale != 1.0:
       _install_worldgen_patch()
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
@@ -469,6 +503,9 @@ class Crafter(embodied.Env):
         # Read by the patched worldgen._set_object (inside self._env.reset()) to
         # scale the one-off initial cow density. No-op at the stock scale of 1.0.
         self._env._world._cow_worldgen_scale = self._cow_worldgen_scale
+      if self._mob_worldgen_scale != 1.0:
+        # Same hook for the one-off initial hostile-mob (zombie/skeleton) density.
+        self._env._world._mob_worldgen_scale = self._mob_worldgen_scale
       image = self._env.reset()
       if self._disable_mobs:
         # Kill worldgen-placed hostiles before the first step (see __init__),

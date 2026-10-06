@@ -134,6 +134,20 @@ with st.sidebar:
     k['cow_worldgen_scale'] = st.slider('cow_worldgen_scale', 0.5, 5.0, 1.0, 0.5,
                                         help='Initial worldgen density (stock 1).')
 
+    st.markdown('**Hostile mobs** (zombies + skeletons)')
+    mob_help = ('All scales apply to zombies AND skeletons; zombies still '
+                'track darkness (scale multiplies the night curve). '
+                'disable_mobs overrides these.')
+    k['mob_target_scale'] = st.slider('mob_target_scale', 0.0, 3.0, 1.0, 0.25,
+                                      help='Population cap multiplier. 0 = no '
+                                           'ongoing hostiles, 2 = double. ' + mob_help)
+    k['mob_spawn_prob_scale'] = st.slider('mob_spawn_prob_scale', 0.0, 3.0, 1.0, 0.25,
+                                          help='Spawn-rate multiplier (how fast the '
+                                               'cap refills). ' + mob_help)
+    k['mob_worldgen_scale'] = st.slider('mob_worldgen_scale', 0.0, 3.0, 1.0, 0.25,
+                                        help='Initial worldgen hostile density at '
+                                             'spawn. ' + mob_help)
+
     st.markdown('**View**')
     ego = st.select_slider('egocentric_view', options=[0, 5, 7, 9, 11], value=9,
                            help='0 = full world render; odd N = N×N egocentric.')
