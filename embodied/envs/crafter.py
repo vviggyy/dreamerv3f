@@ -234,8 +234,18 @@ class Crafter(embodied.Env):
                custom_world='', fixed_layout=False, island_border=False,
                island_fill=0.72, island_roughness=0.16, island_seed=-1,
                cow_spawn_prob=0.01, cow_span_dist=5, cow_target_scale=1.0,
-               cow_worldgen_scale=1.0):
+               cow_worldgen_scale=1.0, vital_reward=False):
     assert task in ('reward', 'noreward')
+    # Reward shaping: stock crafter rewards only the health delta (±0.1/point,
+    # i.e. (health-last_health)/10) plus +1 per new achievement. `vital_reward`
+    # extends the same ±0.1/point scheme to the OTHER vitals (food/drink/energy),
+    # so losing/gaining a point on ANY vital is rewarded identically to health.
+    # Health stays rewarded by crafter natively (no double-count). No-op (stock
+    # reward) unless enabled, and gated on the reward task.
+    self._vital_reward = vital_reward
+    self._reward_enabled = (task == 'reward')
+    self._shaped_vitals = ('food', 'drink', 'energy')  # health is native
+    self._last_vitals = None
     # Parse custom world file before creating env (may override area)
     self._custom_world = custom_world
     self._custom_grid = None
@@ -399,6 +409,11 @@ class Crafter(embodied.Env):
         'player_pos': elements.Space(np.float32, (2,)),
         'log/player_facing_x': elements.Space(np.int32),
         'log/player_facing_y': elements.Space(np.int32),
+        # Day/night cycle. env_step = crafter's internal step counter; daylight in
+        # [0,1] is crafter's rendered lighting (1=noon, ~0=midnight), computed from
+        # env_step with period 300 (crafter.env._update_time). log/ = agent-ignored.
+        'log/env_step': elements.Space(np.int32),
+        'log/daylight': elements.Space(np.float32),
     }
     # Interoceptive vitals (health/food/drink/energy, each 0-9) for trajectory
     # analysis. log/ prefix = ignored by the agent encoder; read from the same
@@ -475,11 +490,22 @@ class Crafter(embodied.Env):
       # disable_mobs scrub + custom world + respawn). Constant for the episode;
       # re-emitted every step via _obs so it lands in each trajectory row.
       self._worldgen_cows = self._count_cows()[0]
+      # Baseline for multi-vital reward shaping (deltas measured from here).
+      self._last_vitals = self._vital_levels()
       return self._obs(image, 0.0, {}, is_first=True)
     act = action['action']
     if self._egocentric_view is not None and act in (1, 2, 3, 4):
       act = self._remap_ego_action(act)
     image, reward, self._done, info = self._env.step(act)
+    if self._vital_reward and self._reward_enabled:
+      # Add ±0.1 per-point delta on food/drink/energy (same /10 scale crafter
+      # uses for health), so every vital is rewarded like health. info['reward']
+      # (log/reward) stays the native crafter reward for comparison.
+      cur = self._vital_levels()
+      bonus = sum(cur[v] - self._last_vitals[v]
+                  for v in self._shaped_vitals) / 10.0
+      reward = reward + bonus
+      self._last_vitals = cur
     self._reward += reward
     self._length += 1
     if self._done and self._logdir:
@@ -488,6 +514,12 @@ class Crafter(embodied.Env):
         image, reward, info,
         is_last=self._done,
         is_terminal=info['discount'] == 0)
+
+  def _vital_levels(self):
+    """Current {food, drink, energy} levels from the live player inventory
+    (the shaped vitals for `vital_reward`; health is rewarded natively)."""
+    inv = self._env._player.inventory
+    return {v: int(inv.get(v, 0)) for v in self._shaped_vitals}
 
   def _count_cows(self):
     """Return (total cows in world, cows inside the agent's view window).
@@ -650,6 +682,9 @@ class Crafter(embodied.Env):
         player_pos=player_pos,
         **{'log/reward': np.float32(info['reward'] if info else 0.0)},
         **{'log/player_facing_x': player_facing[0], 'log/player_facing_y': player_facing[1]},
+        # Day/night: crafter's internal step counter + rendered daylight [0,1].
+        **{'log/env_step': np.int32(self._env._step),
+           'log/daylight': np.float32(self._env._world.daylight)},
     )
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     achievements = {

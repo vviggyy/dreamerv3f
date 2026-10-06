@@ -323,6 +323,11 @@ def generate(model, knobs, num_episodes=16, seed=0, cache_root=None,
             key = f'log/{v}'
             if key in tran:
                 episode_data[f'vital_{v}'].append(int(tran[key]))
+        # Day/night cycle (crafter env step + rendered daylight in [0,1]).
+        if 'log/daylight' in tran:
+            episode_data['daylight'].append(float(tran['log/daylight']))
+        if 'log/env_step' in tran:
+            episode_data['env_step'].append(int(tran['log/env_step']))
 
         # per-step newly-unlocked achievements (diff vs previous step)
         current = {}
@@ -535,6 +540,44 @@ def draw_event_strip(ep, step, events=None):
     return fig
 
 
+def _daylight_series(ep):
+    """Per-step daylight in [0,1] for the episode (1=noon, ~0=midnight).
+
+    Prefers the recorded `daylight` trace; falls back to recomputing it from
+    `env_step` (or the step index) via crafter's formula so older caches without
+    the field still render the cycle."""
+    dl = ep.get('daylight')
+    if dl is not None and len(dl):
+        return np.asarray(dl, dtype=float)
+    T = int(ep.get('length') or len(ep.get('player_pos', [])) or 0)
+    if T <= 0:
+        return None
+    es = ep.get('env_step')
+    steps = np.asarray(es, dtype=float) if (es is not None and len(es)) \
+        else np.arange(T, dtype=float)
+    # crafter.env._update_time: progress=(step/300)%1+0.3; daylight=1-|cos(pi*p)|^3
+    progress = (steps / 300.0) % 1 + 0.3
+    return 1 - np.abs(np.cos(np.pi * progress)) ** 3
+
+
+def _shade_daynight(ax, daylight, T):
+    """Shade an axis's background by the day/night cycle: darker = night.
+
+    Night is painted as a semi-transparent indigo whose opacity tracks
+    (1 - daylight), so daytime stays clear and midnight is darkest. Sits behind
+    all plotted data (negative zorder)."""
+    if daylight is None or len(daylight) == 0:
+        return
+    night = (1.0 - np.clip(np.asarray(daylight, dtype=float), 0, 1)).reshape(1, -1)
+    rgba = np.zeros((1, night.shape[1], 4))
+    rgba[..., 0], rgba[..., 1], rgba[..., 2] = 0.06, 0.06, 0.22  # dark indigo
+    rgba[..., 3] = 0.5 * night[0]  # opacity ~ darkness
+    y0, y1 = ax.get_ylim()
+    ax.imshow(rgba, extent=[0, max(1, T - 1), y0, y1], aspect='auto',
+              origin='lower', zorder=-5, interpolation='nearest')
+    ax.set_ylim(y0, y1)
+
+
 def draw_vitals_timeline(ep, step):
     """Two stacked, x-shared panels over the episode step axis with a vertical
     cursor at `step` (advances as the scrubber moves):
@@ -610,7 +653,17 @@ def draw_vitals_timeline(ep, step):
         seen.add(cause)
         ax.scatter([t], [hy[t]], marker='v', color=col, s=42, edgecolors='k',
                    linewidths=0.5, zorder=6, label=lbl)
-    ax.legend(loc='lower right', fontsize=6.0, ncol=3, framealpha=0.9)
+    # ---- day/night shading behind both panels ----
+    daylight = _daylight_series(ep)
+    for a in (ax_ev, ax):
+        _shade_daynight(a, daylight, T)
+    if daylight is not None and len(daylight):
+        from matplotlib.patches import Patch
+        night_proxy = Patch(facecolor=(0.06, 0.06, 0.22), alpha=0.5, label='night')
+        ax.legend(handles=ax.get_legend_handles_labels()[0] + [night_proxy],
+                  loc='lower right', fontsize=6.0, ncol=3, framealpha=0.9)
+    else:
+        ax.legend(loc='lower right', fontsize=6.0, ncol=3, framealpha=0.9)
 
     # ---- step cursor on both panels ----
     for a in (ax_ev, ax):
