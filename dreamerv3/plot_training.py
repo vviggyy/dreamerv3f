@@ -194,9 +194,8 @@ def plot_episode_score(ax, steps, scores, smooth_window):
     if smooth_window > 1 and len(steps) > smooth_window:
         sx, sy = smooth(steps, scores, smooth_window)
         ax.plot(sx, sy, color=BLUE, linewidth=1.8, label=f'Smoothed (w={smooth_window})')
-    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-    ax.set_ylabel('Score (achievements unlocked)', fontsize=11)
-    ax.set_title('Episode Score', fontsize=13)
+    ax.set_ylabel('Episode reward (Crafter)', fontsize=11)
+    ax.set_title('Episode Score (reward)', fontsize=13)
     ax.legend(fontsize=9, framealpha=0.7)
     style_ax(ax)
 
@@ -337,7 +336,7 @@ def plot_achievement_rates_tiered(ax, records, smooth_window):
     """Per-achievement unlock rate, colored by Crafter tech-tree tier, with each
     line directly labeled at its right end (no legend clutter, no emojis). Line
     style cycles within a tier so same-color lines stay distinguishable."""
-    ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
+    ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/avg$')
     keys = {k for r in records for k in r if ach_pattern.match(k)}
     if not keys:
         ax.text(0.5, 0.5, 'No achievement data in metrics.jsonl', ha='center',
@@ -403,7 +402,7 @@ def plot_achievement_rates_tiered(ax, records, smooth_window):
 
 
 def plot_achievement_rates(ax, records, smooth_window, show_raw=True):
-    ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/sum$')
+    ach_pattern = re.compile(r'^epstats/log/achievement_(.+)/avg$')
     all_keys = set()
     for r in records:
         for k in r:

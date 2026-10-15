@@ -50,6 +50,13 @@ VITAL_COLORS = {
     'health': '#d62728', 'food': '#ff7f0e',
     'drink': '#1f77b4', 'energy': '#2ca02c'}
 VITAL_MAX = 9  # crafter vitals are ints in [0, 9]
+
+# Curated achievements for the subset p(achievement|vital) heatmap
+# (achievement_rate_vs_vital_subset): the early/vital-driven behaviors.
+SUBSET_ACHIEVEMENTS = [
+    'collect_drink', 'collect_sapling', 'collect_stone', 'collect_wood',
+    'defeat_zombie', 'make_wood_pickaxe', 'make_wood_sword',
+]
 # Cow-count overlay color (distinct from the vital + hunger-cause palette).
 COW_COLOR = '#5c4033'
 
@@ -645,21 +652,41 @@ def compute_achievement_rate_vs_vital(episodes, horizon=15):
     return out
 
 
-def plot_achievement_rate_vs_vital(stats, save_path, horizon):
+def plot_achievement_rate_vs_vital(stats, save_path, horizon, ach_subset=None,
+                                   fname='achievement_rate_vs_vital',
+                                   title='p(achievement | vital)'):
     """Heatmap per vital: rows = achievements, cols = vital level, color =
-    P(unlock within horizon | vital). Shared color scale across vitals."""
-    achs = stats[VITALS[0]]['ach']
-    if not achs:
+    P(unlock within horizon | vital). Shared color scale across vitals.
+
+    `ach_subset`: optional list of achievement names to restrict (and order) the
+    rows. Names absent from the data are silently dropped; the row order follows
+    the subset. `fname`/`title` let callers emit a separate figure (e.g. a
+    curated subset) alongside the full heatmap. The color scale is computed over
+    the *displayed* rows so a small subset keeps a readable range."""
+    all_achs = stats[VITALS[0]]['ach']
+    if not all_achs:
         return None
-    vmax = max([np.nanmax(stats[v]['P']) for v in VITALS
-                if np.isfinite(stats[v]['P']).any()] + [1e-9])
+    if ach_subset is not None:
+        pos = {a: i for i, a in enumerate(all_achs)}
+        rows = [pos[a] for a in ach_subset if a in pos]
+        achs = [all_achs[i] for i in rows]
+        if not achs:
+            print(f'  None of the requested achievements present; skipping {fname}')
+            return None
+    else:
+        rows = list(range(len(all_achs)))
+        achs = all_achs
+    # P restricted to the displayed rows, per vital
+    P = {v: stats[v]['P'][rows, :] for v in VITALS}
+    vmax = max([np.nanmax(P[v]) for v in VITALS
+                if np.isfinite(P[v]).any()] + [1e-9])
     fig, axes = plt.subplots(1, len(VITALS), sharey=True,
                              figsize=(3.6 * len(VITALS), max(4.0, 0.32 * len(achs))))
     axes = np.atleast_1d(axes)
     im = None
     for ax, v in zip(axes, VITALS):
         s = stats[v]
-        im = ax.imshow(s['P'], aspect='auto', cmap='magma', vmin=0, vmax=vmax)
+        im = ax.imshow(P[v], aspect='auto', cmap='magma', vmin=0, vmax=vmax)
         ax.set_xticks(range(len(s['levels'])))
         ax.set_xticklabels(s['levels'], fontsize=7)
         ax.set_xlabel('vital level')
@@ -673,9 +700,9 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon):
     axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
     fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
                  label=f'P(unlock ≤ {horizon} steps | vital)')
-    fig.suptitle('p(achievement | vital) — empirical conditional '
+    fig.suptitle(f'{title} — empirical conditional '
                  '(n below each column)', fontsize=12)
-    out = Path(save_path) / f'achievement_rate_vs_vital.{FIG_EXT}'
+    out = Path(save_path) / f'{fname}.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
     return out
@@ -797,6 +824,16 @@ def main():
             print(f'Wrote {out5}')
         else:
             print('No achievement unlocks found; skipping p(achievement|vital)')
+
+        # 5b. Same conditional, restricted to a curated set of achievements
+        out5b = plot_achievement_rate_vs_vital(
+            av_stats, save_dir, args.achievement_horizon,
+            ach_subset=SUBSET_ACHIEVEMENTS,
+            fname='achievement_rate_vs_vital_subset',
+            title='p(achievement | vital) [subset]')
+        if out5b:
+            outputs.append(str(out5b))
+            print(f'Wrote {out5b}')
 
     res_file = save_dir / 'vital_dynamics_results.pkl'
     with open(res_file, 'wb') as f:
