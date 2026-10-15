@@ -536,7 +536,11 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
     S, Nw, Ns, Hp1, _ = decoded['A'].shape
     _agg = np.nanmean if central == 'mean' else np.nanmedian
     rs = start_pos[:, :, None, None, :]                  # (S, Nw, 1, 1, 2)
-    dispA, distB, varC, distB_by_w, stepD = {}, {}, {}, {}, {}
+    # Real trajectory as (S, Nw, H+1, 2): [start, future_1..future_H] — the
+    # ground truth each dream step is compared against (same alignment as panel G
+    # / dream_vs_future). Reused for devReal (panel H) and realStep.
+    real_path = np.concatenate([start_pos[:, :, None, :], future_pos], axis=2)  # (S,Nw,H+1,2)
+    dispA, distB, varC, distB_by_w, stepD, devReal = {}, {}, {}, {}, {}, {}
     # Iterate whatever conditions are present (A/B/C/D always; 'Aprime' when the
     # perturb-state run produced it) so A' flows into the comparison plot/summary.
     for c in decoded:
@@ -548,6 +552,11 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
         centroid = pos.mean(axis=2, keepdims=True)       # (S, Nw, 1, H+1, 2)
         varC[c] = _manhattan(pos, centroid).mean(axis=2).reshape(S * Nw, Hp1)
         distB_by_w[c] = _agg(dB[..., -1], axis=(0, 2))   # (Nw,)
+        # Per-step deviation from the REAL trajectory (tracking fidelity), pooled
+        # over warmups+seeds -> (S*Nw*Ns, H+1). Same metric as panel G but NOT
+        # binned by warmup: one curve per condition (panel H).
+        devReal[c] = _manhattan(
+            pos, real_path[:, :, None, :, :]).reshape(S * Nw * Ns, Hp1)
         # Step-to-step decoded displacement (continuity): distance from previous
         # tile at each dream step. Step 0 has no predecessor -> NaN (keeps x-axis
         # aligned 0..H with the other panels; nan-aggregation skips it).
@@ -560,12 +569,11 @@ def compute_curves(decoded, start_pos, future_pos, central='median'):
     ], axis=2).reshape(S * Nw, Hp1)
     # Real ground-truth step distance for the continuity panel: consecutive
     # Manhattan along [start, future_1..future_H]. No decoder jitter -> a floor.
-    real_path = np.concatenate([start_pos[:, :, None, :], future_pos], axis=2)  # (S,Nw,H+1,2)
     realStep = np.concatenate([
         np.full((S, Nw, 1), np.nan),
         _manhattan(real_path[:, :, 1:, :], real_path[:, :, :-1, :]),  # (S, Nw, H)
     ], axis=2).reshape(S * Nw, Hp1)
-    return dispA, distB, varC, realA, distB_by_w, stepD, realStep
+    return dispA, distB, varC, realA, distB_by_w, stepD, realStep, devReal
 
 
 def _print_summary(dispA, distB, varC, realA, central, stepD=None, realStep=None):
@@ -608,14 +616,14 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
     # when present, else jump-detects it — repairs pkls saved before this fix).
     r['future_pos'] = _mask_future_teleports(
         r['future_pos'], r.get('future_valid'))
-    dispA, distB, varC, realA, distB_by_w, stepD, realStep = compute_curves(
+    dispA, distB, varC, realA, distB_by_w, stepD, realStep, devReal = compute_curves(
         r['decoded'], r['start_pos'], r['future_pos'], central)
     warmups = r['warmups']
     _print_summary(dispA, distB, varC, realA, central, stepD, realStep)
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central=central, shading=shading,
-                       stepD=stepD, realStep=realStep,
+                       stepD=stepD, realStep=realStep, devReal=devReal,
                        decoded=r['decoded'], start_pos=r['start_pos'],
                        future_pos=r['future_pos'], warmups=warmups)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
@@ -636,19 +644,22 @@ def replot_from_pkl(pkl_path, save_dir, central='median', shading='band',
 
 def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central='median', shading='band', stepD=None,
-                       realStep=None, decoded=None, start_pos=None,
+                       realStep=None, devReal=None, decoded=None, start_pos=None,
                        future_pos=None, warmups=None):
     band = bind(_band, central=central, shading=shading)
     # P[dx=0] and E[dx|dx>0] are expectations: always mean-aggregated over
     # rollouts, regardless of `central` (median of a 0/1 indicator is meaningless).
     band_mean = bind(_band, central='mean', shading=shading)
 
-    # Panel G (deviation-by-warmup) is included when the raw decoded positions
-    # are available (live run or --from_pkl). It carries its own two-part legend
-    # and lines-only styling, so it's excluded from the shared legend loop below.
+    # Panel H (pooled deviation-from-real): one curve per condition, warmups
+    # pooled — a normal panel (shared legend). Panel G (deviation-by-warmup) is
+    # the warmup-colored counterpart; it carries its own two-part legend and
+    # lines-only styling, so it's excluded from the shared legend loop below.
+    have_H = devReal is not None
     have_G = decoded is not None and start_pos is not None \
         and future_pos is not None and warmups is not None
-    n_panels = (6 if stepD is not None else 3) + (1 if have_G else 0)
+    nbase = 6 if stepD is not None else 3
+    n_panels = nbase + (1 if have_H else 0) + (1 if have_G else 0)
     # Reflow into 2 rows once we exceed 4 panels so the figure isn't absurdly wide.
     ncol = int(np.ceil(n_panels / 2)) if n_panels > 4 else n_panels
     nrow = int(np.ceil(n_panels / ncol))
@@ -702,6 +713,16 @@ def plot_seed_ablation(dispA, distB, varC, realA, save_dir,
             band_mean(ax, _moved(realStep), 'black', 'real trajectory', ls='--')
         ax.set_title('F) E[dx | dx>0] (jump size when moving)')
         ax.set_ylabel('Mean displacement over moving steps (tiles)')
+
+    # Panel H: deviation-from-real-trajectory, pooled over warmups (one curve per
+    # condition, standard band + shared legend). The warmup-agnostic view the
+    # warmup-colored panel G hides.
+    if have_H:
+        ax = flat[nbase]
+        for c in CONDITIONS:
+            band(ax, devReal[c], COLORS[c], LABELS[c])
+        ax.set_title('H) deviation from real trajectory (pooled)')
+        ax.set_ylabel('Manhattan deviation from real trajectory (tiles)')
 
     # Panel G: deviation-from-real-trajectory by warmup (bespoke legend).
     dev_ax = None
@@ -1174,7 +1195,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
 
     # 5. Curves (pooled over start rows and warmups; Nseed drives variability).
     central = cfg.central
-    dispA, distB, varC, realA, distB_by_w, stepD, realStep = compute_curves(
+    dispA, distB, varC, realA, distB_by_w, stepD, realStep, devReal = compute_curves(
         decoded, start_pos, future_pos, central)
     _print_summary(dispA, distB, varC, realA, central, stepD, realStep)
 
@@ -1182,7 +1203,7 @@ def dream_seed_ablation(make_agent, make_env, make_replay, make_stream,
     print("\nGenerating plots...")
     plot_seed_ablation(dispA, distB, varC, realA, save_dir,
                        central=central, shading=cfg.shading,
-                       stepD=stepD, realStep=realStep,
+                       stepD=stepD, realStep=realStep, devReal=devReal,
                        decoded=decoded, start_pos=start_pos,
                        future_pos=future_pos, warmups=warmups)
     plot_error_vs_warmup(distB_by_w, warmups, save_dir, central=central)
