@@ -147,6 +147,23 @@ with st.sidebar:
     k['mob_worldgen_scale'] = st.slider('mob_worldgen_scale', 0.0, 3.0, 1.0, 0.25,
                                         help='Initial worldgen hostile density at '
                                              'spawn. ' + mob_help)
+    mob_dist = st.selectbox(
+        'mob_scale_dist (per-episode threat)', ['off', 'exponential', 'uniform'],
+        index=0,
+        help='Randomize the mob threat level PER EPISODE (overrides the three '
+             'scales above, driving all of them with one draw). off = fixed. '
+             'exponential = many low/no-mob episodes + a few swarms. '
+             'uniform = even spread. Draw is deterministic per (seed, episode).')
+    k['mob_scale_dist'] = mob_dist
+    if mob_dist == 'uniform':
+        lo, hi = st.slider('mob_scale range [min, max]', 0.0, 3.0, (0.0, 2.0), 0.25)
+        k['mob_scale_min'], k['mob_scale_max'] = float(lo), float(hi)
+    elif mob_dist == 'exponential':
+        k['mob_scale_mean'] = st.slider('mob_scale_mean (exp)', 0.1, 2.0, 0.5, 0.1,
+                                        help='Mean of the exponential; smaller = '
+                                             'more low-threat episodes.')
+        k['mob_scale_min'] = st.slider('mob_scale_min (shift)', 0.0, 1.0, 0.0, 0.1)
+        k['mob_scale_max'] = st.slider('mob_scale_max (clamp)', 0.5, 3.0, 2.0, 0.25)
 
     st.markdown('**View**')
     ego = st.select_slider('egocentric_view', options=[0, 5, 7, 9, 11], value=9,

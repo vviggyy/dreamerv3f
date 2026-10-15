@@ -85,6 +85,10 @@ KNOB_DEFAULTS = {
     'mob_spawn_prob_scale': 1.0,
     'mob_target_scale': 1.0,
     'mob_worldgen_scale': 1.0,
+    'mob_scale_dist': 'off',
+    'mob_scale_min': 0.0,
+    'mob_scale_max': 2.0,
+    'mob_scale_mean': 0.5,
     'egocentric_view': 0,
 }
 

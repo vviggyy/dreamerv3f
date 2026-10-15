@@ -41,6 +41,10 @@ import numpy as np
 
 from run_info import log_run_info
 
+# Output figure format (set from --fmt in main). SVG is vector (Illustrator-
+# friendly) and ignores dpi; png/pdf also supported.
+FIG_EXT = 'png'
+
 VITALS = ['health', 'food', 'drink', 'energy']
 VITAL_COLORS = {
     'health': '#d62728', 'food': '#ff7f0e',
@@ -376,7 +380,7 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
         f'Episode {ep.get("episode", ep_idx)}  ·  length={T}  ·  outcome: {death}'
         f'{cow_bit}',
         fontsize=12, fontweight='bold', y=1.04)
-    out = Path(save_path) / f'vitals_episode_{ep_idx:03d}.png'
+    out = Path(save_path) / f'vitals_episode_{ep_idx:03d}.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
     return True
@@ -444,7 +448,7 @@ def plot_action_rate_vs_vital(stats, save_path):
     fig.suptitle('Action-class probability vs vital level (n above each level)',
                  fontsize=12)
     fig.tight_layout()
-    out = Path(save_path) / 'action_rate_vs_vital.png'
+    out = Path(save_path) / f'action_rate_vs_vital.{FIG_EXT}'
     fig.savefig(out, dpi=130)
     plt.close(fig)
     return out
@@ -518,7 +522,7 @@ def plot_event_triggered(evstats, save_path):
     axes.ravel()[0].legend(loc='best', fontsize=8)
     fig.suptitle('Event-triggered vital averages (±SEM)', fontsize=12)
     fig.tight_layout()
-    out = Path(save_path) / 'event_triggered_vitals.png'
+    out = Path(save_path) / f'event_triggered_vitals.{FIG_EXT}'
     fig.savefig(out, dpi=130)
     plt.close(fig)
     return out
@@ -558,7 +562,7 @@ def compute_averaged_vitals(episodes, clip_pct=0):
     return stats, L
 
 
-def plot_averaged_vitals(groups, save_path, fname='averaged_vitals.png'):
+def plot_averaged_vitals(groups, save_path, fname=None):
     """One subplot per vital; overlays each group (label, stats, L). A single
     group draws a ±1 std band; multiple groups (e.g. training phases) overlay as
     lines distinguished by linestyle (color still encodes the vital)."""
@@ -588,7 +592,7 @@ def plot_averaged_vitals(groups, save_path, fname='averaged_vitals.png'):
            else 'mean across episodes, by phase (linestyle) — color = vital')
     fig.suptitle(f'Averaged vitals over time ({sub})', fontsize=12)
     fig.tight_layout()
-    out = Path(save_path) / fname
+    out = Path(save_path) / (fname or f'averaged_vitals.{FIG_EXT}')
     fig.savefig(out, dpi=130)
     plt.close(fig)
     return out
@@ -671,7 +675,7 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon):
                  label=f'P(unlock ≤ {horizon} steps | vital)')
     fig.suptitle('p(achievement | vital) — empirical conditional '
                  '(n below each column)', fontsize=12)
-    out = Path(save_path) / 'achievement_rate_vs_vital.png'
+    out = Path(save_path) / f'achievement_rate_vs_vital.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
     return out
@@ -697,6 +701,10 @@ def main():
                              'lengths to clip to (default 5 = ignore the shortest '
                              '5%% so one early death does not collapse the window). '
                              '0 = strict min episode length.')
+    parser.add_argument('--fmt', type=str, default='svg',
+                        choices=['svg', 'pdf', 'png'],
+                        help='output figure format (default svg = vector, '
+                             'Illustrator-friendly; dpi ignored for svg/pdf)')
     parser.add_argument('--phase_data', type=str, nargs='*', default=None,
                         help='labelled trajectory sets for the averaged-vitals '
                              'overlay, e.g. early:./traj_ck1 mid:./traj_ck2 '
@@ -704,6 +712,9 @@ def main():
                              'averaged-vitals plot overlays one curve per phase '
                              'instead of the single --data set.')
     args = parser.parse_args()
+
+    global FIG_EXT
+    FIG_EXT = args.fmt
 
     data_path = Path(args.data)
     save_dir = Path(args.save) if args.save else (
@@ -729,7 +740,7 @@ def main():
                 n_plotted += 1
     print(f'Wrote {n_plotted} per-episode plots')
     if n_plotted:
-        outputs.append(str(save_dir / 'vitals_episode_*.png'))
+        outputs.append(str(save_dir / f'vitals_episode_*.{FIG_EXT}'))
 
     results = {'metadata': meta, 'n_episodes': len(episodes)}
     if not args.no_agg:

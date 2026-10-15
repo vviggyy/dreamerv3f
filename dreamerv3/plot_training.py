@@ -201,18 +201,45 @@ def plot_episode_score(ax, steps, scores, smooth_window):
     style_ax(ax)
 
 
-def plot_episode_duration(ax, steps, lengths, smooth_window):
+def plot_achievement_count(ax, steps, counts, smooth_window):
+    """Per-episode achievement-unlock count (sum of the episode/achievement_*
+    flags): the true, always-integer, never-negative unlock count. Distinct from
+    the Episode Score panel, which plots episode/score = this count + the Crafter
+    health reward (a near-constant -0.9 because the agent dies almost every
+    episode), so the score curve systematically reads ~1 unlock low."""
+    ax.scatter(steps, counts, alpha=0.25, s=6, color=BLUE, label='Per episode')
+    if smooth_window > 1 and len(steps) > smooth_window:
+        sx, sy = smooth(steps, counts, smooth_window)
+        ax.plot(sx, sy, color=BLUE, linewidth=1.8, label=f'Smoothed (w={smooth_window})')
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel('Achievements unlocked', fontsize=11)
+    ax.set_title('Achievements Unlocked per Episode', fontsize=13)
+    ax.legend(fontsize=9, framealpha=0.7)
+    style_ax(ax)
+
+
+def plot_episode_duration(ax, steps, lengths, smooth_window, clip_pct=None):
     """Per-episode length (steps survived) vs training step: scatter + smoothed,
     mirroring the episode-score panel. Longer episodes = the agent surviving
-    longer (fewer early deaths from starvation/combat/lava)."""
+    longer (fewer early deaths from starvation/combat/lava). `clip_pct` caps the
+    y-axis at that percentile of the raw lengths (e.g. 99) so a handful of very
+    long survivors don't squash the bulk of the distribution."""
     ax.scatter(steps, lengths, alpha=0.25, s=6, color=GREEN, label='Per episode')
     if smooth_window > 1 and len(steps) > smooth_window:
         sx, sy = smooth(steps, lengths, smooth_window)
         ax.plot(sx, sy, color=GREEN, linewidth=1.8,
                 label=f'Smoothed (w={smooth_window})')
     ax.set_ylabel('Episode length (steps)', fontsize=11)
-    ax.set_ylim(bottom=0)
-    ax.set_title('Episode Duration', fontsize=13)
+    if clip_pct is not None and len(lengths):
+        top = np.percentile(lengths, clip_pct)
+        n_clipped = int(np.sum(lengths > top))
+        ax.set_ylim(bottom=0, top=top * 1.05)
+        ax.set_title(f'Episode Duration (y capped at p{clip_pct:g}, '
+                     f'{n_clipped} above)', fontsize=13)
+    else:
+        ax.set_ylim(bottom=0)
+        ax.set_title('Episode Duration', fontsize=13)
     ax.legend(fontsize=9, framealpha=0.7)
     style_ax(ax)
 
@@ -440,6 +467,11 @@ def main():
     parser.add_argument('--ylim_ach_auto', action='store_true',
                         help='Auto-clip achievement panel y-axis to 1.2x the '
                              '95th percentile of smoothed values')
+    parser.add_argument('--dur_clip_pct', type=float, default=99.0,
+                        help='Cap the Episode Duration panel y-axis at this '
+                             'percentile of raw episode lengths so outlier long '
+                             'survivors do not squash the bulk. Set 0 to disable '
+                             '(default: 99)')
     parser.add_argument('--no_raw_ach', action='store_true',
                         help='Hide raw (unsmoothed) traces on achievement panel')
     parser.add_argument('--tiered_ach', action='store_true',
@@ -454,11 +486,27 @@ def main():
     score_records = []
     ep_steps, ep_scores = np.array([]), np.array([])
     ep_len_steps, ep_lengths = np.array([]), np.array([])
+    ep_ach_steps, ep_ach_counts = np.array([]), np.array([])
     if scores_path.exists():
         print(f'Loading {scores_path}')
         score_records = load_jsonl(scores_path)
         ep_steps, ep_scores = records_to_series(score_records, 'episode/score')
         ep_len_steps, ep_lengths = records_to_series(score_records, 'episode/length')
+        # True unlock count: sum of the per-episode achievement flags (always
+        # integer, >=0). Distinct from episode/score, which bakes in the Crafter
+        # health reward (~-0.9 from near-certain death), reading ~1 unlock low.
+        ach_steps, ach_counts = [], []
+        for r in score_records:
+            if 'step' not in r:
+                continue
+            flags = [v for k, v in r.items() if k.startswith('episode/achievement_')]
+            if flags:
+                ach_steps.append(r['step'])
+                ach_counts.append(float(np.sum(flags)))
+        if ach_steps:
+            order = np.argsort(ach_steps)
+            ep_ach_steps = np.array(ach_steps)[order]
+            ep_ach_counts = np.array(ach_counts)[order]
         if len(ep_steps):
             print(f'  {len(ep_steps)} episodes, score [{ep_scores.min():.2f}, {ep_scores.max():.2f}]')
         if len(ep_lengths):
@@ -483,8 +531,8 @@ def main():
     # Panels laid out in a 3-column grid (rows grow as needed):
     #   score, duration, crafter score, per-achievement unlock rate,
     #   cumulative reward, training losses, reward & value estimates
-    panels = ['score', 'duration', 'crafter_score', 'achievements',
-              'cumulative', 'losses', 'reward_value']
+    panels = ['score', 'achievement_count', 'duration', 'crafter_score',
+              'achievements', 'cumulative', 'losses', 'reward_value']
 
     n_cols = 3
     n_rows = int(np.ceil(len(panels) / n_cols))
@@ -506,9 +554,15 @@ def main():
                 plot_episode_score(ax, ep_steps, ep_scores, args.smooth)
             else:
                 empty_panel(ax, 'Episode Score')
+        elif panel_type == 'achievement_count':
+            if len(ep_ach_steps):
+                plot_achievement_count(ax, ep_ach_steps, ep_ach_counts, args.smooth)
+            else:
+                empty_panel(ax, 'Achievements Unlocked per Episode')
         elif panel_type == 'duration':
             if len(ep_len_steps):
-                plot_episode_duration(ax, ep_len_steps, ep_lengths, args.smooth)
+                plot_episode_duration(ax, ep_len_steps, ep_lengths, args.smooth,
+                                      clip_pct=(args.dur_clip_pct or None))
             else:
                 empty_panel(ax, 'Episode Duration')
         elif panel_type == 'cumulative':

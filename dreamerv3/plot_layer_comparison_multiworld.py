@@ -87,6 +87,10 @@ def main():
                          'Order sets left-to-right box order (max 3).')
     ap.add_argument('--out_name', default='cross_condition_layer_comparison_multiworld.svg',
                     help='output filename')
+    ap.add_argument('--layers', nargs='+', default=None,
+                    help='optional subset of layer names to plot (exact names, e.g. '
+                         'enc/tokens dyn/deter val/mlp/linear2 pol/mlp/linear2). '
+                         'Default: all layers.')
     args = ap.parse_args()
 
     if args.cond:
@@ -112,6 +116,14 @@ def main():
     cond_labels = list(conditions.keys())
     n_conds = len(cond_labels)
     layers = [ln for ln in ordered if ln in data[cond_labels[0]]]
+    if args.layers:
+        want = set(args.layers)
+        missing = want - set(layers)
+        if missing:
+            print(f'[warn] requested layers not found and skipped: {sorted(missing)}')
+        layers = [ln for ln in layers if ln in want]
+        if not layers:
+            raise SystemExit('No requested layers present in the data.')
     # Reorder: value layers before policy layers (policy rightmost)
     val = [ln for ln in layers if ln.startswith('val/')]
     pol = [ln for ln in layers if ln.startswith('pol/')]

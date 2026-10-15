@@ -243,7 +243,8 @@ class Crafter(embodied.Env):
                cow_spawn_prob=0.01, cow_span_dist=5, cow_target_scale=1.0,
                cow_worldgen_scale=1.0, mob_spawn_prob_scale=1.0,
                mob_target_scale=1.0, mob_worldgen_scale=1.0,
-               vital_reward=False):
+               mob_scale_dist='off', mob_scale_min=0.0, mob_scale_max=2.0,
+               mob_scale_mean=0.5, vital_reward=False):
     assert task in ('reward', 'noreward')
     # Reward shaping: stock crafter rewards only the health delta (±0.1/point,
     # i.e. (health-last_health)/10) plus +1 per new achievement. `vital_reward`
@@ -312,18 +313,41 @@ class Crafter(embodied.Env):
     #                           (applied in worldgen, mirrors cow_worldgen_scale)
     # disable_mobs still takes precedence: its _balance_chunk wrap scrubs every
     # hostile after balancing regardless of these scales.
+    #
+    # PER-EPISODE RANDOMIZATION (mob_scale_dist != 'off'): instead of a fixed
+    # threat level, draw ONE scalar s per episode and drive ALL THREE mob scales
+    # (spawn_prob, target, worldgen) with it, so each episode gets a self-
+    # consistent threat level — some episodes effectively mob-free (small s floors
+    # the per-chunk integer target to 0 AND suppresses worldgen), some swarming.
+    #   mob_scale_dist='uniform'     -> s ~ U(mob_scale_min, mob_scale_max)
+    #   mob_scale_dist='exponential' -> s = min + Exp(mean=mob_scale_mean),
+    #                                    clamped to mob_scale_max (long right tail:
+    #                                    many low-threat episodes, few swarms).
+    # The draw is deterministic per (seed, episode) for reproducibility (see the
+    # reset branch in step()). The balancer reads the LIVE instance attrs below so
+    # the per-episode update takes effect without rebuilding the closure.
     self._mob_worldgen_scale = mob_worldgen_scale
+    self._mob_spawn_prob_scale = mob_spawn_prob_scale
+    self._mob_target_scale = mob_target_scale
+    self._mob_scale_dist = mob_scale_dist
+    self._mob_scale_min = mob_scale_min
+    self._mob_scale_max = mob_scale_max
+    self._mob_scale_mean = mob_scale_mean
+    self._cur_mob_scale = mob_target_scale  # logged per step (log/mob_scale)
     cow_changed = (cow_spawn_prob != 0.01 or cow_span_dist != 5 or
                    cow_target_scale != 1.0)
-    mob_changed = (mob_spawn_prob_scale != 1.0 or mob_target_scale != 1.0)
+    # Mob scaling is active if any base scale differs from stock OR per-episode
+    # randomization is on (then the draw varies it even when the base is 1.0).
+    self._mob_active = (mob_spawn_prob_scale != 1.0 or mob_target_scale != 1.0 or
+                        mob_scale_dist != 'off')
     # A single instance-level _balance_object handles Cow (cow knobs) and
     # Zombie/Skeleton (mob knobs); other classes pass through untouched.
-    if cow_changed or mob_changed:
+    if cow_changed or self._mob_active:
       import crafter.objects as _co
       _Cow, _Zombie, _Skeleton = _co.Cow, _co.Zombie, _co.Skeleton
       _orig_bo = self._env._balance_object
       _csp, _csd, _cts = cow_spawn_prob, cow_span_dist, cow_target_scale
-      _msps, _mts = mob_spawn_prob_scale, mob_target_scale
+      _self = self
       def _scaled_balance_object(chunk, objs, cls, material, span_dist,
                                  despan_dist, spawn_prob, despawn_prob, ctor,
                                  target_fn):
@@ -331,14 +355,17 @@ class Crafter(embodied.Env):
           span_dist, spawn_prob = _csd, _csp
           _tf = target_fn
           target_fn = lambda num, space: tuple(_cts * np.asarray(_tf(num, space)))
-        elif cls in (_Zombie, _Skeleton) and mob_changed:
+        elif cls in (_Zombie, _Skeleton) and _self._mob_active:
+          # Read LIVE scales so the per-episode draw (set in reset) applies.
+          _msps, _mts = _self._mob_spawn_prob_scale, _self._mob_target_scale
           spawn_prob = spawn_prob * _msps
           _tf = target_fn
           target_fn = lambda num, space: tuple(_mts * np.asarray(_tf(num, space)))
         return _orig_bo(chunk, objs, cls, material, span_dist, despan_dist,
                         spawn_prob, despawn_prob, ctor, target_fn)
       self._env._balance_object = _scaled_balance_object
-    if cow_worldgen_scale != 1.0 or mob_worldgen_scale != 1.0:
+    if (cow_worldgen_scale != 1.0 or mob_worldgen_scale != 1.0 or
+        mob_scale_dist != 'off'):
       _install_worldgen_patch()
     self._logs = logs
     self._logdir = logdir and elements.Path(logdir)
@@ -448,6 +475,10 @@ class Crafter(embodied.Env):
         # env_step with period 300 (crafter.env._update_time). log/ = agent-ignored.
         'log/env_step': elements.Space(np.int32),
         'log/daylight': elements.Space(np.float32),
+        # This episode's hostile-mob threat scale (constant within an episode;
+        # varies episode-to-episode when mob_scale_dist != 'off', else = the
+        # static mob_target_scale). Lets analysis bin outcomes by threat level.
+        'log/mob_scale': elements.Space(np.float32),
     }
     # Interoceptive vitals (health/food/drink/energy, each 0-9) for trajectory
     # analysis. log/ prefix = ignored by the agent encoder; read from the same
@@ -485,6 +516,15 @@ class Crafter(embodied.Env):
       self._length = 0
       self._reward = 0
       self._done = False
+      # Per-episode mob-threat draw: one scalar s drives all three mob scales so
+      # the whole episode shares a threat level. Deterministic per (seed, episode)
+      # for reproducibility. Must run BEFORE the worldgen stamping below (which
+      # reads self._mob_worldgen_scale) and before self._env.reset().
+      if self._mob_scale_dist != 'off':
+        self._cur_mob_scale = self._draw_mob_scale()
+        self._mob_target_scale = self._cur_mob_scale
+        self._mob_spawn_prob_scale = self._cur_mob_scale
+        self._mob_worldgen_scale = self._cur_mob_scale
       if self._fixed_layout:
         # Same terrain shell every episode; new resource+mob placement. Seeds
         # are read by the patched worldgen inside self._env.reset().
@@ -503,8 +543,10 @@ class Crafter(embodied.Env):
         # Read by the patched worldgen._set_object (inside self._env.reset()) to
         # scale the one-off initial cow density. No-op at the stock scale of 1.0.
         self._env._world._cow_worldgen_scale = self._cow_worldgen_scale
-      if self._mob_worldgen_scale != 1.0:
+      if self._mob_worldgen_scale != 1.0 or self._mob_scale_dist != 'off':
         # Same hook for the one-off initial hostile-mob (zombie/skeleton) density.
+        # Stamped unconditionally under per-episode randomization so a prior
+        # episode's draw never lingers on the world when the new draw is ~1.0.
         self._env._world._mob_worldgen_scale = self._mob_worldgen_scale
       image = self._env.reset()
       if self._disable_mobs:
@@ -551,6 +593,28 @@ class Crafter(embodied.Env):
         image, reward, info,
         is_last=self._done,
         is_terminal=info['discount'] == 0)
+
+  def _draw_mob_scale(self):
+    """Draw this episode's mob-threat scale from the configured distribution.
+
+    Deterministic per (seed, episode) so a run is reproducible: the RNG is keyed
+    on the env seed + the monotonically-incrementing episode counter (which keeps
+    advancing even under fixed_seed/fixed_layout). `uniform` spreads threat evenly
+    over [min, max]; `exponential` has a long right tail (shift min + Exp(mean),
+    clamped to max) so most episodes are low-threat and a few swarm. Clamped to
+    >= 0 (a negative scale would invert the balancer)."""
+    rng = np.random.RandomState(
+        hash((self._seed or 0, self._episode, 'mob_scale')) % (2 ** 31 - 1))
+    dist = self._mob_scale_dist
+    lo, hi, mean = self._mob_scale_min, self._mob_scale_max, self._mob_scale_mean
+    if dist == 'uniform':
+      s = rng.uniform(lo, hi)
+    elif dist == 'exponential':
+      s = lo + rng.exponential(mean)
+    else:
+      raise ValueError(
+          f"mob_scale_dist must be 'off'/'uniform'/'exponential', got {dist!r}")
+    return float(np.clip(s, 0.0, hi))
 
   def _vital_levels(self):
     """Current {food, drink, energy} levels from the live player inventory
@@ -722,6 +786,8 @@ class Crafter(embodied.Env):
         # Day/night: crafter's internal step counter + rendered daylight [0,1].
         **{'log/env_step': np.int32(self._env._step),
            'log/daylight': np.float32(self._env._world.daylight)},
+        # This episode's mob-threat scale (see _draw_mob_scale).
+        **{'log/mob_scale': np.float32(self._cur_mob_scale)},
     )
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     achievements = {
