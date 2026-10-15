@@ -42,9 +42,15 @@ from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter, label, maximum_filter
 from scipy.signal import correlate2d
 def _tc_cmap():
-    """Viridis colormap with white for NaN/masked (unvisited bins)."""
-    cmap = plt.get_cmap('viridis').copy()
-    cmap.set_bad('white')
+    """Black->red colormap for tuning curves, with dark grey for NaN/masked
+    (unvisited bins). The dark-grey background keeps the eye on the *visited*
+    region, where firing ramps from black (low) to bright red (peak) so active
+    fields stand out — unlike the old viridis+white, where the unvisited area
+    dominated visually."""
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list(
+        'kr', ['black', '#cc0000', '#ff3b00', '#ff8a00']).copy()
+    cmap.set_bad('#4d4d4d')  # dark grey for unvisited bins
     return cmap
 
 
