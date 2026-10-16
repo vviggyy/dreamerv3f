@@ -54,8 +54,7 @@ VITAL_MAX = 9  # crafter vitals are ints in [0, 9]
 # Curated achievements for the subset p(achievement|vital) heatmap
 # (achievement_rate_vs_vital_subset): the early/vital-driven behaviors.
 SUBSET_ACHIEVEMENTS = [
-    'collect_drink', 'collect_sapling', 'collect_stone', 'collect_wood',
-    'defeat_zombie', 'make_wood_pickaxe', 'make_wood_sword',
+    'collect_drink', 'collect_sapling', 'make_wood_pickaxe', 'make_wood_sword',
 ]
 # Cow-count overlay color (distinct from the vital + hunger-cause palette).
 COW_COLOR = '#5c4033'
@@ -210,7 +209,9 @@ def get_cows(ep):
 
 def get_unlocks(ep):
     """From the per-step cumulative achievement dicts, return {achievement:
-    [first-unlock step, ...]} (each 0->1 or count increase is one event)."""
+    [unlock step, ...]}. Every count increase (0->1 OR any later increment) is
+    one event, so repeated behaviors (eat_cow, collect_drink, ...) contribute
+    all their occurrences, not just the first unlock."""
     ach = ep.get('achievements')
     if not ach:
         return {}
@@ -648,7 +649,14 @@ def compute_achievement_rate_vs_vital(episodes, horizon=15):
         tot = acc[v]['tot']
         with np.errstate(invalid='ignore', divide='ignore'):
             P = np.where(tot > 0, acc[v]['hit'] / tot, np.nan)
-        out[v] = {'levels': levels, 'ach': ach_names, 'P': P, 'counts': tot}
+            # Marginal base rate p(ach unlocks within horizon) = total hits over
+            # all steps / total steps. Identical across vitals (every step is
+            # counted once per vital), so the lift p(ach|v)/p(ach) centers at 1.
+            total = tot.sum()
+            base = (acc[v]['hit'].sum(axis=1) / total
+                    if total > 0 else np.full(len(ach_names), np.nan))
+        out[v] = {'levels': levels, 'ach': ach_names, 'P': P,
+                  'counts': tot, 'base': base}
     return out
 
 
@@ -708,6 +716,78 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon, ach_subset=None,
     return out
 
 
+def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
+                                   fname='achievement_lift_vs_vital',
+                                   title='p(achievement | vital) / p(achievement)',
+                                   n_min=20, vmax_cap=4.0):
+    """Lift heatmap per vital: rows = achievements, cols = vital level, color =
+    p(unlock within horizon | vital) / p(unlock within horizon). This divides
+    out each achievement's base rate so the color reads as enrichment relative
+    to that achievement's own average: 1 = independent, >1 = this vital level
+    makes the behavior MORE likely than usual, <1 = less likely. Diverging
+    colormap centered at 1.
+
+    Columns with fewer than `n_min` steps are masked (gray) — lift has high
+    variance when a level bin is thin. `vmax_cap` clips the (red) upper end so a
+    few rare-event cells don't blow out the scale. `ach_subset` restricts/orders
+    the rows exactly like plot_achievement_rate_vs_vital."""
+    from matplotlib.colors import TwoSlopeNorm
+    all_achs = stats[VITALS[0]]['ach']
+    if not all_achs:
+        return None
+    if ach_subset is not None:
+        pos = {a: i for i, a in enumerate(all_achs)}
+        rows = [pos[a] for a in ach_subset if a in pos]
+        achs = [all_achs[i] for i in rows]
+        if not achs:
+            print(f'  None of the requested achievements present; skipping {fname}')
+            return None
+    else:
+        rows = list(range(len(all_achs)))
+        achs = all_achs
+    # lift = P / base, per vital, restricted to displayed rows + count-masked
+    lift = {}
+    for v in VITALS:
+        s = stats[v]
+        base = s['base'][rows]
+        with np.errstate(invalid='ignore', divide='ignore'):
+            L = s['P'][rows, :] / base[:, None]
+        L[:, s['counts'] < n_min] = np.nan          # mask thin level bins
+        lift[v] = L
+    finite = np.concatenate([lift[v][np.isfinite(lift[v])] for v in VITALS]
+                            if any(np.isfinite(lift[v]).any() for v in VITALS)
+                            else [np.array([1.0])])
+    vmax = float(min(vmax_cap, max(1.2, np.nanmax(finite)))) if finite.size else 2.0
+    norm = TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=vmax)
+    cmap = plt.get_cmap('RdBu_r').copy()
+    cmap.set_bad('0.85')                            # masked cells -> light gray
+    fig, axes = plt.subplots(1, len(VITALS), sharey=True,
+                             figsize=(3.6 * len(VITALS), max(4.0, 0.32 * len(achs))))
+    axes = np.atleast_1d(axes)
+    im = None
+    for ax, v in zip(axes, VITALS):
+        s = stats[v]
+        im = ax.imshow(lift[v], aspect='auto', cmap=cmap, norm=norm)
+        ax.set_xticks(range(len(s['levels'])))
+        ax.set_xticklabels(s['levels'], fontsize=7)
+        ax.set_xlabel('vital level')
+        ax.set_title(v, color=VITAL_COLORS[v])
+        for j, lvl in enumerate(s['levels']):
+            if s['counts'][j] > 0:
+                ax.annotate(f'{int(s["counts"][j])}', xy=(j, len(achs) - 0.4),
+                            fontsize=5, ha='center', va='top', color='0.4')
+    axes[0].set_yticks(range(len(achs)))
+    axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
+    fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
+                 label='lift  p(unlock | vital) / p(unlock)   (1 = baseline)')
+    fig.suptitle(f'{title} — enrichment vs base rate '
+                 f'(horizon {horizon}; cols <{n_min} steps masked)', fontsize=12)
+    out = Path(save_path) / f'{fname}.{FIG_EXT}'
+    fig.savefig(out, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Observational analysis of vitals vs policy actions/events')
@@ -723,6 +803,9 @@ def main():
                         help='skip aggregate stats (per-episode plots only)')
     parser.add_argument('--achievement_horizon', type=int, default=15,
                         help='horizon (steps) for p(achievement unlock | vital)')
+    parser.add_argument('--lift_min_count', type=int, default=20,
+                        help='min steps per vital level to show a lift cell '
+                             '(thinner columns are masked gray)')
     parser.add_argument('--avg_clip_pct', type=float, default=5,
                         help='averaged-vitals clip length: percentile of episode '
                              'lengths to clip to (default 5 = ignore the shortest '
@@ -834,6 +917,24 @@ def main():
         if out5b:
             outputs.append(str(out5b))
             print(f'Wrote {out5b}')
+
+        # 5c. Lift view: p(ach|vital) / p(ach) — base-rate-normalized enrichment
+        if out5:
+            out5c = plot_achievement_lift_vs_vital(
+                av_stats, save_dir, args.achievement_horizon,
+                n_min=args.lift_min_count)
+            if out5c:
+                outputs.append(str(out5c))
+                print(f'Wrote {out5c}')
+            out5d = plot_achievement_lift_vs_vital(
+                av_stats, save_dir, args.achievement_horizon,
+                ach_subset=SUBSET_ACHIEVEMENTS,
+                fname='achievement_lift_vs_vital_subset',
+                title='p(achievement | vital) / p(achievement) [subset]',
+                n_min=args.lift_min_count)
+            if out5d:
+                outputs.append(str(out5d))
+                print(f'Wrote {out5d}')
 
     res_file = save_dir / 'vital_dynamics_results.pkl'
     with open(res_file, 'wb') as f:
