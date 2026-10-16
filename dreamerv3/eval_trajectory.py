@@ -261,6 +261,19 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       pickle.dump(save_data, f)
     print(f"\nSaved {len(valid_episodes)} episodes to {all_file}{tag}")
 
+    # Lightweight metadata sidecar — all_episodes.pkl can be tens of GB (it
+    # carries activations), so downstream tools that only need the world
+    # metadata (e.g. tuning_curve's population-map world panel) read this
+    # instead of loading the whole pickle.
+    try:
+      import json
+      meta_file = save_path / 'trajectory_meta.json'
+      meta_only = {k: v for k, v in save_data.items() if k != 'episodes'}
+      with open(str(meta_file), 'w') as f:
+        json.dump(meta_only, f)
+    except Exception as e:
+      print(f"  (could not write trajectory_meta.json: {e})")
+
   # Signal handler for SIGTERM (SLURM sends this before killing)
   def _sigterm_handler(signum, _frame):
     print(f"\nReceived signal {signum}, saving partial results...")

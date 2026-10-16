@@ -1419,8 +1419,97 @@ def plot_layer_summary(all_results, save_path):
     plt.close(fig)
 
 
+def _load_world_meta(data_path):
+    """Best-effort world metadata (env_seed/area/fixed_seed/fixed_layout/island)
+    for rendering the Crafter world-map reference panel. Preference order:
+    (1) a lightweight ``trajectory_meta.json`` sidecar (written by
+    eval_trajectory); (2) ``all_episodes.pkl`` metadata, but ONLY if the file is
+    small enough to load safely (these can be tens of GB with activations, which
+    would OOM — skipped above the size cap); (3) the run's ``config.yaml``
+    (data_path.parent), deriving env_seed as main.py does
+    (hash((seed, 0)) % 2**32-1). NOTE: the config.yaml fallback uses the
+    *training* seed, which is wrong for seed-overridden eval rollouts (e.g.
+    `trajectories_seed45` of a seed-104 run); prefer the sidecar for those.
+    Returns None if nothing is available."""
+    data_path = Path(data_path)
+    sidecar = data_path / 'trajectory_meta.json'
+    if sidecar.exists():
+        try:
+            import json
+            with open(sidecar) as f:
+                meta = json.load(f)
+            if meta.get('env_seed') is not None:
+                return meta
+        except Exception:
+            pass
+    all_file = data_path / 'all_episodes.pkl'
+    # Guard against multi-GB all_episodes.pkl (carries activations) — loading it
+    # just for a few scalars would OOM.
+    ALL_EP_SIZE_CAP = 200 * 1024 * 1024  # 200 MB
+    if all_file.exists() and all_file.stat().st_size <= ALL_EP_SIZE_CAP:
+        try:
+            with open(all_file, 'rb') as f:
+                data = pickle.load(f)
+            if isinstance(data, dict) and 'episodes' in data:
+                meta = {k: v for k, v in data.items() if k != 'episodes'}
+                if meta.get('env_seed') is not None:
+                    return meta
+        except Exception:
+            pass
+    cfg_path = data_path.parent / 'config.yaml'
+    if not cfg_path.exists():
+        return None
+    cfg = None
+    try:
+        from ruamel.yaml import YAML
+        with open(cfg_path) as f:
+            cfg = YAML(typ='safe').load(f)
+    except Exception:
+        try:
+            import yaml
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+        except Exception:
+            return None
+    if not isinstance(cfg, dict):
+        return None
+    seed = cfg.get('seed', 0)
+    env_cfg = cfg.get('env') if isinstance(cfg.get('env'), dict) else {}
+    cr = env_cfg.get('crafter', {}) if isinstance(env_cfg.get('crafter'), dict) else {}
+    meta = {
+        'env_seed': hash((seed, 0)) % (2 ** 32 - 1),
+        'fixed_seed': bool(cr.get('fixed_seed', False)),
+        'fixed_layout': bool(cr.get('fixed_layout', False)),
+    }
+    if cr.get('island_border', False):
+        meta['island'] = {
+            'fill': cr.get('island_fill', 0.72),
+            'roughness': cr.get('island_roughness', 0.16),
+            'seed': cr.get('island_seed', -1),
+        }
+    return meta
+
+
+def _render_world_img(world_meta, area):
+    """Render the Crafter world RGB image for the reference panel, reusing
+    plot_trajectories' reconstruction. Returns None on any failure (panel is
+    then simply omitted)."""
+    if not world_meta:
+        return None
+    try:
+        from plot_trajectories import _render_crafter_world
+        meta = dict(world_meta)
+        meta.setdefault('area', list(area))
+        world_img, _, _ = _render_crafter_world(meta, tile_size=8)
+        return world_img
+    except Exception as e:
+        print(f"  (world-map panel skipped: {e})")
+        return None
+
+
 def plot_population_tuning_map(tc_array, occupancy, layer_name, save_path,
-                               normalize='minmax'):
+                               normalize='minmax', world_img=None,
+                               evs=None, ev_thresh=0.0):
     """Tile every neuron's spatial tuning map and sum them element-wise.
 
     Each neuron already has a 2D tuning map M_i(x,y) = mean activation of neuron
@@ -1431,22 +1520,45 @@ def plot_population_tuning_map(tc_array, occupancy, layer_name, save_path,
     structure — so panel 3 is the raw occupancy and the title reports the
     Pearson r between the two over visited tiles.
 
-    Three panels: (1) summed population map, (2) the same normalized
-    (``minmax`` -> [0,1], or ``zscore``), (3) occupancy (visit counts).
+    Panels: (1) summed population map, (2) the same normalized (``minmax`` ->
+    [0,1], or ``zscore``), (3) occupancy (visit counts), and, when ``world_img``
+    is supplied, (4) the Crafter world map for reference (all four share the
+    same tile frame so the population structure can be read against terrain).
 
     Args:
         tc_array: (N_neurons, H, W) tuning curves, NaN = unvisited.
         occupancy: (H, W) visit counts, or None (old pkl) -> panel 3 shows the
             visited mask instead.
         normalize: 'minmax' or 'zscore' for panel 2.
+        world_img: optional pre-rendered Crafter world RGB array (from
+            plot_trajectories._render_crafter_world, origin='upper'); adds a
+            4th reference panel aligned to the same (x, y) tile frame.
+        evs: optional (N_neurons,) per-neuron EV reliability. When ``ev_thresh``
+            > 0, only neurons with EV >= ev_thresh contribute to the sum — i.e.
+            the population map of the spatially *reliable* units only. NaN EVs
+            are excluded.
+        ev_thresh: EV cutoff for the filter (0 = no filter, use all neurons).
 
     Returns the Pearson r (summed vs occupancy) or NaN if unavailable.
     """
+    n_total = tc_array.shape[0]
+    ev_tag = ''
+    if ev_thresh and ev_thresh > 0 and evs is not None:
+        keep = np.nan_to_num(np.asarray(evs, dtype=float), nan=-np.inf) >= ev_thresh
+        if not keep.any():
+            print(f"  [population map] no neurons with EV >= {ev_thresh} in "
+                  f"{layer_name}; skipping filtered map.")
+            return np.nan
+        tc_array = tc_array[keep]
+        ev_tag = f'  |  EV >= {ev_thresh:g} ({int(keep.sum())}/{n_total} units)'
+
     # Unvisited tiles are NaN identically across neurons (shared positions).
     visited = ~np.all(np.isnan(tc_array), axis=0)  # (H, W)
     summed = np.nansum(tc_array, axis=0)
     summed = np.where(visited, summed, np.nan)
     n_units = tc_array.shape[0]
+    nx, ny = summed.shape
+    extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]  # tile frame shared by all panels
 
     if normalize == 'zscore':
         mu, sd = np.nanmean(summed), np.nanstd(summed)
@@ -1469,7 +1581,8 @@ def plot_population_tuning_map(tc_array, occupancy, layer_name, save_path,
         occ_label = 'visited'
         r = np.nan
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    n_panels = 4 if world_img is not None else 3
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6))
     panels = [
         (summed, f'Summed population map\nsum_i tuning_i(x,y)  ({n_units} units)',
          _tc_cmap(), 'summed activation'),
@@ -1478,13 +1591,23 @@ def plot_population_tuning_map(tc_array, occupancy, layer_name, save_path,
     ]
     for ax, (grid, title, cmap, cbar_label) in zip(axes, panels):
         im = ax.imshow(np.ma.masked_invalid(grid.T), origin='lower',
-                       interpolation='nearest', cmap=cmap, aspect='equal')
+                       interpolation='nearest', cmap=cmap, aspect='equal',
+                       extent=extent)
         plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
         ax.set_title(title, fontsize=10)
         ax.set_xlabel('x')
         ax.set_ylabel('y')
 
-    suptitle = f'{layer_name}: population tuning map vs occupancy'
+    if world_img is not None:
+        ax = axes[3]
+        # World image is oriented for origin='upper'; the tile extent puts it in
+        # the same (x, y) frame as the origin='lower' population/occupancy panels.
+        ax.imshow(world_img, origin='upper', aspect='equal', extent=extent)
+        ax.set_title('Crafter world', fontsize=10)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+
+    suptitle = f'{layer_name}: population tuning map vs occupancy{ev_tag}'
     if np.isfinite(r):
         suptitle += f'  —  Pearson r(summed, occupancy) = {r:.3f}'
     fig.suptitle(suptitle, fontsize=12)
@@ -1492,6 +1615,24 @@ def plot_population_tuning_map(tc_array, occupancy, layer_name, save_path,
     fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
     return r
+
+
+def _emit_population_maps(res, occupancy, layer_dir, world_img, ev_thresh=0.0):
+    """Write the unfiltered population map, plus (when ev_thresh > 0) an
+    EV-filtered one (reliable units only) to population_map_ev{thresh}.svg."""
+    ln = res['layer_name']
+    evs = res['metrics'].get('EVs')
+    r = plot_population_tuning_map(
+        res['tuning_curves'], occupancy, ln,
+        layer_dir / 'population_map.svg', world_img=world_img)
+    print(f"  {ln}: population map r(summed, occupancy) = {r:.3f}")
+    if ev_thresh and ev_thresh > 0:
+        rf = plot_population_tuning_map(
+            res['tuning_curves'], occupancy, ln,
+            layer_dir / f'population_map_ev{ev_thresh:g}.svg',
+            world_img=world_img, evs=evs, ev_thresh=ev_thresh)
+        if np.isfinite(rf):
+            print(f"  {ln}: population map (EV>={ev_thresh:g}) r = {rf:.3f}")
 
 
 # ---------------------------------------------------------------------------
@@ -1566,6 +1707,12 @@ def main():
                         help='Skip head direction analysis')
     parser.add_argument('--no_plots', action='store_true',
                         help='Skip plot generation')
+    parser.add_argument('--pop_ev_thresh', type=float, default=0.0,
+                        help='EV cutoff for the population tuning map: only '
+                             'neurons with EV >= this contribute to the summed '
+                             'map (0 = use all neurons). Filtered output is '
+                             'saved as population_map_ev{thresh}.svg alongside '
+                             'the unfiltered population_map.svg.')
     parser.add_argument('--n_jobs', type=int, default=1,
                         help='Parallel workers (-1=all CPUs)')
     # Classification thresholds
@@ -1686,6 +1833,7 @@ def main():
             tc0 = all_results[0]['tuning_curves']
             area = list(tc0.shape[1:])  # (n_neurons, H, W) -> [H, W]
             occupancy = results_dict.get('occupancy')  # None for old pkls
+            world_img = _render_world_img(results_dict.get('world_meta'), area)
 
             # Plots
             if not args.no_plots:
@@ -1714,11 +1862,8 @@ def main():
                         layer_dir / 'example_tuning_curves_ev.pdf',
                         area=area, sort_by='EV',
                     )
-                    r_pop = plot_population_tuning_map(
-                        res['tuning_curves'], occupancy, ln,
-                        layer_dir / 'population_map.svg',
-                    )
-                    print(f"  {ln}: population map r(summed, occupancy) = {r_pop:.3f}")
+                    _emit_population_maps(res, occupancy, layer_dir, world_img,
+                                          ev_thresh=args.pop_ev_thresh)
                 if len(all_results) > 1:
                     plot_layer_summary(all_results, save_dir / 'layer_summary.svg')
                     plot_layer_si_ev(all_results, save_dir)
@@ -1845,6 +1990,10 @@ def main():
     occ_iy = np.clip(np.round(occ_pos[:, 1]).astype(int), 0, area[1] - 1)
     np.add.at(occupancy, (occ_ix, occ_iy), 1.0)
 
+    # World-map metadata for the population-map reference panel (stored in the
+    # pkl so the 4th panel regenerates under --from_pkl).
+    world_meta = _load_world_meta(args.data)
+
     # Build episode file index from surviving (post-filter) episodes
     ep_file_index = [(i, ep['_source_file']) for i, ep in enumerate(lightweight_eps)]
 
@@ -1948,6 +2097,7 @@ def main():
             },
         },
         'occupancy': occupancy,
+        'world_meta': world_meta,
         'layers': {},
     }
     for res in all_results:
@@ -1979,6 +2129,7 @@ def main():
     # Plots
     if not args.no_plots:
         print("\nGenerating plots...")
+        world_img = _render_world_img(world_meta, area)
         for res in all_results:
             ln = res['layer_name']
             safe_name = ln.replace('/', '_')
@@ -2010,11 +2161,8 @@ def main():
                 layer_dir / 'tuning_with_autocorr.pdf',
                 n_examples=10, sort_by='EV',
             )
-            r_pop = plot_population_tuning_map(
-                res['tuning_curves'], occupancy, ln,
-                layer_dir / 'population_map.svg',
-            )
-            print(f"  {ln}: population map r(summed, occupancy) = {r_pop:.3f}")
+            _emit_population_maps(res, occupancy, layer_dir, world_img,
+                                  ev_thresh=args.pop_ev_thresh)
             for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
                 plot_example_tuning_curves(
                     res['tuning_curves'], res['metrics'], res['group_ids'], ln,
