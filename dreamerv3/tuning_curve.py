@@ -1419,6 +1419,81 @@ def plot_layer_summary(all_results, save_path):
     plt.close(fig)
 
 
+def plot_population_tuning_map(tc_array, occupancy, layer_name, save_path,
+                               normalize='minmax'):
+    """Tile every neuron's spatial tuning map and sum them element-wise.
+
+    Each neuron already has a 2D tuning map M_i(x,y) = mean activation of neuron
+    i in tile (x,y) (NaN on unvisited tiles). Summing them pixelwise,
+    S(x,y) = sum_i M_i(x,y), gives the total population activation each tile
+    evokes. The headline question is whether that population map simply mirrors
+    where the agent spends its time (occupancy) or carves out its own spatial
+    structure — so panel 3 is the raw occupancy and the title reports the
+    Pearson r between the two over visited tiles.
+
+    Three panels: (1) summed population map, (2) the same normalized
+    (``minmax`` -> [0,1], or ``zscore``), (3) occupancy (visit counts).
+
+    Args:
+        tc_array: (N_neurons, H, W) tuning curves, NaN = unvisited.
+        occupancy: (H, W) visit counts, or None (old pkl) -> panel 3 shows the
+            visited mask instead.
+        normalize: 'minmax' or 'zscore' for panel 2.
+
+    Returns the Pearson r (summed vs occupancy) or NaN if unavailable.
+    """
+    # Unvisited tiles are NaN identically across neurons (shared positions).
+    visited = ~np.all(np.isnan(tc_array), axis=0)  # (H, W)
+    summed = np.nansum(tc_array, axis=0)
+    summed = np.where(visited, summed, np.nan)
+    n_units = tc_array.shape[0]
+
+    if normalize == 'zscore':
+        mu, sd = np.nanmean(summed), np.nanstd(summed)
+        norm = (summed - mu) / (sd if sd > 0 else 1.0)
+        norm_label = 'z-scored summed activation'
+    else:  # minmax
+        lo, hi = np.nanmin(summed), np.nanmax(summed)
+        norm = (summed - lo) / (hi - lo if hi > lo else 1.0)
+        norm_label = 'normalized summed activation [0,1]'
+
+    if occupancy is not None:
+        occ = np.where(visited, occupancy, np.nan)
+        occ_title, occ_label = 'Occupancy (visit count)', 'visit count'
+        v = visited.ravel()
+        s, o = summed.ravel()[v], np.asarray(occupancy).ravel()[v]
+        r = np.corrcoef(s, o)[0, 1] if s.size > 1 else np.nan
+    else:
+        occ = np.where(visited, 1.0, np.nan)
+        occ_title = 'Visited mask (occupancy counts unavailable)'
+        occ_label = 'visited'
+        r = np.nan
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    panels = [
+        (summed, f'Summed population map\nsum_i tuning_i(x,y)  ({n_units} units)',
+         _tc_cmap(), 'summed activation'),
+        (norm, f'Normalized ({normalize})', _tc_cmap(), norm_label),
+        (occ, occ_title, 'hot', occ_label),
+    ]
+    for ax, (grid, title, cmap, cbar_label) in zip(axes, panels):
+        im = ax.imshow(np.ma.masked_invalid(grid.T), origin='lower',
+                       interpolation='nearest', cmap=cmap, aspect='equal')
+        plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+
+    suptitle = f'{layer_name}: population tuning map vs occupancy'
+    if np.isfinite(r):
+        suptitle += f'  —  Pearson r(summed, occupancy) = {r:.3f}'
+    fig.suptitle(suptitle, fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(save_path, bbox_inches='tight')
+    plt.close(fig)
+    return r
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1610,6 +1685,7 @@ def main():
             # Infer area from tuning curve shape
             tc0 = all_results[0]['tuning_curves']
             area = list(tc0.shape[1:])  # (n_neurons, H, W) -> [H, W]
+            occupancy = results_dict.get('occupancy')  # None for old pkls
 
             # Plots
             if not args.no_plots:
@@ -1638,6 +1714,11 @@ def main():
                         layer_dir / 'example_tuning_curves_ev.pdf',
                         area=area, sort_by='EV',
                     )
+                    r_pop = plot_population_tuning_map(
+                        res['tuning_curves'], occupancy, ln,
+                        layer_dir / 'population_map.svg',
+                    )
+                    print(f"  {ln}: population map r(summed, occupancy) = {r_pop:.3f}")
                 if len(all_results) > 1:
                     plot_layer_summary(all_results, save_dir / 'layer_summary.svg')
                     plot_layer_si_ev(all_results, save_dir)
@@ -1755,6 +1836,15 @@ def main():
         print(f"  (area inferred from position data)")
     print(f"  Area: {area}")
 
+    # Occupancy map (visit counts) at the same integer-tile binning the tuning
+    # curves use — stored in the pkl so the population map regenerates under
+    # --from_pkl without the raw trajectories.
+    occ_pos = np.concatenate([ep['player_pos'][:, :2] for ep in lightweight_eps])
+    occupancy = np.zeros((area[0], area[1]), dtype=np.float64)
+    occ_ix = np.clip(np.round(occ_pos[:, 0]).astype(int), 0, area[0] - 1)
+    occ_iy = np.clip(np.round(occ_pos[:, 1]).astype(int), 0, area[1] - 1)
+    np.add.at(occupancy, (occ_ix, occ_iy), 1.0)
+
     # Build episode file index from surviving (post-filter) episodes
     ep_file_index = [(i, ep['_source_file']) for i, ep in enumerate(lightweight_eps)]
 
@@ -1857,6 +1947,7 @@ def main():
                 'HD_thresh': args.HD_thresh,
             },
         },
+        'occupancy': occupancy,
         'layers': {},
     }
     for res in all_results:
@@ -1919,6 +2010,11 @@ def main():
                 layer_dir / 'tuning_with_autocorr.pdf',
                 n_examples=10, sort_by='EV',
             )
+            r_pop = plot_population_tuning_map(
+                res['tuning_curves'], occupancy, ln,
+                layer_dir / 'population_map.svg',
+            )
+            print(f"  {ln}: population map r(summed, occupancy) = {r_pop:.3f}")
             for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
                 plot_example_tuning_curves(
                     res['tuning_curves'], res['metrics'], res['group_ids'], ln,
