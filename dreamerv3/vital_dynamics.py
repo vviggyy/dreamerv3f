@@ -11,6 +11,13 @@ Three products:
   1. Per-episode time-series overlay (`vitals_episode_XXX.png`): the four vital
      curves over the episode, vertical markers at each achievement unlock, and
      a bottom lane marking vital-relevant actions ("do" = interact, "sleep").
+     Both panels are shaded by the day/night cycle (darker = night) via
+     `_shade_daynight`, matching the GUI dashboard's vital timeline. The daylight
+     trace comes from `get_daylight`: it prefers the per-step `daylight` logged by
+     eval_trajectory (crafter's `log/daylight`), and otherwise recomputes it from
+     `env_step` or the step index via crafter's formula, so pkls that predate
+     daylight logging still render the cycle (the step-index fallback is exact for
+     fresh eval resets, which always start at env-step 0).
   2. Action-rate vs vital level (`action_rate_vs_vital.png`): P(action | vital
      == level) pooled across all steps/episodes — the observational analog of
      state_probe's value/action sweep.
@@ -207,6 +214,48 @@ def get_cows(ep):
     return out
 
 
+def get_daylight(ep):
+    """Per-step daylight in [0,1] for the episode (1=noon, ~0=midnight), or None
+    if it can't be derived.
+
+    Prefers the recorded `daylight` trace (logged by eval_trajectory from the
+    crafter wrapper's log/daylight); falls back to recomputing it from `env_step`
+    (or, failing that, the step index) via crafter's formula so older pkls that
+    predate daylight logging still render the cycle. The step-index fallback
+    assumes the episode starts at env-step 0 (true for a fresh eval reset)."""
+    dl = ep.get('daylight')
+    if dl is not None and len(dl):
+        return np.asarray(dl, dtype=float)
+    T = int(ep.get('length') or len(ep.get('player_pos', [])) or 0)
+    if T <= 0:
+        return None
+    es = ep.get('env_step')
+    steps = np.asarray(es, dtype=float) if (es is not None and len(es)) \
+        else np.arange(T, dtype=float)
+    # crafter.env._update_time: progress=(step/300)%1+0.3; daylight=1-|cos(pi*p)|^3
+    progress = (steps / 300.0) % 1 + 0.3
+    return 1 - np.abs(np.cos(np.pi * progress)) ** 3
+
+
+def _shade_daynight(ax, daylight, T):
+    """Shade an axis's background by the day/night cycle: darker = night.
+
+    Night is painted as a semi-transparent indigo whose opacity tracks
+    (1 - daylight), so daytime stays clear and midnight is darkest. Sits behind
+    all plotted data (negative zorder). Matches dashboard_backend._shade_daynight
+    so the standalone SVGs and the GUI timeline read identically."""
+    if daylight is None or len(daylight) == 0:
+        return
+    night = (1.0 - np.clip(np.asarray(daylight, dtype=float), 0, 1)).reshape(1, -1)
+    rgba = np.zeros((1, night.shape[1], 4))
+    rgba[..., 0], rgba[..., 1], rgba[..., 2] = 0.06, 0.06, 0.22  # dark indigo
+    rgba[..., 3] = 0.5 * night[0]  # opacity ~ darkness
+    y0, y1 = ax.get_ylim()
+    ax.imshow(rgba, extent=[0, max(1, T - 1), y0, y1], aspect='auto',
+              origin='lower', zorder=-5, interpolation='nearest')
+    ax.set_ylim(y0, y1)
+
+
 def get_unlocks(ep):
     """From the per-step cumulative achievement dicts, return {achievement:
     [unlock step, ...]}. Every count increase (0->1 OR any later increment) is
@@ -289,6 +338,7 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
     steps = np.arange(T)
     drops = classify_health_drops(vitals, actions)
     death = cause_of_death(vitals, actions)
+    daylight = get_daylight(ep)        # per-step day/night cycle (None if unknown)
 
     # Figure: left column split into two stacked time-series panels sharing the
     # step axis — TOP = events (achievement unlocks + vital-relevant actions),
@@ -329,6 +379,7 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
                           s=40, color=ACTION_CLASS_COLORS.get(aname, 'k'),
                           label=f'action={aname}')
     ax_ev.set_ylim(0, 1.0)
+    _shade_daynight(ax_ev, daylight, T)                  # darker = night
     ax_ev.set_yticks([ACH_LANE, DO_LANE, SLEEP_LANE])
     ax_ev.set_yticklabels(['achiev.', 'do', 'sleep'], fontsize=7)
     ax_ev.set_ylabel('events')
@@ -342,6 +393,7 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
     ax.set_ylabel('vital level (0-9)')
     ax.set_xlabel('step')
     ax.set_xlim(0, max(1, T - 1))
+    _shade_daynight(ax, daylight, T)                     # darker = night
 
     # ---- Cows over time: overlay the in-view cow count (exposure) on a twin
     #      axis. In-view is what the agent can act on (eat_cow -> food), so it

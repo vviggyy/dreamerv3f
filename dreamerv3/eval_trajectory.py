@@ -103,6 +103,16 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       if key in tran:
         episode_data[cow_key].append(int(tran[key]))
 
+    # Record the day/night cycle per step, if logged (crafter wrapper emits
+    # log/daylight in [0,1], 1=noon ~0=midnight, and log/env_step = crafter's
+    # internal step counter). Tiny scalars; used by vital_dynamics to shade the
+    # per-episode timeline by day/night. env_step lets daylight be recomputed
+    # from crafter's formula for pkls that predate daylight logging.
+    if 'log/daylight' in tran:
+      episode_data['daylight'].append(float(tran['log/daylight']))
+    if 'log/env_step' in tran:
+      episode_data['env_step'].append(int(tran['log/env_step']))
+
     # Track achievements and print when new ones are unlocked
     current_achievements = {}
     for key in tran:
