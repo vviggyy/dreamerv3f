@@ -771,7 +771,8 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon, ach_subset=None,
 def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
                                    fname='achievement_lift_vs_vital',
                                    title='p(achievement | vital) / p(achievement)',
-                                   n_min=20, vmax_cap=4.0):
+                                   n_min=20, log=True, vmin=0.5, vmax=2.0,
+                                   vmax_cap=4.0):
     """Lift heatmap per vital: rows = achievements, cols = vital level, color =
     p(unlock within horizon | vital) / p(unlock within horizon). This divides
     out each achievement's base rate so the color reads as enrichment relative
@@ -779,11 +780,18 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
     makes the behavior MORE likely than usual, <1 = less likely. Diverging
     colormap centered at 1.
 
+    `log=True` (default) uses a log color scale clipped to [`vmin`, `vmax`]
+    (default [0.5, 2.0]) — symmetric about 1 in log space, so lift=1 maps to the
+    middle (white) of the diverging map and a halving (0.5) reads as blue exactly
+    as strongly as a doubling (2.0) reads red. Values are clipped BEFORE the norm
+    so a true 0 (behavior never seen at that level) renders deepest blue instead
+    of being dropped by log(0). `log=False` restores the old linear
+    `TwoSlopeNorm(0, 1, data_max)` scale with `vmax_cap` clipping the red end.
+
     Columns with fewer than `n_min` steps are masked (gray) — lift has high
-    variance when a level bin is thin. `vmax_cap` clips the (red) upper end so a
-    few rare-event cells don't blow out the scale. `ach_subset` restricts/orders
-    the rows exactly like plot_achievement_rate_vs_vital."""
-    from matplotlib.colors import TwoSlopeNorm
+    variance when a level bin is thin. `ach_subset` restricts/orders the rows
+    exactly like plot_achievement_rate_vs_vital."""
+    from matplotlib.colors import TwoSlopeNorm, LogNorm
     all_achs = stats[VITALS[0]]['ach']
     if not all_achs:
         return None
@@ -806,13 +814,25 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
             L = s['P'][rows, :] / base[:, None]
         L[:, s['counts'] < n_min] = np.nan          # mask thin level bins
         lift[v] = L
-    finite = np.concatenate([lift[v][np.isfinite(lift[v])] for v in VITALS]
-                            if any(np.isfinite(lift[v]).any() for v in VITALS)
-                            else [np.array([1.0])])
-    vmax = float(min(vmax_cap, max(1.2, np.nanmax(finite)))) if finite.size else 2.0
-    norm = TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=vmax)
     cmap = plt.get_cmap('RdBu_r').copy()
     cmap.set_bad('0.85')                            # masked cells -> light gray
+    cbar_ticks = None
+    if log:
+        if vmin <= 0:
+            raise SystemExit(f'lift log scale needs vmin > 0, got {vmin}')
+        # Clip BEFORE the norm so NaN (thin bins) stays NaN -> gray, while a true
+        # 0 is brought up to vmin -> deepest blue (LogNorm would otherwise drop
+        # log(0)). np.clip is NaN-preserving.
+        lift = {v: np.clip(L, vmin, vmax) for v, L in lift.items()}
+        norm = LogNorm(vmin=vmin, vmax=vmax)
+        # Geometric (log-symmetric) ticks: vmin, √vmin, 1, √vmax, vmax.
+        cbar_ticks = sorted({vmin, vmin ** 0.5, 1.0, vmax ** 0.5, vmax})
+    else:
+        finite = np.concatenate([lift[v][np.isfinite(lift[v])] for v in VITALS]
+                                if any(np.isfinite(lift[v]).any() for v in VITALS)
+                                else [np.array([1.0])])
+        vhi = float(min(vmax_cap, max(1.2, np.nanmax(finite)))) if finite.size else 2.0
+        norm = TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=vhi)
     fig, axes = plt.subplots(1, len(VITALS), sharey=True,
                              figsize=(3.6 * len(VITALS), max(4.0, 0.32 * len(achs))))
     axes = np.atleast_1d(axes)
@@ -830,10 +850,17 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
                             fontsize=5, ha='center', va='top', color='0.4')
     axes[0].set_yticks(range(len(achs)))
     axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
-    fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
-                 label='lift  p(unlock | vital) / p(unlock)   (1 = baseline)')
+    cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
+                      label='lift  p(unlock | vital) / p(unlock)   (1 = baseline)')
+    if cbar_ticks is not None:                       # log scale: explicit ticks
+        cb.ax.minorticks_off()                        # drop LogNorm's minor labels
+        cb.set_ticks(cbar_ticks)
+        cb.set_ticklabels([f'{t:.2g}' for t in cbar_ticks])
+    scale_txt = (f'log scale, clipped [{vmin:g}, {vmax:g}]' if log
+                 else f'linear scale, cap {vmax_cap:g}')
     fig.suptitle(f'{title} — enrichment vs base rate '
-                 f'(horizon {horizon}; cols <{n_min} steps masked)', fontsize=12)
+                 f'(horizon {horizon}; cols <{n_min} steps masked; {scale_txt})',
+                 fontsize=12)
     out = Path(save_path) / f'{fname}.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)
@@ -858,6 +885,15 @@ def main():
     parser.add_argument('--lift_min_count', type=int, default=20,
                         help='min steps per vital level to show a lift cell '
                              '(thinner columns are masked gray)')
+    parser.add_argument('--lift_vmin', type=float, default=0.5,
+                        help='lift heatmap lower color bound (log scale; '
+                             'default 0.5 = halving)')
+    parser.add_argument('--lift_vmax', type=float, default=2.0,
+                        help='lift heatmap upper color bound (log scale; '
+                             'default 2.0 = doubling)')
+    parser.add_argument('--lift_linear', action='store_true',
+                        help='use the old linear diverging lift scale instead of '
+                             'the (default) log scale')
     parser.add_argument('--avg_clip_pct', type=float, default=5,
                         help='averaged-vitals clip length: percentile of episode '
                              'lengths to clip to (default 5 = ignore the shortest '
@@ -974,7 +1010,8 @@ def main():
         if out5:
             out5c = plot_achievement_lift_vs_vital(
                 av_stats, save_dir, args.achievement_horizon,
-                n_min=args.lift_min_count)
+                n_min=args.lift_min_count, log=not args.lift_linear,
+                vmin=args.lift_vmin, vmax=args.lift_vmax)
             if out5c:
                 outputs.append(str(out5c))
                 print(f'Wrote {out5c}')
@@ -983,7 +1020,8 @@ def main():
                 ach_subset=SUBSET_ACHIEVEMENTS,
                 fname='achievement_lift_vs_vital_subset',
                 title='p(achievement | vital) / p(achievement) [subset]',
-                n_min=args.lift_min_count)
+                n_min=args.lift_min_count, log=not args.lift_linear,
+                vmin=args.lift_vmin, vmax=args.lift_vmax)
             if out5d:
                 outputs.append(str(out5d))
                 print(f'Wrote {out5d}')
