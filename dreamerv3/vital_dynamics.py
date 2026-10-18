@@ -58,11 +58,17 @@ VITAL_COLORS = {
     'drink': '#1f77b4', 'energy': '#2ca02c'}
 VITAL_MAX = 9  # crafter vitals are ints in [0, 9]
 
-# Curated achievements for the subset p(achievement|vital) heatmap
-# (achievement_rate_vs_vital_subset): the early/vital-driven behaviors.
+# Curated behaviors for the subset p(behavior|vital) heatmap
+# (achievement_rate_vs_vital_subset): the early/vital-driven behaviors. Includes
+# 'sleep' (a raw action, not an achievement) to show the energy->rest link.
 SUBSET_ACHIEVEMENTS = [
-    'collect_drink', 'collect_sapling', 'make_wood_pickaxe', 'make_wood_sword',
+    'collect_drink', 'sleep', 'make_wood_pickaxe', 'make_wood_sword',
 ]
+
+# Raw actions folded into the achievement rate/lift analysis as extra "behavior"
+# rows (they are not achievements — we're showing how behavior shifts with state,
+# e.g. does the agent sleep more when energy is low?). name -> crafter action idx.
+BEHAVIOR_ACTIONS = {'sleep': 6}
 # Cow-count overlay color (distinct from the vital + hunger-cause palette).
 COW_COLOR = '#5c4033'
 
@@ -272,6 +278,22 @@ def get_unlocks(ep):
                 unlocks[name].append(t)
             prev[name] = c
     return dict(unlocks)
+
+
+def get_events(ep, extra_actions=None):
+    """Behavior events as {name: [step, ...]} — achievement unlocks (get_unlocks)
+    plus optional raw-action events. `extra_actions` is {name: action_idx}; every
+    step that action is taken counts as one event (e.g. 'sleep'->6), so actions
+    fold into the exact same horizon-conditional / lift framework as achievements.
+    These are NOT achievements — they capture state-specific behavior shifts."""
+    events = dict(get_unlocks(ep))
+    if extra_actions:
+        a = get_actions(ep)
+        for name, idx in extra_actions.items():
+            steps = np.where(a == idx)[0]
+            if steps.size:
+                events[name] = steps.tolist()
+    return events
 
 
 # --------------------------------------------------------------------------- #
@@ -661,14 +683,16 @@ def plot_averaged_vitals(groups, save_path, fname=None):
 # --------------------------------------------------------------------------- #
 # 5. Empirical p(achievement unlock within horizon | vital level)
 # --------------------------------------------------------------------------- #
-def compute_achievement_rate_vs_vital(episodes, horizon=15):
-    """For each vital and level L, P(achievement a unlocks within the next
-    `horizon` steps | vital == L), pooled over all steps/episodes. This is the
-    OBSERVATIONAL conditional (correlational) — the policy net has no achievement
-    head, so this comes from behavior, not a forward pass. Returns {vital:
-    {'levels', 'ach', 'P'(n_ach,n_levels), 'counts'(n_levels)}}."""
+def compute_achievement_rate_vs_vital(episodes, horizon=15, extra_actions=None):
+    """For each vital and level L, P(behavior b occurs within the next `horizon`
+    steps | vital == L), pooled over all steps/episodes. This is the OBSERVATIONAL
+    conditional (correlational) — the policy net has no achievement head, so this
+    comes from behavior, not a forward pass. Behaviors = achievement unlocks plus
+    any `extra_actions` ({name: action_idx}, e.g. BEHAVIOR_ACTIONS for 'sleep'),
+    folded in via get_events. Returns {vital: {'levels', 'ach', 'P'(n_ach,
+    n_levels), 'counts'(n_levels)}}."""
     levels = np.arange(VITAL_MAX + 1)
-    ach_names = sorted({a for ep in episodes for a in get_unlocks(ep)})
+    ach_names = sorted({a for ep in episodes for a in get_events(ep, extra_actions)})
     idx = {a: i for i, a in enumerate(ach_names)}
     acc = {v: {'hit': np.zeros((len(ach_names), len(levels))),
                'tot': np.zeros(len(levels))} for v in VITALS}
@@ -677,8 +701,8 @@ def compute_achievement_rate_vs_vital(episodes, horizon=15):
         if vit is None or not ach_names:
             continue
         T = len(vit['health'])
-        unlocks = get_unlocks(ep)
-        # future[a, t] = achievement a unlocks at some t0 in [t, t+horizon]
+        unlocks = get_events(ep, extra_actions)
+        # future[a, t] = behavior a occurs at some t0 in [t, t+horizon]
         future = np.zeros((len(ach_names), T), dtype=bool)
         for a, tlist in unlocks.items():
             ai = idx.get(a)
@@ -855,7 +879,12 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
     if cbar_ticks is not None:                       # log scale: explicit ticks
         cb.ax.minorticks_off()                        # drop LogNorm's minor labels
         cb.set_ticks(cbar_ticks)
-        cb.set_ticklabels([f'{t:.2g}' for t in cbar_ticks])
+        # Mark the end ticks as saturated (data is clipped to [vmin, vmax]), so
+        # "<0.5" / ">2" signal that out-of-range cells pile onto the extremes.
+        n = len(cbar_ticks)
+        cb.set_ticklabels([
+            f'<{t:.2g}' if i == 0 else f'>{t:.2g}' if i == n - 1 else f'{t:.2g}'
+            for i, t in enumerate(cbar_ticks)])
     scale_txt = (f'log scale, clipped [{vmin:g}, {vmax:g}]' if log
                  else f'linear scale, cap {vmax_cap:g}')
     fig.suptitle(f'{title} — enrichment vs base rate '
@@ -984,9 +1013,10 @@ def main():
             outputs.append(str(out4))
             print(f'Wrote {out4}')
 
-        # 5. p(achievement | vital) — empirical conditional
+        # 5. p(behavior | vital) — empirical conditional (achievements + sleep)
         av_stats = compute_achievement_rate_vs_vital(
-            episodes, horizon=args.achievement_horizon)
+            episodes, horizon=args.achievement_horizon,
+            extra_actions=BEHAVIOR_ACTIONS)
         out5 = plot_achievement_rate_vs_vital(
             av_stats, save_dir, args.achievement_horizon)
         results['achievement_rate_vs_vital'] = av_stats
