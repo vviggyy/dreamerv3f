@@ -41,17 +41,40 @@ import pynapple as nap
 from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter, label, maximum_filter
 from scipy.signal import correlate2d
-def _tc_cmap():
-    """Black->red colormap for tuning curves, with dark grey for NaN/masked
-    (unvisited bins). The dark-grey background keeps the eye on the *visited*
-    region, where firing ramps from black (low) to bright red (peak) so active
-    fields stand out — unlike the old viridis+white, where the unvisited area
-    dominated visually."""
+def _tc_cmap(world_bg=False):
+    """Black->red colormap for tuning curves. Firing ramps from black (low) to
+    bright red/orange (peak) so active fields stand out.
+
+    NaN/masked (unvisited) bins: by default dark grey, which keeps the eye on the
+    visited region. With ``world_bg=True`` they are left TRANSPARENT (alpha 0) so
+    a faint Crafter world map drawn behind the tuning map shows through on
+    unvisited tiles — same treatment as the occupancy_fullset figures."""
     from matplotlib.colors import LinearSegmentedColormap
     cmap = LinearSegmentedColormap.from_list(
         'kr', ['black', '#cc0000', '#ff3b00', '#ff8a00']).copy()
-    cmap.set_bad('#4d4d4d')  # dark grey for unvisited bins
+    if world_bg:
+        cmap.set_bad(alpha=0.0)  # unvisited -> transparent (world shows through)
+    else:
+        cmap.set_bad('#4d4d4d')  # dark grey for unvisited bins
     return cmap
+
+
+def _draw_tuning_map(ax, tc, world_img=None, **imshow_kw):
+    """Draw one neuron's 2D tuning map on ``ax``. When ``world_img`` is given, the
+    faint Crafter world map is drawn behind it and unvisited (NaN) tiles are left
+    transparent so the terrain shows through — identical to the occupancy_fullset
+    style. Extent/orientation mirror plot_population_tuning_map so the world and
+    the tuning map share one tile frame. Returns the tuning-map image handle
+    (for colorbars)."""
+    nx, ny = tc.shape
+    extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]
+    if world_img is not None:
+        ax.imshow(world_img, origin='upper', aspect='equal', extent=extent,
+                  alpha=0.4, zorder=0)
+    return ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                     interpolation='nearest',
+                     cmap=_tc_cmap(world_bg=world_img is not None),
+                     aspect='equal', extent=extent, zorder=1, **imshow_kw)
 
 
 # Reuse data loading from decode_position
@@ -936,7 +959,7 @@ def plot_cell_types(group_ids, layer_name, save_path):
 def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
                                sort_by='SI', ev_filter=0.0,
-                               show_autocorr=False):
+                               show_autocorr=False, world_img=None):
     """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.).
 
     Args:
@@ -1004,8 +1027,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
 
             # Tuning curve
             ax = axes[r, c_tc]
-            im = ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                           interpolation='nearest', cmap=_tc_cmap())
+            im = _draw_tuning_map(ax, tc, world_img=world_img)
             ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
                          fontsize=7)
             ax.set_xticks([])
@@ -1034,8 +1056,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         else:
             c = idx % ncols
             ax = axes[r, c]
-            im = ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                           interpolation='nearest', cmap=_tc_cmap())
+            im = _draw_tuning_map(ax, tc, world_img=world_img)
             ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
                          fontsize=7)
             ax.set_xticks([])
@@ -1065,7 +1086,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
 
 
 def plot_tuning_with_autocorr(tc_array, metrics, layer_name, save_path,
-                              n_examples=10, sort_by='EV'):
+                              n_examples=10, sort_by='EV', world_img=None):
     """Top tuning curves (row 1) with their spatial autocorrelations (row 2).
 
     Shows the top-N neurons by EV (or SI) with their 2D autocorrelation below,
@@ -1103,8 +1124,7 @@ def plot_tuning_with_autocorr(tc_array, metrics, layer_name, save_path,
 
         # Row 0: tuning curve
         ax_tc = axes[0, col]
-        ax_tc.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                     interpolation='nearest', cmap=_tc_cmap())
+        _draw_tuning_map(ax_tc, tc, world_img=world_img)
         ax_tc.set_title(f'n{neuron_idx}\nEV={ev_val:.2f} SI={si_val:.2f}',
                         fontsize=6)
         ax_tc.set_xticks([])
@@ -1779,6 +1799,10 @@ def main():
             ordered = get_sorted_layers(layer_names)
             if args.layers:
                 ordered = [ln for ln in ordered if ln in args.layers]
+            # World map for the tuning-map backgrounds (unvisited tiles show terrain)
+            world_img = _render_world_img(
+                results_dict.get('world_meta'),
+                list(layers[ordered[0]]['tuning_curves'].shape[1:])) if ordered else None
             for ln in ordered:
                 ld = layers[ln]
                 safe_name = ln.replace('/', '_')
@@ -1787,7 +1811,7 @@ def main():
                 plot_tuning_with_autocorr(
                     ld['tuning_curves'], ld['metrics'], ln,
                     layer_dir / 'tuning_with_autocorr.pdf',
-                    n_examples=10, sort_by='EV',
+                    n_examples=10, sort_by='EV', world_img=world_img,
                 )
                 for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
                     plot_example_tuning_curves(
@@ -1798,6 +1822,7 @@ def main():
                         sort_by=metric_name,
                         ev_filter=args.ev_filter,
                         show_autocorr=(metric_name == 'pf_peaks'),
+                        world_img=world_img,
                     )
             print("Done.")
             return
@@ -1855,12 +1880,12 @@ def main():
                     plot_example_tuning_curves(
                         res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                         layer_dir / 'example_tuning_curves.pdf',
-                        area=area, sort_by='SI',
+                        area=area, sort_by='SI', world_img=world_img,
                     )
                     plot_example_tuning_curves(
                         res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                         layer_dir / 'example_tuning_curves_ev.pdf',
-                        area=area, sort_by='EV',
+                        area=area, sort_by='EV', world_img=world_img,
                     )
                     _emit_population_maps(res, occupancy, layer_dir, world_img,
                                           ev_thresh=args.pop_ev_thresh)
@@ -2149,17 +2174,17 @@ def main():
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                 layer_dir / 'example_tuning_curves.pdf',
-                area=area, sort_by='SI',
+                area=area, sort_by='SI', world_img=world_img,
             )
             plot_example_tuning_curves(
                 res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                 layer_dir / 'example_tuning_curves_ev.pdf',
-                area=area, sort_by='EV',
+                area=area, sort_by='EV', world_img=world_img,
             )
             plot_tuning_with_autocorr(
                 res['tuning_curves'], res['metrics'], ln,
                 layer_dir / 'tuning_with_autocorr.pdf',
-                n_examples=10, sort_by='EV',
+                n_examples=10, sort_by='EV', world_img=world_img,
             )
             _emit_population_maps(res, occupancy, layer_dir, world_img,
                                   ev_thresh=args.pop_ev_thresh)
@@ -2170,6 +2195,7 @@ def main():
                     area=area, sort_by=metric_name,
                     ev_filter=args.ev_filter,
                     show_autocorr=(metric_name == 'pf_peaks'),
+                    world_img=world_img,
                 )
 
         if len(all_results) > 1:

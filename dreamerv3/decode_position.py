@@ -1006,9 +1006,15 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
         from matplotlib.colors import LogNorm
         vmax = np.nanmax(occ) if np.isfinite(occ).any() else 1.0
         norm = LogNorm(vmin=1, vmax=max(vmax, 2))  # counts are integers >= 1
-    im = ax.imshow(occ.T, origin='lower', cmap='hot', aspect='equal',
-                   interpolation='nearest', extent=world_extent, alpha=0.7,
-                   norm=norm)
+    # Match the tuning-curve colormap (black->red->orange) at FULL opacity so the
+    # occupancy reads like a tuning map rather than a faded overlay. NaN
+    # (unvisited) stays transparent so the faint world map shows through.
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list(
+        'kr', ['black', '#cc0000', '#ff3b00', '#ff8a00']).copy()
+    cmap.set_bad(alpha=0.0)
+    im = ax.imshow(occ.T, origin='lower', cmap=cmap, aspect='equal',
+                   interpolation='nearest', extent=world_extent, norm=norm)
     _overlay_resources(ax, _get_resource_tiles(metadata) if show_resources else {})
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label('Visit count' + (' (log scale)' if log else ''))
@@ -2159,7 +2165,7 @@ if __name__ == '__main__':
         plot_fullset_occupancy(
             pos_all, width, height, save_dir,
             repr_name=args.occupancy_name, metadata=metadata,
-            show_resources=args.show_resources, log=args.occupancy_log)
+            show_resources=False, log=args.occupancy_log)  # no resource icons
         log_run_info(save_dir, 'decode_position', vars(args),
                      [f'occupancy_fullset_{args.occupancy_name}.svg'],
                      extra={'sub_mode': 'occupancy',
