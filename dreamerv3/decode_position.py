@@ -92,6 +92,58 @@ def load_episodes(data_path, max_episodes=0):
     return episodes, None
 
 
+def _load_positions_only(data_path, max_episodes=0):
+    """Load ONLY player_pos (per episode) + metadata — for the occupancy map,
+    which needs no activations or decoder. Returns (list_of_pos_arrays, metadata).
+
+    Reads each episode pickle fully (pickle can't partial-load) but keeps only the
+    position array and drops the rest, so peak RAM is one episode regardless of the
+    activations bundled in the file. Metadata comes from a sidecar / all_episodes
+    header if present, else the first episode's env_seed/area/... keys (often
+    absent, in which case pass --env_seed for the world background)."""
+    data_path = Path(data_path)
+    ep_files = sorted(data_path.glob('episode_*.pkl'))
+    meta = _load_metadata_only(data_path)
+    per_ep = []
+    if ep_files:
+        if max_episodes > 0:
+            ep_files = ep_files[:max_episodes]
+        ep_meta = {}
+        for i, f in enumerate(ep_files):
+            with open(f, 'rb') as fh:
+                ep = pickle.load(fh)
+            if i == 0:
+                for mk in ('env_seed', 'world_seed', 'area', 'fixed_seed',
+                           'random_spawn', 'task'):
+                    if mk in ep:
+                        ep_meta[mk] = ep[mk]
+            p = ep.get('player_pos')
+            if p is not None and len(p):
+                per_ep.append(np.asarray(p, dtype=np.float32))
+            del ep
+        if meta is None and ep_meta:
+            meta = ep_meta
+    else:
+        all_file = data_path / 'all_episodes.pkl'
+        if all_file.exists():
+            with open(all_file, 'rb') as fh:
+                data = pickle.load(fh)
+            if isinstance(data, dict) and 'episodes' in data:
+                meta = {k: v for k, v in data.items() if k != 'episodes'}
+                eps = data['episodes']
+            else:
+                eps = data
+            if max_episodes > 0:
+                eps = eps[:max_episodes]
+            for ep in eps:
+                p = ep.get('player_pos')
+                if p is not None and len(p):
+                    per_ep.append(np.asarray(p, dtype=np.float32))
+    if not per_ep:
+        raise ValueError(f"No player_pos found under {data_path}")
+    return per_ep, meta
+
+
 def _load_metadata_only(data_path):
     """Try to extract metadata from all_episodes.pkl without loading episodes.
 
@@ -928,11 +980,16 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
 
 def plot_fullset_occupancy(pos_all, width, height, save_dir,
                            repr_name='deter', metadata=None,
-                           show_resources=True):
+                           show_resources=True, log=True):
     """Full-set (train+test combined) occupancy heatmap — the exact data the
     tuning curves are computed on, distinct from the per-split train/test rows
     in occupancy_vs_error. Single panel, same style. Saved as a NEW svg
-    (occupancy_fullset_{repr}.svg)."""
+    (occupancy_fullset_{repr}.svg).
+
+    `log` (default True): use a log color scale (LogNorm over visit counts) so a
+    few heavily-visited tiles don't wash out the rest of the map — visit counts
+    are heavy-tailed (the agent dwells on a handful of tiles), so a linear scale
+    saturates almost everything to the low end. `log=False` restores linear."""
     stats = _compute_tile_stats(pos_all, pos_all.astype(float), width, height)
     walkable_mask = _get_walkable_mask(metadata, width, height)
     cov = calculate_coverage(stats['tile_visits'], walkable_mask=walkable_mask)
@@ -942,18 +999,25 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
     if world_img is not None:
         ax.imshow(world_img, alpha=0.4, extent=world_extent,
                   origin='lower', aspect='equal')
-    occ = stats['tile_visits'].copy()
-    occ[occ == 0] = np.nan
+    occ = stats['tile_visits'].copy().astype(float)
+    occ[occ == 0] = np.nan                       # unvisited -> transparent
+    norm = None
+    if log:
+        from matplotlib.colors import LogNorm
+        vmax = np.nanmax(occ) if np.isfinite(occ).any() else 1.0
+        norm = LogNorm(vmin=1, vmax=max(vmax, 2))  # counts are integers >= 1
     im = ax.imshow(occ.T, origin='lower', cmap='hot', aspect='equal',
-                   interpolation='nearest', extent=world_extent, alpha=0.7)
+                   interpolation='nearest', extent=world_extent, alpha=0.7,
+                   norm=norm)
     _overlay_resources(ax, _get_resource_tiles(metadata) if show_resources else {})
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label('Visit count')
+    cbar.set_label('Visit count' + (' (log scale)' if log else ''))
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_xlim(world_extent[0], world_extent[1])
     ax.set_ylim(world_extent[2], world_extent[3])
-    ax.set_title(f'Tile occupancy (full set — {len(pos_all)} timesteps)\n'
+    ax.set_title(f'Tile occupancy (full set — {len(pos_all)} timesteps)'
+                 f'{"  ·  log color scale" if log else ""}\n'
                  f'{_coverage_label(cov)}', fontsize=10)
     fig.tight_layout()
     fname = f'occupancy_fullset_{repr_name}.svg'
@@ -1896,10 +1960,18 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Decode agent position from world model states')
     parser.add_argument('--data', default=None, help='Path to trajectory pkl directory')
     parser.add_argument('--save', default=None, help='Output directory for plots/results')
-    parser.add_argument('--mode', default='standard', choices=['standard', 'layers'],
+    parser.add_argument('--mode', default='standard',
+                        choices=['standard', 'layers', 'occupancy'],
                         help='"standard": decode deter/stoch (existing). '
                              '"layers": decode from every model layer and produce '
-                             'a comparison boxplot. (default: standard)')
+                             'a comparison boxplot. "occupancy": NO decoding — just '
+                             'read player_pos and emit the full-set occupancy map '
+                             '(fast; for refreshing occupancy_fullset). '
+                             '(default: standard)')
+    parser.add_argument('--occupancy_name', default='fullset',
+                        help='repr label in the occupancy-mode output filename '
+                             'occupancy_fullset_{name}.svg (e.g. A_masked_k5_world45, '
+                             'Cinf). Default: fullset')
     parser.add_argument('--n_iters', type=int, default=5000,
                         help='Training iterations for classification decoder')
     parser.add_argument('--repr', default='all',
@@ -1912,6 +1984,11 @@ if __name__ == '__main__':
                         help='Overlay resource-tile markers (tree/stone/coal/'
                              'iron/diamond/water/lava) on occupancy maps '
                              '(default on; use --no-show_resources to disable)')
+    parser.add_argument('--occupancy_log', action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help='Log color scale for the full-set occupancy heatmap '
+                             '(default on, so a few high-occupancy tiles do not '
+                             'wash out the map; use --no-occupancy_log for linear)')
     parser.add_argument('--n_jobs', type=int, default=1,
                         help='Parallel workers for CV folds and per-neuron '
                              'analysis. Use -1 for all CPUs. (default: 1)')
@@ -2045,6 +2122,50 @@ if __name__ == '__main__':
     data_path = Path(args.data)
     save_dir = Path(args.save) if args.save else data_path.parent / 'decoder_results'
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.mode == 'occupancy':
+        # Positions-only occupancy map: no decoder, no activations, no GPU — just
+        # read player_pos and emit occupancy_fullset. Fast, reproducible way to
+        # refresh the map (e.g. after changing the color scale) without a decode.
+        print("Occupancy mode: loading player_pos only (no decoder)...")
+        per_ep, metadata = _load_positions_only(data_path, args.max_episodes)
+        if args.env_seed is not None:
+            metadata = dict(metadata or {'area': [32, 32]})
+            metadata['env_seed'] = args.env_seed
+        if args.fixed_layout:
+            metadata = dict(metadata or {'area': [32, 32]})
+            metadata['fixed_layout'] = True
+            print("  [override] Occupancy background/mask uses fixed_layout=True")
+        if args.island:
+            metadata = dict(metadata or {'area': [32, 32]})
+            metadata['island'] = {'fill': args.island_fill,
+                                  'roughness': args.island_roughness,
+                                  'seed': args.island_seed}
+        if args.min_bbox > 0:
+            n_before = len(per_ep)
+            per_ep = [p for p in per_ep
+                      if (p[:, 0].max() - p[:, 0].min()) *
+                         (p[:, 1].max() - p[:, 1].min()) >= args.min_bbox]
+            print(f"  Bbox filter: {n_before} → {len(per_ep)} episodes "
+                  f"(min_bbox={args.min_bbox})")
+        pos_all = np.concatenate(per_ep)
+        if metadata and 'area' in metadata:
+            width, height = metadata['area']
+        else:
+            width = int(pos_all[:, 0].max()) + 1
+            height = int(pos_all[:, 1].max()) + 1
+        print(f"  Grid: {width}x{height}  ({len(pos_all)} timesteps, "
+              f"{len(per_ep)} episodes)")
+        plot_fullset_occupancy(
+            pos_all, width, height, save_dir,
+            repr_name=args.occupancy_name, metadata=metadata,
+            show_resources=args.show_resources, log=args.occupancy_log)
+        log_run_info(save_dir, 'decode_position', vars(args),
+                     [f'occupancy_fullset_{args.occupancy_name}.svg'],
+                     extra={'sub_mode': 'occupancy',
+                            'occupancy_log': args.occupancy_log})
+        print("\n>>> Occupancy map saved. <<<")
+        raise SystemExit(0)
 
     # Load data — lightweight approach for layer mode to avoid OOM.
     # For layer mode: load episode files list, discover layers from first file,
@@ -2368,7 +2489,7 @@ if __name__ == '__main__':
                 plot_fullset_occupancy(
                     pos_full, width, height, save_dir,
                     repr_name=occ_layer.replace('/', '_'), metadata=metadata,
-                    show_resources=args.show_resources)
+                    show_resources=args.show_resources, log=args.occupancy_log)
         print("\n>>> Plots saved. Decoding evaluation complete. <<<")
         if loss_histories:
             plot_layer_loss_curves(loss_histories, ordered, save_dir)
@@ -2549,7 +2670,8 @@ if __name__ == '__main__':
                     if train_pos_cls is not None else test_pos)
         plot_fullset_occupancy(pos_full, width, height, save_dir,
                                repr_name=name, metadata=metadata,
-                               show_resources=args.show_resources)
+                               show_resources=args.show_resources,
+                               log=args.occupancy_log)
         # Probability heatmap for each episode (deter only, LOGO only)
         if name == 'deter' and args.holdout_frac <= 0:
             for ep_idx in range(len(np.unique(groups))):
