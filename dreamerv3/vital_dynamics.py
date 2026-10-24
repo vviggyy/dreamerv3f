@@ -38,6 +38,7 @@ are the only vital-relevant raw actions. See VITAL_ACTIONS / VITAL_EVENTS below.
 """
 
 import argparse
+import json
 import pickle
 from pathlib import Path
 from collections import defaultdict
@@ -187,7 +188,18 @@ def load_episodes(data_path):
             eps.append(pickle.load(f))
     if not eps:
         raise FileNotFoundError(f'No all_episodes.pkl or episode_*.pkl under {p}')
-    return eps, {}
+    # Per-episode pkls carry no world metadata; read it from the lightweight
+    # sidecar (written by eval_trajectory even when all_episodes.pkl is skipped)
+    # so the world-map panel still has env_seed/area/fixed_layout/island.
+    meta = {}
+    sidecar = p / 'trajectory_meta.json'
+    if sidecar.exists():
+        try:
+            with open(sidecar) as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+    return eps, meta
 
 
 def get_vitals(ep):

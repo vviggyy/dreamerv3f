@@ -89,7 +89,10 @@ def load_episodes(data_path, max_episodes=0):
     for ep_file in ep_files:
         with open(ep_file, 'rb') as f:
             episodes.append(pickle.load(f))
-    return episodes, None
+    # Per-episode pkls carry no world metadata; pull it from the sidecar so the
+    # world-background / coverage figures still work when all_episodes.pkl is
+    # not written.
+    return episodes, _load_metadata_only(data_path)
 
 
 def _load_positions_only(data_path, max_episodes=0):
@@ -145,18 +148,28 @@ def _load_positions_only(data_path, max_episodes=0):
 
 
 def _load_metadata_only(data_path):
-    """Try to extract metadata from all_episodes.pkl without loading episodes.
+    """Extract trajectory metadata (env_seed/world_seed/area/...) cheaply.
 
-    Falls back to loading the first episode file to check for metadata keys,
-    or returns None if nothing is available.
+    Prefers the lightweight ``trajectory_meta.json`` sidecar written by
+    eval_trajectory (always present, even when all_episodes.pkl is skipped), then
+    a legacy ``metadata.pkl``. Returns None if neither exists — callers use
+    sensible defaults. The per-episode pkls do NOT carry this metadata, so the
+    sidecar is the canonical source once all_episodes.pkl is not written.
     """
-    # Check for a small metadata sidecar first
+    # Lightweight JSON sidecar (eval_trajectory writes this unconditionally).
+    json_file = data_path / 'trajectory_meta.json'
+    if json_file.exists():
+        try:
+            import json
+            with open(json_file) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Legacy pickle sidecar.
     meta_file = data_path / 'metadata.pkl'
     if meta_file.exists():
         with open(meta_file, 'rb') as f:
             return pickle.load(f)
-    # Peek at all_episodes.pkl using incremental unpickling is not feasible
-    # for generic pickles, so just return None — callers use sensible defaults.
     return None
 
 

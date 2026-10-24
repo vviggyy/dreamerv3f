@@ -267,9 +267,19 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
         'island': island_meta,   # None unless island_border was used
         'fixed_layout': fixed_layout_meta,   # False unless fixed_layout was used
     }
-    with open(str(all_file), 'wb') as f:
-      pickle.dump(save_data, f)
-    print(f"\nSaved {len(valid_episodes)} episodes to {all_file}{tag}")
+    # all_episodes.pkl is a verbatim concat of the per-episode episode_*.pkl files
+    # (carries all activations/images -> tens of GB) and every downstream loader
+    # prefers episode_*.pkl, falling back to this only when the per-episode files
+    # are absent. It is therefore redundant storage + an OOM risk, so it is written
+    # only when explicitly requested (eval_trajectory.save_combined=True). The
+    # lightweight metadata sidecar below is ALWAYS written.
+    if getattr(et_config, 'save_combined', False):
+      with open(str(all_file), 'wb') as f:
+        pickle.dump(save_data, f)
+      print(f"\nSaved {len(valid_episodes)} episodes to {all_file}{tag}")
+    else:
+      print(f"\nSaved {len(valid_episodes)} per-episode pkls to {save_path}{tag} "
+            f"(all_episodes.pkl skipped; set eval_trajectory.save_combined=True to write it)")
 
     # Lightweight metadata sidecar — all_episodes.pkl can be tens of GB (it
     # carries activations), so downstream tools that only need the world

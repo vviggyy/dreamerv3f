@@ -26,6 +26,16 @@
 - `embodied/jax/internal.py` — setup() sets jax platform, XLA flags. Line 34: `platform and jax.config.update('jax_platforms', platform)`
 - `embodied/tests/test_crafter_world.py` — world consistency tests (fixed_seed, walkable spawn, determinism)
 
+## 13-step pipeline (`run_0All_*.sh` + `pipeline/`)
+The full train→analysis pipeline is **shared**, not duplicated per variant:
+- `pipeline/defaults.sh` — every knob at the poster/default-net value (incl. cow/mob/vital at stock no-op values, so the arg builder is unconditional). Sourced first.
+- `pipeline/lib.sh` — the entire 13-step body: arg-building (`_build_env_args`), `hyperparams.txt` dump, stamp-file resume (`step_done`/`mark_done`, `FORCE_FROM`/`FORCE_STEP`/`FORCE_TRAIN`), all 13 steps, **step 12b DSA dump cleanup** (deletes the 32–64 GB `dream_deter_{A,B,C,D}.pkl` once steps 11+12 consume them; `DSA_CLEANUP_DUMPS=true` default, resume-safe), and a `PIPELINE_DRY_RUN=1` mode that echoes every python command without side effects (no GPU, no file writes). Sourced last.
+- Each `run_0All_*.sh` is a **thin wrapper** (~30–45 lines): SBATCH header → `source defaults.sh` → override only what differs (+ any array/LOGDIR logic) → `source lib.sh`. Fix the pipeline ONCE in `lib.sh`.
+- **`RUN_ANALYSIS`** (defaulted to true by lib.sh via `:=`): false → vitals_only eval (no activations/images) + skip steps 4,5,6,7,9 (for long-episode behavior-only runs that would OOM). Behavior wrappers (morecows/varmobs/vitalreward) default it false; override at submit with `RUN_ANALYSIS=true sbatch ...`.
+- **Converted (thin):** `run_0All.sh` (default), `_fixedlayout`, `_island_big`, `_vanilla_wrld45`, `_fixedmobs_25m`, `_morecows`, `_varmobs_25m`, `_vitalreward_25m`.
+- **Still standalone (Tier C — different pipeline body, NOT thin wrappers):** `run_0All_rollout.sh`, `run_0All_world.sh` (older no-resume generation; world has a custom-world size array) and `run_0All_maskedworlds.sh`, `run_0All_wrld41.sh` (steps 3–12 in a per-eval-seed `eval_and_analyze()` loop writing `*_seed{45,50,104}` subdirs, artifact-based resume). Editing the pipeline does NOT touch these — update them separately.
+- `pipeline/_legacy/` — pre-refactor copies of all `run_0All_*` + retired one-off scripts. Safe to `rm -rf` once confirmed.
+
 ## SLURM scripts (repo root)
 - `run_Crafter.sh` — train model (H100, parametrized env/size/activation/wd). Saves `hyperparams.txt` to logdir
 - `run_Trajectory.sh` — eval trajectories (CPU, matches training hyperparams). Auto-resolves checkpoint from `$LOGDIR/ckpt/latest`
@@ -79,7 +89,7 @@ python dreamerv3/main.py \
   --eval_trajectory.save_path ./logdir/my_run/trajectories \
   --seed 42 --jax.platform cpu
 ```
-Saves: per-episode pkl + all_episodes.pkl with metadata {env_seed, world_seed, fixed_seed, task, area}
+Saves: per-episode `episode_NNN.pkl` + `trajectory_meta.json` sidecar (metadata {env_seed, world_seed, fixed_seed, task, area, island, fixed_layout}). **`all_episodes.pkl` is NO LONGER written by default** (`eval_trajectory.save_combined=False`) — it was a verbatim concat of the per-episode pkls (tens of GB, carries activations) and an OOM risk, and every downstream loader prefers `episode_*.pkl` + the sidecar. Pass `--eval_trajectory.save_combined True` to restore it. Loaders (`decode_position`, `tuning_curve`, `vital_dynamics`, `plot_trajectories`, `manifold_analysis`) now read world metadata from the sidecar when `all_episodes.pkl` is absent; old `all_episodes.pkl` runs still load fine.
 
 ### plot trajectories
 ```

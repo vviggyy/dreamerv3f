@@ -103,12 +103,23 @@ def load_episodes(data_path):
         # Old format - just list of episodes
         return data, None
 
-    # Otherwise load individual episode files
+    # Otherwise load individual episode files, pulling world metadata (env_seed
+    # etc.) from the lightweight sidecar — the per-episode pkls don't carry it,
+    # and all the world-background plots need env_seed. The sidecar is written by
+    # eval_trajectory even when all_episodes.pkl is skipped.
+    sidecar = data_path / 'trajectory_meta.json'
+    if sidecar.exists():
+        try:
+            import json
+            with open(sidecar) as f:
+                metadata = json.load(f)
+        except Exception:
+            metadata = None
     episodes = []
     for ep_file in sorted(data_path.glob('episode_*.pkl')):
         with open(ep_file, 'rb') as f:
             episodes.append(pickle.load(f))
-    return episodes, None
+    return episodes, metadata
 
 
 def _filter_valid_episodes(episodes, context=''):
