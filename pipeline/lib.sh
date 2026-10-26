@@ -365,6 +365,26 @@ else
 fi
 
 # =====================================================================
+# STEP 3c: OCCUPANCY MAP (positions-only). Runs ALWAYS — needs only player_pos,
+# so it works on vitals_only trajectories (RUN_ANALYSIS=false) too. Emits
+# occupancy_fullset_*.svg (visit-count hotspots + pRNN coverage) without a
+# decoder/activations/GPU. In full-analysis mode step 5 also makes the
+# decode-based occupancy_vs_error; this is the lightweight always-on companion.
+# =====================================================================
+echo ""; echo "============================================================"
+echo "  STEP 3c/13: OCCUPANCY MAP (positions-only)"; echo "============================================================"
+if step_done 3c; then skip_note 3c; else
+    # Occupancy over ALL eval trajectories (positions-only, cheap) — not a
+    # test-split subset. max_episodes 0 = every recorded episode.
+    OCC_ARGS="--data $TRAJ_DIR --save ${LOGDIR}/occupancy --mode occupancy"
+    OCC_ARGS+=" --max_episodes 0"
+    [ "$FIXED_LAYOUT" = "True" ]  && OCC_ARGS+=" --fixed_layout"
+    [ "$ISLAND_BORDER" = "True" ] && OCC_ARGS+=" --island --island_seed $ISLAND_SEED --island_fill $ISLAND_FILL --island_roughness $ISLAND_ROUGHNESS"
+    MPLBACKEND=Agg python dreamerv3/decode_position.py $OCC_ARGS
+    mark_done 3c
+fi
+
+# =====================================================================
 # STEP 4: LAYER DECODING
 # =====================================================================
 echo ""; echo "============================================================"

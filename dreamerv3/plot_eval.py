@@ -72,12 +72,48 @@ def _cause_order(causes):
 
 
 def load_episodes(data_path):
-    """Load all_episodes.pkl (or a dir containing it). Returns (episodes, meta)."""
+    """Load eval trajectories. Returns (episodes, meta).
+
+    Prefers the per-episode `episode_*.pkl` files written by eval_trajectory
+    (with world metadata read from the `trajectory_meta.json` sidecar), since
+    `all_episodes.pkl` is no longer written by default (save_combined=False).
+    Falls back to `all_episodes.pkl` when the per-episode files are absent, or
+    when `data_path` points directly at a pickle file."""
     p = pathlib.Path(data_path)
+
+    # Direct path to an all_episodes.pkl (or any pickle) was given.
+    if p.is_file():
+        return _load_combined(p)
+
     if p.is_dir():
-        p = p / 'all_episodes.pkl'
-    if not p.exists():
-        raise FileNotFoundError(f'No all_episodes.pkl at {p}')
+        ep_files = sorted(p.glob('episode_*.pkl'))
+        if ep_files:
+            episodes = []
+            for ep_file in ep_files:
+                with open(ep_file, 'rb') as f:
+                    episodes.append(pickle.load(f))
+            meta = {}
+            sidecar = p / 'trajectory_meta.json'
+            if sidecar.exists():
+                import json
+                try:
+                    with open(sidecar) as f:
+                        meta = json.load(f)
+                except Exception as e:
+                    print(f'  (could not read {sidecar}: {e})')
+            return episodes, meta
+        # No per-episode files -> try the combined pickle.
+        combined = p / 'all_episodes.pkl'
+        if combined.exists():
+            return _load_combined(combined)
+        raise FileNotFoundError(
+            f'No episode_*.pkl or all_episodes.pkl in {p}')
+
+    raise FileNotFoundError(f'No such file or directory: {p}')
+
+
+def _load_combined(p):
+    """Load a single all_episodes.pkl. Returns (episodes, meta)."""
     with open(p, 'rb') as f:
         d = pickle.load(f)
     if isinstance(d, dict) and 'episodes' in d:
