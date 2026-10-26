@@ -993,7 +993,7 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
 
 def plot_fullset_occupancy(pos_all, width, height, save_dir,
                            repr_name='deter', metadata=None,
-                           show_resources=True, log=True):
+                           show_resources=True, log=True, fname_suffix=''):
     """Full-set (train+test combined) occupancy heatmap — the exact data the
     tuning curves are computed on, distinct from the per-split train/test rows
     in occupancy_vs_error. Single panel, same style. Saved as a NEW svg
@@ -1039,7 +1039,7 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
                  f'{"  ·  log color scale" if log else ""}\n'
                  f'{_coverage_label(cov)}', fontsize=10)
     fig.tight_layout()
-    fname = f'occupancy_fullset_{repr_name}.svg'
+    fname = f'occupancy_fullset_{repr_name}{fname_suffix}.svg'
     fig.savefig(save_dir / fname, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved {fname}")
@@ -2179,8 +2179,17 @@ if __name__ == '__main__':
             pos_all, width, height, save_dir,
             repr_name=args.occupancy_name, metadata=metadata,
             show_resources=False, log=args.occupancy_log)  # no resource icons
+        occ_outputs = [f'occupancy_fullset_{args.occupancy_name}.svg']
+        # Also emit the linear-scale companion (cheap) so the heavy-tailed visit
+        # counts can be read on a linear axis alongside the default log map.
+        if args.occupancy_log:
+            plot_fullset_occupancy(
+                pos_all, width, height, save_dir,
+                repr_name=args.occupancy_name, metadata=metadata,
+                show_resources=False, log=False, fname_suffix='_linear')
+            occ_outputs.append(f'occupancy_fullset_{args.occupancy_name}_linear.svg')
         log_run_info(save_dir, 'decode_position', vars(args),
-                     [f'occupancy_fullset_{args.occupancy_name}.svg'],
+                     occ_outputs,
                      extra={'sub_mode': 'occupancy',
                             'occupancy_log': args.occupancy_log})
         print("\n>>> Occupancy map saved. <<<")
