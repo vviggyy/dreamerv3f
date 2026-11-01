@@ -115,6 +115,13 @@ HURT_CAUSE_COLORS = {
 }
 
 
+# Crafter's lava death (objects.py `_move`) zeroes health the SAME env-step the
+# agent steps onto a lava tile, but eval_trajectory's obs/action logging can place
+# that move one row before the health=0 observation. Look back this many steps for
+# the move onto lava rather than only checking the fatal step.
+LAVA_MOVE_LOOKBACK = 2
+
+
 def classify_health_drops(vitals, actions=None):
     """Every step where health decreased -> (t, delta, cause).
 
@@ -138,10 +145,23 @@ def classify_health_drops(vitals, actions=None):
             lacking.append('thirst')
         if energy[t - 1] == 0 or energy[t] == 0:
             lacking.append('exhaustion')
+        # Lava is the ONLY crafter mechanic that zeroes health in one step from any
+        # value (objects.py `_move`); necessity degen is gradual (-1, gated above
+        # by `lacking`) and mob hits are small/fixed (zombie 2 awake / 7 asleep,
+        # arrow 2) and never require a move. So an instant drop to 0 at full
+        # necessities is lava iff the agent moved onto the tile -- checked over a
+        # short lookback window (the fatal move may be logged a row early), with a
+        # magnitude catch-all (>=8 lost in one step is lava outright; no mob does
+        # 8+, so this also covers missing/misaligned action logs).
         instant_to_zero = (h[t] == 0 and h[t - 1] >= 2)  # lost >=2 to 0 in one step
-        is_move = (actions is not None and t < len(actions)
-                   and 1 <= int(actions[t]) <= 4)
-        if not lacking and instant_to_zero and (is_move or actions is None):
+        hard_oneshot = (h[t] == 0 and h[t - 1] >= 8)
+        if actions is not None:
+            lo = max(0, t - LAVA_MOVE_LOOKBACK)
+            recent_move = any(1 <= int(actions[s]) <= 4
+                              for s in range(lo, min(t + 1, len(actions))))
+        else:
+            recent_move = True  # no action info -> can't rule out a move onto lava
+        if not lacking and instant_to_zero and (hard_oneshot or recent_move):
             cause = 'lava'
         elif lacking:
             cause = '+'.join(lacking)

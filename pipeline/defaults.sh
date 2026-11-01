@@ -65,7 +65,7 @@ MOB_SCALE_MEAN=0.5
 VITAL_REWARD=False
 
 # --- Training length (env steps) ---
-ENV_STEPS=""                    # empty -> preset default (crafter_small = 1.1M)
+ENV_STEPS="${ENV_STEPS:-}"      # empty -> preset default (crafter_small = 1.1M); overridable via submit env
 HALF_ENV_STEPS=False
 CRAFTER_SMALL_DEFAULT_STEPS=1100000
 

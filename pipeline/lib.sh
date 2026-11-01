@@ -34,7 +34,7 @@ fi
 # =====================================================================
 : "${LOGDIR:?LOGDIR must be set by the wrapper before sourcing lib.sh}"
 CONFIGS="$ENV $SIZE"
-TRAJ_DIR="${LOGDIR}/trajectories"
+TRAJ_DIR="${TRAJ_DIR:-${LOGDIR}/trajectories}"
 DECODER_DIR="${LOGDIR}/decoder_results"
 DECODER_PKL="${DECODER_DIR}/classifier_${DECODE_REPR}.pkl"
 DREAM_DIR="${LOGDIR}/dream_results"
@@ -42,7 +42,7 @@ DREAM_PKL="${DREAM_DIR}/dream_results.pkl"
 TUNING_SAVE="${LOGDIR}/tuning_results"
 TUNING_PKL="${TUNING_SAVE}/tuning_results.pkl"
 CLUSTER_SAVE="${TUNING_SAVE}/cluster_plots"
-VITAL_DYNAMICS_SAVE="${LOGDIR}/vital_dynamics"
+VITAL_DYNAMICS_SAVE="${VITAL_DYNAMICS_SAVE:-${LOGDIR}/vital_dynamics}"
 DSA_DIR="${LOGDIR}/dream_seed_ablation_${DSA_HORIZON}"
 DSA_REPORT_LENGTH=$(( DSA_HORIZON + DSA_WARMUP_SLACK ))
 DSA_BATCH_LENGTH=$DSA_REPORT_LENGTH
