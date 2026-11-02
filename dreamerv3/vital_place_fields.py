@@ -41,9 +41,15 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+# Field-shape classification thresholds (gating vs relocation)
+STRENGTH_FLOOR = 0.35   # weaker condition's peak < this x stronger's -> "gated off"
+SHIFT_THRESH = 3.0      # peak/COM shift (tiles) above which a field counts as moved
+FIELD_SMOOTH = 1.0      # gaussian sigma (tiles) before peak/COM location
 
 VITAL_COLORS = {'health': '#d62728', 'food': '#2ca02c',
                 'drink': '#1f77b4', 'energy': '#ff7f0e'}

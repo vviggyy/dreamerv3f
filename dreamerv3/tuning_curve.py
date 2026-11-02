@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pynapple as nap
 from joblib import Parallel, delayed
-from scipy.ndimage import gaussian_filter, label, maximum_filter
+from scipy.ndimage import gaussian_filter, label, maximum_filter, convolve
 from scipy.signal import correlate2d
 def _tc_cmap(world_bg=False):
     """Black->red colormap for tuning curves. Firing ramps from black (low) to
@@ -254,73 +254,107 @@ def count_autocorr_peaks(autocorr, min_distance=5, threshold=0.15,
     return n_peaks
 
 
-def count_tuning_curve_peaks(tc, min_distance=5, threshold_frac=0.75,
-                             smooth_sigma=1.5, prominence_frac=0.1):
-    """Count distinct peaks directly on a 2-D tuning curve.
+def count_tuning_curve_peaks(tc, smooth_sigma=1.5, min_area=4, mad_k=3.0,
+                             prominence_frac=0.15, **legacy):
+    """Count contiguous place FIELDS on a 2-D tuning curve, robust to spotty noise.
 
-    Unlike count_autocorr_peaks (which operates on the symmetric
-    autocorrelation and requires halving), this works on the tuning curve
-    itself so each detected peak maps 1:1 to a place field.
+    A field = a connected region of bins above a ROBUST threshold
+    (median + mad_k * 1.4826 * MAD, computed over visited bins) that (a) spans at
+    least ``min_area`` tiles and (b) has prominence >= prominence_frac * range.
 
-    Thresholds are relative to the neuron's own activation range so the
-    function generalises across neurons with different firing rates.
+    This replaces the previous threshold-on-max + single-bin-local-maxima version,
+    which counted ~8 "peaks" on pure-noise maps (every scattered hot pixel passed).
+    The median+MAD threshold is immune to a single outlier bin inflating the max,
+    and the min-area requirement rejects single-bin noise spots so the count tracks
+    real multi-field structure rather than speckle.
 
     Args:
-        tc: 2-D tuning curve array (H, W). NaN = unvisited bins.
-        min_distance: Minimum separation (pixels) between peaks.
-        threshold_frac: Fraction of the tuning curve max — candidates
-            below ``max * threshold_frac`` are discarded (default 0.75).
-        smooth_sigma: Gaussian sigma (pixels) applied before peak finding.
-            Set to 0 to disable smoothing.
-        prominence_frac: Minimum prominence as a fraction of the tuning
-            curve range (max - min). A peak must rise at least this much
-            above its surrounding background (default 0.1).
-
+        tc: 2-D tuning curve (H, W); NaN = unvisited.
+        smooth_sigma: Gaussian sigma (tiles) before detection (0 = off).
+        min_area: minimum contiguous tiles for a region to count as a field.
+        mad_k: robust threshold = median + mad_k * 1.4826 * MAD over visited bins.
+        prominence_frac: a field's peak must exceed the threshold by at least this
+            fraction of the tuning-curve range.
+        **legacy: absorbs retired kwargs (min_distance, threshold_frac).
     Returns:
-        Number of detected peaks (int).
+        Number of detected fields (int).
     """
-    tc_clean = np.nan_to_num(tc, nan=0.0).copy()
-    tc_max = tc_clean.max()
-    tc_min = tc_clean.min()
-    tc_range = tc_max - tc_min
-    if tc_range == 0 or tc_max == 0:
+    tc_f = np.array(tc, dtype=float)
+    valid = ~np.isnan(tc_f)
+    if valid.sum() < min_area:
         return 0
-
-    if smooth_sigma > 0:
-        tc_clean = gaussian_filter(tc_clean, sigma=smooth_sigma)
-        # Recompute after smoothing
-        tc_max = tc_clean.max()
-        tc_min = tc_clean.min()
-        tc_range = tc_max - tc_min
-
-    abs_threshold = tc_max * threshold_frac
-    abs_prominence = tc_range * prominence_frac
-
-    # Find local maxima separated by at least min_distance
-    filter_size = 2 * min_distance + 1
-    local_max = ((maximum_filter(tc_clean, size=filter_size) == tc_clean)
-                 & (tc_clean > abs_threshold))
-
-    labeled, num_candidates = label(local_max)
-    if num_candidates == 0:
+    if smooth_sigma > 0:                       # NaN-aware smoothing
+        base = np.nanmin(tc_f)
+        sm = gaussian_filter(np.where(valid, tc_f, base), sigma=smooth_sigma)
+        sm[~valid] = np.nan
+        tc_f = sm
+    vals = tc_f[valid]
+    rng = float(np.nanmax(vals) - np.nanmin(vals))
+    if rng <= 0:
         return 0
+    med = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - med)))
+    thr = med + mad_k * 1.4826 * mad if mad > 0 else med + 0.5 * rng
+    abs_prom = prominence_frac * rng
 
-    peak_heights = np.zeros(num_candidates)
-    for i in range(1, num_candidates + 1):
-        peak_heights[i - 1] = tc_clean[labeled == i].max()
-
-    from scipy.ndimage import minimum_filter
-    bg = minimum_filter(tc_clean, size=2 * filter_size + 1)
-    prominences = np.zeros(num_candidates)
-    for i in range(1, num_candidates + 1):
+    supra = (tc_f > thr) & valid
+    labeled, n = label(supra)
+    if n == 0:
+        return 0
+    count = 0
+    for i in range(1, n + 1):
         mask = labeled == i
-        ph = tc_clean[mask].max()
-        bg_level = bg[mask].min()
-        prominences[i - 1] = ph - bg_level
+        if mask.sum() < min_area:
+            continue
+        if (tc_f[mask].max() - thr) < abs_prom:
+            continue
+        count += 1
+    return count
 
-    n_peaks = int(np.sum((prominences >= abs_prominence)
-                         & (peak_heights > abs_threshold)))
-    return n_peaks
+
+def spatial_coherence(tc):
+    """Muller-Kubie spatial coherence: Pearson r between each visited bin's rate
+    and the mean rate of its (up to 8) visited neighbours.
+
+    A smooth, contiguous field => neighbouring bins agree => high coherence.
+    Speckled noise => bins uncorrelated with neighbours => coherence ~ 0. So this
+    is a direct 'spottiness' meter and the natural reliability gate for the
+    field-shape metrics. Returns NaN if too few visited bins / no variance.
+    """
+    tc = np.asarray(tc, float)
+    valid = ~np.isnan(tc)
+    if valid.sum() < 5:
+        return np.nan
+    filled = np.where(valid, tc, 0.0)
+    kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], float)
+    nsum = convolve(filled, kernel, mode='constant', cval=0.0)
+    ncnt = convolve(valid.astype(float), kernel, mode='constant', cval=0.0)
+    m = valid & (ncnt > 0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        nmean = nsum / ncnt
+    a, b = tc[m], nmean[m]
+    if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
+        return np.nan
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def spatial_sparsity(tc, occ):
+    """Skaggs sparsity: (sum p*lambda)^2 / sum p*lambda^2, p = occupancy prob.
+
+    In (0,1]: ~1 = diffuse/uniform firing, small = concentrated in few tiles. A
+    threshold-free field-concentration measure (robust `fieldsize` alternative that
+    never NaNs on multi-peak cells). Returns NaN only if no valid/visited bins.
+    """
+    tc = np.asarray(tc, float); occ = np.asarray(occ, float)
+    valid = (~np.isnan(tc)) & (occ > 0)
+    if valid.sum() < 3:
+        return np.nan
+    p = occ[valid] / occ[valid].sum()
+    lam = np.clip(tc[valid], 0, None)          # relu-ish rates; clip negatives
+    den = float((p * lam ** 2).sum())
+    if den == 0:
+        return np.nan
+    return float((p * lam).sum() ** 2 / den)
 
 
 def calculate_field_size(tc_autocorr, threshold=0.5):
@@ -715,7 +749,8 @@ def analyze_layer(layer_name, activations, positions, groups, area,
                   facing=None, test_activations=None, test_positions=None,
                   test_groups=None, compute_hd=True, smooth_sigma=0,
                   dist_cutoff=0, peak_smooth_sigma=1.5,
-                  peak_threshold_frac=0.75, peak_prominence_frac=0.1):
+                  peak_threshold_frac=0.75, peak_prominence_frac=0.1,
+                  field_coh_floor=0.5, field_ev_floor=0.15):
     """Full tuning curve analysis for one layer.
 
     Args:
@@ -784,6 +819,20 @@ def analyze_layer(layer_name, activations, positions, groups, area,
     # Global spatial autocorrelation metrics
     morans, gearys, getis = _compute_spatial_autocorr_metrics(tc_array, dist_cutoff=dist_cutoff)
 
+    # Field-quality metrics: Muller-Kubie coherence (spottiness meter) + Skaggs
+    # sparsity (threshold-free concentration). Occupancy from visited bins.
+    occ = np.zeros((area[0], area[1]), float)
+    _px = np.clip(positions[:, 0].astype(int), 0, area[0] - 1)
+    _py = np.clip(positions[:, 1].astype(int), 0, area[1] - 1)
+    np.add.at(occ, (_px, _py), 1)
+    coherence = np.array([spatial_coherence(tc) for tc in tc_array])
+    sparsity = np.array([spatial_sparsity(tc, occ) for tc in tc_array])
+    # Reliability gate: the fragile autocorr field descriptors are only
+    # meaningful on cells with a coherent, reliable field. Spotty/noise cells
+    # (low coherence or low EV) get fieldsize/asymmetry NaN'd below; robust
+    # pf_peaks already reports 0 for them.
+    reliable = (coherence >= field_coh_floor) & (evs >= field_ev_floor)
+
     # Border score: NaN (no terrain data at analysis time)
     border_score = np.full(n_neurons, np.nan)
 
@@ -798,10 +847,17 @@ def analyze_layer(layer_name, activations, positions, groups, area,
         'morans_i': morans,
         'gearys_c': gearys,
         'getis_ord_g': getis,
+        'coherence': coherence,
+        'sparsity': sparsity,
+        'reliable': reliable,
     }
 
-    # Cell classification
+    # Cell classification (on raw field metrics, before gating)
     cell_groups, group_ids = classify_cells(metrics)
+
+    # Gate the fragile autocorr field descriptors to NaN on unreliable cells.
+    metrics['fieldsize'] = np.where(reliable, fieldsizes, np.nan)
+    metrics['fieldasymmetry'] = np.where(reliable, fieldasymmetries, np.nan)
 
     return {
         'layer_name': layer_name,
@@ -1813,7 +1869,7 @@ def main():
                     layer_dir / 'tuning_with_autocorr.pdf',
                     n_examples=10, sort_by='EV', world_img=world_img,
                 )
-                for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
+                for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks', 'coherence', 'sparsity'):
                     plot_example_tuning_curves(
                         ld['tuning_curves'], ld['metrics'],
                         ld.get('group_ids', np.zeros(len(ld['metrics']['SI']), dtype=int)),
@@ -2188,7 +2244,7 @@ def main():
             )
             _emit_population_maps(res, occupancy, layer_dir, world_img,
                                   ev_thresh=args.pop_ev_thresh)
-            for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks'):
+            for metric_name in ('morans_i', 'gearys_c', 'getis_ord_g', 'fieldsize', 'pf_peaks', 'coherence', 'sparsity'):
                 plot_example_tuning_curves(
                     res['tuning_curves'], res['metrics'], res['group_ids'], ln,
                     layer_dir / f'example_tuning_curves_{metric_name}.pdf',
