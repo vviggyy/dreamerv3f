@@ -300,9 +300,14 @@ else
     mark_done 1
 fi
 
-# Resolve checkpoint (ALWAYS — later steps need $CKPT even if STEP 1 skipped)
+# Resolve checkpoint (ALWAYS — later steps need $CKPT even if STEP 1 skipped).
+# FORCE_CKPT pins a specific checkpoint dir (e.g. to eval a fixed training length
+# while an extension run is concurrently updating ckpt/latest).
 LATEST_FILE="${LOGDIR}/ckpt/latest"
-if [ -f "$LATEST_FILE" ]; then
+if [ -n "${FORCE_CKPT:-}" ]; then
+    CKPT="$FORCE_CKPT"
+    echo "Resolved checkpoint: $CKPT (pinned via FORCE_CKPT)"
+elif [ -f "$LATEST_FILE" ]; then
     CKPT="${LOGDIR}/ckpt/$(cat "$LATEST_FILE")"
     echo "Resolved checkpoint: $CKPT"
 elif [ -n "${PIPELINE_DRY_RUN:-}" ]; then

@@ -51,6 +51,7 @@ defaults:
     save_path: ''
     load_checkpoint: True
     record_activations: True   # False -> skip per-layer activations (enc/cnn*, ~88% of traj size); use for vitals/achievement-only runs
+    light_activations: False   # True -> keep ONLY dyn/deter+dyn/stoch (+deter/stoch), drop the heavy enc/pol/val act/* layers. For spatial analyses that need deter on long episodes that would OOM a full-activation eval. Requires record_activations=True
     vitals_only: False         # True -> record ONLY pos/vitals/actions/achievements (also drops image + forces no activations); ~1.5KB/step for vital_dynamics-only runs
     save_combined: False       # True -> ALSO write all_episodes.pkl (verbatim concat of episode_*.pkl, tens of GB). Default False: per-episode pkls + trajectory_meta.json cover every downstream loader (all prefer episode_*.pkl); the combined file is a redundant duplicate + OOM risk
 

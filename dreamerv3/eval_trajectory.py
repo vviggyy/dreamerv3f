@@ -142,10 +142,16 @@ def eval_trajectory(make_agent, make_env, make_logger, args):
       if 'dyn/stoch' in tran:
         episode_data['stoch'].append(tran['dyn/stoch'].copy())
 
-    # Record per-layer activations (record_activations=True path)
+    # Record per-layer activations (record_activations=True path). In
+    # light_activations mode keep ONLY dyn/deter+dyn/stoch and drop the heavy
+    # enc/pol/val layers (enc/cnn* is ~88% of the trajectory) so deter-based
+    # spatial analyses can run on long episodes that would otherwise OOM.
+    light = getattr(et_config, 'light_activations', False)
     for key in tran:
       if key.startswith('activations/'):
-        layer_name = key[len('activations/'):]  # e.g. 'enc/cnn0'
+        layer_name = key[len('activations/'):]  # e.g. 'enc/cnn0' or 'dyn/deter'
+        if light and not layer_name.startswith('dyn/'):
+          continue
         store_key = f'act/{layer_name}'
         episode_data[store_key].append(tran[key].copy())
 

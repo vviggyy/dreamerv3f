@@ -31,7 +31,7 @@ ISLAND_ROUGHNESS=0.16
 EGOCENTRIC_VIEW=9               # 0=allo, odd int (e.g. 7/9)=ego
 UPRIGHT_SPRITES=True
 DISABLE_MOBS=False              # training
-EVAL_DISABLE_MOBS=True          # eval/trajectory
+EVAL_DISABLE_MOBS="${EVAL_DISABLE_MOBS:-True}"   # eval/trajectory (overridable at submit)
 IMAGE_SIZE=64
 CUSTOM_WORLD=""                 # non-empty -> --env.crafter.custom_world <path>
 
