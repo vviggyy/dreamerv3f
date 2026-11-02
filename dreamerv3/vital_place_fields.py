@@ -203,12 +203,23 @@ def _allneuron_remap(X, flatbin, vit, nbins, lo, hi, min_visits):
     return allr, remap
 
 
+def _pctrank(x):
+    """Percentile rank in [0,1] (NaN -> 0). Scale-free, for conjunctive scoring."""
+    x = np.nan_to_num(np.asarray(x, float), nan=-np.inf)
+    order = np.argsort(x, kind='stable')
+    rank = np.empty(len(x)); rank[order] = np.arange(len(x))
+    return rank / max(len(x) - 1, 1)
+
+
 def _select(ev, remap, top_n, mode, remap_ev_pct):
     """Pick neurons to display. Returns (indices, reason-per-index dict).
 
     mode 'ev'    -> top EV (stable spatial baseline).
     mode 'remap' -> top remap score among EV-eligible neurons (candidate
                     remappers; EV floor keeps pure-noise cells out).
+    mode 'conj'  -> JOINT top-right: high EV AND high remap, ranked by the product
+                    of EV & remap percentile ranks (candidate conjunctive/
+                    "splitter" place x vital cells). Still EV-floor gated.
     mode 'both'  -> half from each, unioned (dedup, EV-pick fills any shortfall)."""
     ev_floor = np.nanpercentile(ev, remap_ev_pct)
     eligible = np.where(ev >= ev_floor, remap, -np.inf)       # gate remap on EV
@@ -221,6 +232,11 @@ def _select(ev, remap, top_n, mode, remap_ev_pct):
     elif mode == 'remap':
         picks = list(remap_rank[:top_n])
         for i in picks: reason[int(i)] = 'remap'
+    elif mode == 'conj':
+        conj = _pctrank(ev) * _pctrank(remap)                 # high only if BOTH high
+        conj = np.where(ev >= ev_floor, conj, -np.inf)        # keep the noise gate
+        picks = list(np.argsort(conj)[::-1][:top_n])
+        for i in picks: reason[int(i)] = 'conj'
     else:  # both
         picks = []
         ne = top_n // 2
@@ -245,7 +261,7 @@ def _occ_grid(count, area):
     return np.where(g > 0, g, np.nan)
 
 
-def plot(results, save_dir):
+def plot(results, save_dir, fmt='svg'):
     area = tuple(results['area'])
     vitals = results['vitals']
     sel = results['selected']
@@ -305,12 +321,13 @@ def plot(results, save_dir):
         'low r (*) = field remaps with vital (shape); gain = hi/lo activation ratio',
         fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    p = Path(save_dir) / f'vital_place_fields_{results["layer"].replace("/", "_")}.svg'
-    fig.savefig(p, bbox_inches='tight'); plt.close(fig)
+    p = (Path(save_dir) /
+         f'vital_place_fields_{results["layer"].replace("/", "_")}.{fmt}')
+    fig.savefig(p, bbox_inches='tight', dpi=130); plt.close(fig)
     print(f'Saved {p}')
 
 
-def plot_population(results, save_dir):
+def plot_population(results, save_dir, fmt='svg'):
     """Population view: EV vs remap-score scatter (selected highlighted) +
     remap-score histogram over all neurons. Answers 'does ANY cell remap, and
     how much does the population?' independent of which cells we chose to show."""
@@ -321,7 +338,7 @@ def plot_population(results, save_dir):
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
     fin = np.isfinite(ev) & np.isfinite(remap)
     a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
-    for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728')):
+    for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728'), ('conj', '#2ca02c')):
         idx = [i for i in sel if reason.get(i) == rsn]
         if idx:
             a0.scatter(ev[idx], remap[idx], s=42, c=col, edgecolor='k',
@@ -341,8 +358,8 @@ def plot_population(results, save_dir):
                  fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     p = (Path(save_dir) /
-         f'vital_place_fields_population_{results["layer"].replace("/", "_")}.svg')
-    fig.savefig(p, bbox_inches='tight'); plt.close(fig)
+         f'vital_place_fields_population_{results["layer"].replace("/", "_")}.{fmt}')
+    fig.savefig(p, bbox_inches='tight', dpi=130); plt.close(fig)
     print(f'Saved {p}')
 
 
@@ -372,8 +389,10 @@ def main():
     ap.add_argument('--layer', default='dyn/deter')
     ap.add_argument('--vitals', default='food,drink')
     ap.add_argument('--top_n', type=int, default=10, help='neurons to show')
-    ap.add_argument('--select', default='both', choices=['ev', 'remap', 'both'],
-                    help='ev=top spatial (stable baseline), remap=top vital-remappers, both')
+    ap.add_argument('--select', default='both',
+                    choices=['ev', 'remap', 'conj', 'both'],
+                    help='ev=top spatial (stable baseline), remap=top vital-remappers, '
+                    'conj=jointly high EV AND remap (candidate splitter cells), both')
     ap.add_argument('--remap_ev_pct', type=float, default=75.0,
                     help='remap candidates must have EV >= this percentile of EV '
                     '(gates out weakly-spatial vital-gain cells; raise toward 90 if '
@@ -384,6 +403,8 @@ def main():
                     help='min visits per bin in BOTH conditions to count as co-visited')
     ap.add_argument('--n_shuffle', type=int, default=200)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--fmt', default='svg', choices=['svg', 'png', 'pdf'],
+                    help='figure format (svg=vector for Illustrator; png=quick view)')
     ap.add_argument('--from_pkl', default='', help='replot from results pkl')
     args = ap.parse_args()
 
@@ -392,7 +413,8 @@ def main():
             results = pickle.load(f)
         sd = args.save if args.save != './vital_place_fields' else str(Path(args.from_pkl).parent)
         Path(sd).mkdir(parents=True, exist_ok=True)
-        plot(results, sd); plot_population(results, sd); print_summary(results)
+        plot(results, sd, args.fmt); plot_population(results, sd, args.fmt)
+        print_summary(results)
         print(f'\nReplotted {args.from_pkl} -> {sd}')
         return
 
@@ -438,8 +460,8 @@ def main():
         pickle.dump(results, f)
     print(f'Saved {pkl}')
 
-    plot(results, str(save_dir))
-    plot_population(results, str(save_dir))
+    plot(results, str(save_dir), args.fmt)
+    plot_population(results, str(save_dir), args.fmt)
     print_summary(results)
 
     try:
