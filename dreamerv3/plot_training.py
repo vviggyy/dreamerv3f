@@ -21,6 +21,7 @@ import pathlib
 import re
 
 from run_info import log_run_info
+import plot_presentable as pp
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -476,7 +477,11 @@ def main():
     parser.add_argument('--tiered_ach', action='store_true',
                         help='Achievement panel: color lines by Crafter tech-tree '
                              'tier and label each line inline (no raw traces)')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    # Tier-1 house style (rcParams only) — call before any figure is created.
+    # No-op unless --presentable is passed, so default output is unchanged.
+    pp.maybe_apply(args, small_figsize=False)  # keep the multi-panel figsize
 
     logdir = pathlib.Path(args.logdir)
     scores_path  = logdir / 'scores.jsonl'

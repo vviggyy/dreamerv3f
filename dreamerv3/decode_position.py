@@ -39,6 +39,7 @@ import pickle
 from pathlib import Path
 
 from run_info import log_run_info
+import plot_presentable as pp
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -2104,7 +2105,9 @@ if __name__ == '__main__':
                              'plots (layer_comparison, error_histogram) from '
                              'saved per-timestep errors without retraining. '
                              'Requires --save for output directory.')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
     # Resolve max_iters: if set, override n_iters
     if args.max_iters is not None:
         args.n_iters = args.max_iters

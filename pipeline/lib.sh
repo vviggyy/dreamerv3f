@@ -167,6 +167,14 @@ EVAL_ENV_ARGS="$(_build_env_args "$EVAL_FIXED_SEED" "$EVAL_DISABLE_MOBS")"
 : "${RUN_ANALYSIS:=true}"
 if [ "$RUN_ANALYSIS" = "true" ]; then EVAL_VITALS_ONLY=False; else EVAL_VITALS_ONLY=True; fi
 
+# Presentable figure style: PRESENTABLE=true appends --presentable to every
+# standalone plotting step (Tier-1 house style via dreamerv3/plot_presentable.py).
+# Does NOT cover the jax report scripts (dream_decode / dream_seed_ablation),
+# which render figures internally and don't take the flag.
+: "${PRESENTABLE:=false}"
+PRESENTABLE_ARG=""
+[ "$PRESENTABLE" = "true" ] && PRESENTABLE_ARG="--presentable"
+
 # =====================================================================
 # SAVE HYPERPARAMS
 # =====================================================================
@@ -324,7 +332,7 @@ echo ""; echo "============================================================"
 echo "  STEP 2/13: TRAINING PLOTS"; echo "============================================================"
 if step_done 2; then skip_note 2; else
     MPLBACKEND=Agg python dreamerv3/plot_training.py \
-        --logdir "$LOGDIR" --save "${LOGDIR}/plots/" --smooth 50
+        --logdir "$LOGDIR" --save "${LOGDIR}/plots/" --smooth 50 $PRESENTABLE_ARG
     mark_done 2
 fi
 
@@ -346,10 +354,10 @@ if step_done 3; then skip_note 3; else
     # on any trajectory dir, so it always runs.
     if [ "$EVAL_VITALS_ONLY" != "True" ]; then
         MPLBACKEND=Agg python dreamerv3/plot_trajectories.py \
-            --data "$TRAJ_DIR" --plot all --save "${LOGDIR}/plots/"
+            --data "$TRAJ_DIR" --plot all --save "${LOGDIR}/plots/" $PRESENTABLE_ARG
     fi
     MPLBACKEND=Agg PYTHONPATH=. python dreamerv3/plot_eval.py \
-        --data "$TRAJ_DIR" --save "${LOGDIR}/plots/"
+        --data "$TRAJ_DIR" --save "${LOGDIR}/plots/" $PRESENTABLE_ARG
     mark_done 3
 fi
 
@@ -365,7 +373,7 @@ elif [ "$VITAL_DYNAMICS_ENABLE" != "true" ]; then
 else
     PYTHONPATH=. MPLBACKEND=Agg python dreamerv3/vital_dynamics.py \
         --data "$TRAJ_DIR" --save "$VITAL_DYNAMICS_SAVE" \
-        --max_episode_plots $VITAL_MAX_EPISODE_PLOTS --event_window $VITAL_EVENT_WINDOW
+        --max_episode_plots $VITAL_MAX_EPISODE_PLOTS --event_window $VITAL_EVENT_WINDOW $PRESENTABLE_ARG
     mark_done 3b
 fi
 
@@ -383,6 +391,7 @@ if step_done 3c; then skip_note 3c; else
     # test-split subset. max_episodes 0 = every recorded episode.
     OCC_ARGS="--data $TRAJ_DIR --save ${LOGDIR}/occupancy --mode occupancy"
     OCC_ARGS+=" --max_episodes 0"
+    OCC_ARGS+=" $PRESENTABLE_ARG"
     [ "$FIXED_LAYOUT" = "True" ]  && OCC_ARGS+=" --fixed_layout"
     [ "$ISLAND_BORDER" = "True" ] && OCC_ARGS+=" --island --island_seed $ISLAND_SEED --island_fill $ISLAND_FILL --island_roughness $ISLAND_ROUGHNESS"
     MPLBACKEND=Agg python dreamerv3/decode_position.py $OCC_ARGS
@@ -399,7 +408,7 @@ elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 4 SKIPPED (RUN_AN
     MPLBACKEND=Agg python dreamerv3/decode_position.py \
         --data "$TRAJ_DIR" --save "${LOGDIR}/layer_decoder_results" \
         --mode layers --device cuda --n_jobs $LAYER_DECODE_NJOBS \
-        --max_episodes $LAYER_DECODE_MAX_EPISODES
+        --max_episodes $LAYER_DECODE_MAX_EPISODES $PRESENTABLE_ARG
     mark_done 4
 fi
 
@@ -412,7 +421,7 @@ if step_done 5; then skip_note 5
 elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 5 SKIPPED (RUN_ANALYSIS != true)"; else
     MPLBACKEND=Agg python dreamerv3/decode_position.py \
         --data "$TRAJ_DIR" --save "$DECODER_DIR" --repr "$DECODE_REPR" \
-        --save_model --n_jobs $DECODE_NJOBS --device $DECODE_DEVICE
+        --save_model --n_jobs $DECODE_NJOBS --device $DECODE_DEVICE $PRESENTABLE_ARG
     mark_done 5
 fi
 
@@ -442,6 +451,7 @@ echo "  STEP 7/13: TUNING CURVES"; echo "=======================================
 if step_done 7; then skip_note 7
 elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 7 SKIPPED (RUN_ANALYSIS != true)"; else
     TUNING_ARGS="--data $TRAJ_DIR --save $TUNING_SAVE --n_jobs $TUNING_NJOBS"
+    TUNING_ARGS+=" $PRESENTABLE_ARG"
     TUNING_ARGS+=" --max_episodes $TUNING_MAX_EPISODES"
     TUNING_ARGS+=" --SI_thresh $SI_THRESH --EV_thresh $EV_THRESH"
     TUNING_ARGS+=" --EV_unthresh $EV_UNTHRESH --HD_thresh $HD_THRESH"
@@ -457,6 +467,7 @@ elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 7 SKIPPED (RUN_AN
     MPLBACKEND=Agg python dreamerv3/tuning_curve.py $TUNING_ARGS
 
     PKL_ARGS="--from_pkl $TUNING_PKL --plot_autocorr"
+    PKL_ARGS+=" $PRESENTABLE_ARG"
     [ -n "$TUNING_LAYERS" ] && PKL_ARGS+=" --layers $TUNING_LAYERS"
     MPLBACKEND=Agg python dreamerv3/tuning_curve.py $PKL_ARGS
     mark_done 7
@@ -467,28 +478,43 @@ fi
 # =====================================================================
 echo ""; echo "============================================================"
 echo "  STEP 8/13: TUNING CLUSTERING & DISTRIBUTIONS"; echo "============================================================"
+# Legacy alias: RUN_STEP8_CLUSTERING=true runs all three modes (incl. autocorr).
+[ "$RUN_STEP8_CLUSTERING" = "true" ] && STEP8_MODES="distributions metrics autocorr"
 if step_done 8; then
     skip_note 8
-elif [ "$RUN_STEP8_CLUSTERING" != "true" ]; then
-    echo "STEP 8: SKIPPED (RUN_STEP8_CLUSTERING != true — OOM-prone autocorr). Not marked done."
+elif [ -z "${STEP8_MODES// }" ]; then
+    echo "STEP 8: SKIPPED (STEP8_MODES empty). Not marked done."
 else
     COMMON_ANALYZE_ARGS=""
     [ -n "$TUNING_LAYERS" ]      && COMMON_ANALYZE_ARGS+=" --layers $TUNING_LAYERS"
     [ "$NORMALIZE" = "false" ]   && COMMON_ANALYZE_ARGS+=" --no_normalize"
     [ -n "$ANALYZE_EV_THRESH" ]  && COMMON_ANALYZE_ARGS+=" --ev_thresh $ANALYZE_EV_THRESH"
-    echo "--- Distributions ---"
-    MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
-        --from_pkl "$TUNING_PKL" --save "$CLUSTER_SAVE" --mode distributions $COMMON_ANALYZE_ARGS
-    echo "--- Isomap (metrics mode) ---"
-    MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
-        --from_pkl "$TUNING_PKL" --save "$CLUSTER_SAVE" --mode metrics \
-        --isomap_neighbors $ISOMAP_NEIGHBORS $COMMON_ANALYZE_ARGS
-    echo "--- Autocorr clustering ---"
-    MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
-        --from_pkl "$TUNING_PKL" --save "$CLUSTER_SAVE" --mode autocorr \
-        --n_components $N_COMPONENTS --perplexity $PERPLEXITY \
-        --umap_neighbors $UMAP_NEIGHBORS --min_cluster_size $MIN_CLUSTER_SIZE \
-        --min_samples $MIN_SAMPLES $COMMON_ANALYZE_ARGS
+    COMMON_ANALYZE_ARGS+=" $PRESENTABLE_ARG"
+    echo "STEP 8 modes: $STEP8_MODES"
+    for MODE in $STEP8_MODES; do
+        case "$MODE" in
+            distributions)
+                echo "--- Distributions ---"
+                MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
+                    --from_pkl "$TUNING_PKL" --save "$CLUSTER_SAVE" --mode distributions $COMMON_ANALYZE_ARGS
+                ;;
+            metrics)
+                echo "--- Isomap (metrics mode) ---"
+                MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
+                    --from_pkl "$TUNING_PKL" --save "$CLUSTER_SAVE" --mode metrics \
+                    --isomap_neighbors $ISOMAP_NEIGHBORS $COMMON_ANALYZE_ARGS
+                ;;
+            autocorr)
+                echo "--- Autocorr clustering (OOM-prone) ---"
+                MPLBACKEND=Agg python dreamerv3/analyze_tuning.py \
+                    --from_pkl "$TUNING_PKL" --save "$CLUSTER_SAVE" --mode autocorr \
+                    --n_components $N_COMPONENTS --perplexity $PERPLEXITY \
+                    --umap_neighbors $UMAP_NEIGHBORS --min_cluster_size $MIN_CLUSTER_SIZE \
+                    --min_samples $MIN_SAMPLES $COMMON_ANALYZE_ARGS
+                ;;
+            *) echo "  WARN: unknown STEP8 mode '$MODE' — skipping" ;;
+        esac
+    done
     mark_done 8
 fi
 
@@ -500,6 +526,7 @@ echo "  STEP 9/13: MANIFOLD ANALYSIS"; echo "===================================
 if step_done 9; then skip_note 9
 elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 9 SKIPPED (RUN_ANALYSIS != true)"; else
     MANIFOLD_ARGS="--data $TRAJ_DIR --dream_data $DREAM_PKL"
+    MANIFOLD_ARGS+=" $PRESENTABLE_ARG"
     MANIFOLD_ARGS+=" --save ${LOGDIR}/manifold_results"
     MANIFOLD_ARGS+=" --max_wake_samples $MAX_WAKE_SAMPLES --max_dream_samples $MAX_DREAM_SAMPLES"
     MANIFOLD_ARGS+=" --n_neighbors $MANIFOLD_N_NEIGHBORS --min_bbox $MANIFOLD_MIN_BBOX"
@@ -570,7 +597,7 @@ else
         MPLBACKEND=Agg python dreamerv3/manifold_analysis.py \
             --data "$TRAJ_DIR" --dream_data "$DUMP" --save "$SAVE" \
             --layers $PERCOND_LAYERS --max_wake_samples $PERCOND_MAX_WAKE \
-            --max_dream_samples $PERCOND_MAX_DREAM --n_neighbors $PERCOND_N_NEIGHBORS
+            --max_dream_samples $PERCOND_MAX_DREAM --n_neighbors $PERCOND_N_NEIGHBORS $PRESENTABLE_ARG
         rc=$?; set -e
         [ $rc -ne 0 ] && echo "  WARN: condition $C manifold returned $rc (continuing)"
     done
@@ -592,7 +619,7 @@ else
     MPLBACKEND=Agg python dreamerv3/manifold_analysis.py \
         --data "$TRAJ_DIR" --seed_ablation_dir "$DSA_DIR" --save "$OVERLAY_SAVE" \
         --layers $OVERLAY_LAYERS --max_wake_samples $OVERLAY_MAX_WAKE \
-        --max_dream_samples $OVERLAY_MAX_DREAM --shading $OVERLAY_SHADING --min_bbox 0
+        --max_dream_samples $OVERLAY_MAX_DREAM --shading $OVERLAY_SHADING --min_bbox 0 $PRESENTABLE_ARG
     mark_done 12
 fi
 

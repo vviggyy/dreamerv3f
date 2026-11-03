@@ -38,6 +38,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pynapple as nap
+import plot_presentable as pp
 from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter, label, maximum_filter, convolve
 from scipy.signal import correlate2d
@@ -1015,7 +1016,8 @@ def plot_cell_types(group_ids, layer_name, save_path):
 def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
                                sort_by='SI', ev_filter=0.0,
-                               show_autocorr=False, world_img=None):
+                               show_autocorr=False, world_img=None,
+                               two_tailed=False):
     """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.).
 
     Args:
@@ -1023,6 +1025,9 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
             only show neurons with EV > ev_filter. Set 0 to disable.
         show_autocorr: If True, show spatial autocorrelation next to each
             tuning curve (doubles the columns).
+        two_tailed: If True, show BOTH extremes — the n/2 lowest and n/2 highest
+            by the metric (lowest first). Useful for metrics where both ends are
+            informative, e.g. sparsity (low = concentrated field, high = diffuse).
     """
     n_neurons = tc_array.shape[0]
     # Map sort_by name to metrics dict key
@@ -1047,12 +1052,17 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         print(f"  Warning: no valid neurons for {sort_by} (ev_filter={ev_filter}), skipping")
         return
     n_show = min(n_examples, len(candidates))
-    # For Geary's C, lower = more spatial structure, so sort ascending
-    if sort_by == 'gearys_c':
-        order = candidates[np.argsort(vals[candidates])]  # ascending — lowest C = most clustered
+    asc = candidates[np.argsort(vals[candidates])]  # ascending (lowest first)
+    if two_tailed and n_show >= 2:
+        # n/2 lowest then n/2 highest (dedup if candidate pool is small)
+        k = n_show // 2
+        lo = list(asc[:k])
+        hi = [i for i in asc[::-1] if i not in set(lo)][:n_show - k]
+        selected = np.array(lo + hi, dtype=int)[:n_show]
+    elif sort_by == 'gearys_c':
+        selected = asc[:n_show]          # ascending — lowest C = most clustered
     else:
-        order = candidates[np.argsort(vals[candidates])[::-1]]  # descending — highest = best
-    selected = order[:n_show]
+        selected = asc[::-1][:n_show]    # descending — highest = best
 
     # Layout: each neuron gets 1 column (or 2 if show_autocorr)
     neurons_per_row = min(5, n_show)
@@ -1135,7 +1145,10 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
             c = idx % ncols
             axes[r, c].axis('off')
 
-    fig.suptitle(f'{layer_name}: Top Tuning Curves (by {sort_by})', fontsize=10)
+    fig.suptitle(
+        f'{layer_name}: Tuning Curves — lowest (top) + highest (bottom) {sort_by}'
+        if two_tailed else f'{layer_name}: Top Tuning Curves (by {sort_by})',
+        fontsize=10)
     fig.tight_layout()
     fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
@@ -1828,7 +1841,9 @@ def main():
                              'save as standalone tuning-curve SVGs (no interaction). '
                              'e.g. --save_neurons 3,17,42. Uses --layers to pick the '
                              'layer(s); output goes to --save (or the pkl dir).')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     # Interactive viewer or autocorr plots from precomputed pkl
     if args.from_pkl:
@@ -1879,6 +1894,7 @@ def main():
                         ev_filter=args.ev_filter,
                         show_autocorr=(metric_name == 'pf_peaks'),
                         world_img=world_img,
+                        two_tailed=(metric_name in ('sparsity', 'coherence')),
                     )
             print("Done.")
             return
@@ -2252,6 +2268,7 @@ def main():
                     ev_filter=args.ev_filter,
                     show_autocorr=(metric_name == 'pf_peaks'),
                     world_img=world_img,
+                    two_tailed=(metric_name in ('sparsity', 'coherence')),
                 )
 
         if len(all_results) > 1:

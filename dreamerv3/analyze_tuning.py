@@ -38,6 +38,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import correlate2d
+import plot_presentable as pp
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE, Isomap
 from sklearn.preprocessing import StandardScaler
@@ -736,7 +737,9 @@ def main():
                              'Example: --neuron 42 107 255')
 
 
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     # Load
     print(f'Loading {args.from_pkl}')

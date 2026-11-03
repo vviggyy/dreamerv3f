@@ -42,6 +42,7 @@ import json
 import pickle
 from pathlib import Path
 from collections import defaultdict
+import plot_presentable as pp
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -970,7 +971,9 @@ def main():
                              'late:./traj_ck3 (each label:dir). When given, the '
                              'averaged-vitals plot overlays one curve per phase '
                              'instead of the single --data set.')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     global FIG_EXT
     FIG_EXT = args.fmt

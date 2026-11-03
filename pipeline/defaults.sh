@@ -157,7 +157,11 @@ OVERLAY_SHADING=band
 # --- Tuning curve (step 7) ---
 TUNING_NJOBS=2
 TUNING_MAX_EPISODES=100
-TUNING_LAYERS=""
+# Scope tuning to the RSSM latent layers by default. The enc/cnn* layers are both
+# the spatial-tuning non-targets AND the memory hogs (enc/cnn0 ~14GB per 70k
+# timesteps), so restricting here is the default OOM guard. Override with
+# TUNING_LAYERS="" (all layers) or a custom list at submit if enc/pol/val maps are needed.
+TUNING_LAYERS="dyn/deter dyn/stoch"
 TUNING_TEST_DATA=""
 TUNING_MAX_NEURONS=0
 TUNING_NO_HD=false
@@ -174,8 +178,13 @@ MIN_BBOX=5
 DIST_CUTOFF=7
 AREA="32 32"
 
-# --- Clustering / analyze_tuning (step 8, disabled by default — OOM) ---
-RUN_STEP8_CLUSTERING=false
+# --- Clustering / analyze_tuning (step 8) ---
+# STEP8_MODES: which analyze_tuning modes to run (space-separated subset of
+# "distributions metrics autocorr"). distributions + metrics (Isomap on per-neuron
+# metric vectors) are light; autocorr (UMAP/t-SNE/HDBSCAN on autocorrelation maps)
+# is OOM-prone -> opt-in only. Empty string = skip step 8 entirely.
+STEP8_MODES="distributions metrics"
+RUN_STEP8_CLUSTERING=false      # legacy alias: true -> STEP8_MODES="distributions metrics autocorr"
 N_COMPONENTS=50
 PERPLEXITY=30
 UMAP_NEIGHBORS=15
@@ -193,6 +202,13 @@ MANIFOLD_LAYERS=""
 MANIFOLD_MIN_BBOX=0
 NO_ISOMAP=false
 MANIFOLD_EV_THRESH=0.5
+
+# --- Figure style ---
+# PRESENTABLE=true -> append --presentable to every standalone plotting step
+# (Tier-1 house style: Arial, Okabe-Ito, no top/right spines, small print-scale
+# fonts, vector output). Default off = unchanged figures. Env-overridable at submit
+# (PRESENTABLE=true sbatch ...), so the `:-` keeps a submit-time value.
+PRESENTABLE="${PRESENTABLE:-false}"
 
 # --- Vital dynamics (step 3b) ---
 VITAL_DYNAMICS_ENABLE=true

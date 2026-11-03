@@ -29,6 +29,7 @@ import numpy as np
 from run_info import log_run_info
 # Reuse the training-plot palette + tech-tree tiers so the two figures match.
 from plot_training import ACHIEVEMENT_TIERS, TIER_LABELS, ACHIEVEMENT_COLORS, BLUE, GREEN
+import plot_presentable as pp
 # Reuse the observational vital analysis' death-cause heuristic + palette so the
 # eval summary and vital_dynamics label deaths identically.
 from vital_dynamics import (cause_of_death, get_vitals, get_actions,
@@ -323,7 +324,9 @@ def main():
                         help='Do not color the length/scatter panels by cause of death')
     parser.add_argument('--no_cows', action='store_true',
                         help='Skip the per-episode cow-count panel')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     episodes, meta = load_episodes(args.data)
     if not episodes:

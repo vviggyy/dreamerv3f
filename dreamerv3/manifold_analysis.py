@@ -43,6 +43,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import curve_fit
+import plot_presentable as pp
 from scipy.spatial.distance import pdist, squareform, cdist
 from scipy.stats import spearmanr
 from sklearn.manifold import Isomap
@@ -1075,7 +1076,9 @@ def main():
                              '(overrides metadata; needed when trajectories lack it)')
     parser.add_argument('--world_area', type=int, nargs=2, default=None,
                         help='world area for the color-key render (default: metadata)')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     global SAVE_FMT
     SAVE_FMT = args.fmt
