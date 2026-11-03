@@ -2728,8 +2728,9 @@ if __name__ == '__main__':
                     'n_features': X.shape[1], 'n_units': X.shape[1],
                     'n_classes': width * height, 'width': width,
                     'height': height, 'type': 'classifier'}
-            clf = LinearClassifier(X.shape[1], width * height)
-            print(f"  Training full classifier on {name}...")
+            clf = LinearClassifier(X.shape[1], width * height,
+                                   device=args.device)
+            print(f"  Training full classifier on {name} ({args.device})...")
             clf.fit(X,
                     np.ravel_multi_index(
                         (pos.astype(int).clip(0, [width-1, height-1])[:, 0],

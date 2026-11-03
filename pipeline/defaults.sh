@@ -210,6 +210,19 @@ MANIFOLD_EV_THRESH=0.5
 # (PRESENTABLE=true sbatch ...), so the `:-` keeps a submit-time value.
 PRESENTABLE="${PRESENTABLE:-false}"
 
+# --- Activation slimming (step 4b) ---
+# SLIM_ACTIVATIONS=true -> right AFTER layer decoding (step 4, the only consumer
+# of the encoder maps), drop the heavy activation layers that the RSSM-only later
+# steps don't read (act/enc/* is ~82% of each episode pkl; act/pol/*, act/val/*
+# unused too) so steps 5/7/9 load ~7x less data and ~9x less RAM (e.g. 33 GB ->
+# ~4 GB / 100 eps). DESTRUCTIVE: enc/pol/val are gone afterward, so this is
+# DEFAULT OFF — we sometimes want to decode/analyze the enc/pol/val layers (and a
+# FORCE_FROM=4 re-run of layer decoding would otherwise need a re-eval). Opt in
+# at submit (SLIM_ACTIVATIONS=true sbatch ...) when you only need the RSSM reps
+# and want the speed/RAM win. Drop set is configurable via SLIM_DROP_PREFIXES.
+SLIM_ACTIVATIONS="${SLIM_ACTIVATIONS:-false}"
+SLIM_DROP_PREFIXES="${SLIM_DROP_PREFIXES:-act/enc/,act/pol/,act/val/}"
+
 # --- Vital dynamics (step 3b) ---
 VITAL_DYNAMICS_ENABLE=true
 VITAL_MAX_EPISODE_PLOTS=10

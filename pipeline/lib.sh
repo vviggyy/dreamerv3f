@@ -256,6 +256,8 @@ layer_decode_max_episodes=$LAYER_DECODE_MAX_EPISODES
 decode_repr=$DECODE_REPR
 decode_njobs=$DECODE_NJOBS
 decode_device=$DECODE_DEVICE
+slim_activations=$SLIM_ACTIVATIONS
+slim_drop_prefixes=$SLIM_DROP_PREFIXES
 dream_episodes=$DREAM_EPISODES
 dream_batches=$DREAM_BATCHES
 # --- Dream seed ablation ---
@@ -410,6 +412,25 @@ elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 4 SKIPPED (RUN_AN
         --mode layers --device cuda --n_jobs $LAYER_DECODE_NJOBS \
         --max_episodes $LAYER_DECODE_MAX_EPISODES $PRESENTABLE_ARG
     mark_done 4
+fi
+
+# =====================================================================
+# STEP 4b: SLIM ACTIVATIONS (drop enc/pol/val maps unused by steps 5-9)
+# Runs AFTER step 4 (layer decoding, the only consumer of enc/*) and BEFORE the
+# RSSM-only decode/tuning/manifold steps. DESTRUCTIVE but byte-identical results
+# for steps 5-10. Toggle SLIM_ACTIVATIONS (default true); drop set via
+# SLIM_DROP_PREFIXES. Marker '4b' — clear with FORCE_STEP="4b" (not FORCE_FROM,
+# which is numeric), same convention as 3b/3c.
+# =====================================================================
+echo ""; echo "============================================================"
+echo "  STEP 4b/13: SLIM ACTIVATIONS"; echo "============================================================"
+if step_done 4b; then skip_note 4b
+elif [ "$RUN_ANALYSIS" != "true" ]; then echo "  [status] STEP 4b SKIPPED (RUN_ANALYSIS != true)"
+elif [ "$SLIM_ACTIVATIONS" != "true" ]; then echo "  [status] STEP 4b SKIPPED (SLIM_ACTIVATIONS != true)"
+else
+    python dreamerv3/slim_trajectories.py \
+        --data "$TRAJ_DIR" --apply --drop-prefixes "$SLIM_DROP_PREFIXES"
+    mark_done 4b
 fi
 
 # =====================================================================
