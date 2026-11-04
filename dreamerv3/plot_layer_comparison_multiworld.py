@@ -14,6 +14,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+import plot_presentable as pp
 from matplotlib.colors import to_rgb
 from pathlib import Path
 
@@ -91,7 +92,9 @@ def main():
                     help='optional subset of layer names to plot (exact names, e.g. '
                          'enc/tokens dyn/deter val/mlp/linear2 pol/mlp/linear2). '
                          'Default: all layers.')
+    pp.add_presentable_arg(ap)
     args = ap.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     if args.cond:
         conditions = {}

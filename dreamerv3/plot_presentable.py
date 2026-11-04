@@ -52,9 +52,13 @@ _BASE_RC = {
 }
 
 # --- The ONE type scale, in points at final print size (figkit.TYPE) ---
+# Scaled ~1.6x from the original single-column (3.5x2.6in) calibration because
+# the plotters pass small_figsize=False and keep their larger hardcoded figsizes
+# (e.g. 6x5in scatters, multi-panel grids) — at the old 10pt the type read small
+# on those bigger canvases. Titles stay a touch above labels.
 _TYPE = {
-    'font.size': 10, 'axes.labelsize': 10, 'xtick.labelsize': 9,
-    'ytick.labelsize': 9, 'legend.fontsize': 9,
+    'font.size': 16, 'axes.labelsize': 16, 'xtick.labelsize': 14,
+    'ytick.labelsize': 14, 'legend.fontsize': 14, 'axes.titlesize': 17,
 }
 
 # Single-column print width is the sensible small default; scripts that pass an
@@ -128,13 +132,63 @@ def nice_ticks(ax, n=3, axis='both', kfmt_axis=None):
     return ax
 
 
+# When set (via --out_fmt), every figure save is rewritten to this extension so
+# plotters that hardcode .svg/.pdf transparently emit e.g. PNG instead (handy for
+# PowerPoint, which scales imported SVGs awkwardly). None = keep native formats.
+_FMT_OVERRIDE = None
+_FMT_DPI = None
+_VECTOR_EXTS = {'svg', 'pdf', 'png', 'eps', 'ps', 'jpg', 'jpeg', 'tif', 'tiff'}
+_RASTER_EXTS = {'png', 'jpg', 'jpeg', 'tif', 'tiff'}
+
+
+def _install_format_override(fmt, dpi=None):
+    """Monkeypatch Figure.savefig so any `*.svg/.pdf/...` path is rewritten to
+    `*.{fmt}`, optionally at a fixed `dpi` for raster targets. Applied
+    process-wide, once. File-object targets are left alone.
+
+    dpi matters for PowerPoint: PP re-renders every element, so a flat raster
+    (png) at a modest dpi (~150-200) is far snappier than a dense scatter SVG
+    (thousands of vector points) OR a 600-dpi png (tens of megapixels)."""
+    global _FMT_OVERRIDE, _FMT_DPI
+    _FMT_OVERRIDE = fmt.lower().lstrip('.') if fmt else None
+    _FMT_DPI = dpi
+    if not _FMT_OVERRIDE:
+        return
+    import os
+    import matplotlib.figure as mfig
+    if getattr(mfig.Figure, '_pp_savefig_patched', False):
+        return
+    _orig = mfig.Figure.savefig
+
+    def _savefig(self, fname, *a, **kw):
+        if _FMT_OVERRIDE is not None:
+            try:
+                s = os.fspath(fname)
+            except TypeError:
+                s = None  # file object / buffer — don't touch
+            if s is not None:
+                stem, ext = os.path.splitext(s)
+                if ext.lower().lstrip('.') in _VECTOR_EXTS:
+                    fname = f'{stem}.{_FMT_OVERRIDE}'
+                    kw.pop('format', None)
+                    if _FMT_DPI and _FMT_OVERRIDE in _RASTER_EXTS:
+                        kw['dpi'] = _FMT_DPI
+        return _orig(self, fname, *a, **kw)
+
+    mfig.Figure.savefig = _savefig
+    mfig.Figure._pp_savefig_patched = True
+
+
 def save(fig, path, exts=('svg', 'pdf'), dpi=600, tight=True):
     """Save a figure as vector formats (svg + pdf by default) at the house dpi.
 
     path may include or omit an extension; the stem is reused for each ext.
-    Returns the list of written paths.
+    Returns the list of written paths. Honors the --out_fmt override (collapses
+    to the single chosen format).
     """
     import os
+    if _FMT_OVERRIDE:
+        exts = (_FMT_OVERRIDE,)
     stem = os.path.splitext(str(path))[0]
     d = os.path.dirname(os.path.abspath(stem))
     if d:
@@ -157,12 +211,36 @@ def add_presentable_arg(parser, default=False):
         help='Apply the Tier-1 presentable house style (Arial, Okabe-Ito, no '
              'top/right spines, small print-scale fonts, vector-friendly). '
              'Global rcParams only; layout is unchanged.')
+    # Registered defensively: some plotters (e.g. manifold_analysis) already
+    # define their own --fmt, so this uses a distinct name and skips silently
+    # if a conflicting option is somehow already present.
+    try:
+        parser.add_argument(
+            '--out_fmt', default=None, choices=['png', 'svg', 'pdf'],
+            help='Override EVERY figure output to this format regardless of what '
+                 'each plotter hardcodes (e.g. --out_fmt png for PowerPoint, which '
+                 'lags on dense scatter SVGs). Default: keep each native format.')
+        parser.add_argument(
+            '--out_dpi', type=int, default=None,
+            help='DPI for --out_fmt raster output. Default 200 for png/jpg (good '
+                 'for slides; avoids the 600-dpi bitmap bloat that lags PowerPoint). '
+                 'Raise for print, lower (~120) for the lightest decks.')
+    except Exception:
+        pass
     return parser
 
 
 def maybe_apply(args, **kwargs):
-    """Apply the style iff args.presentable is set. Call before any figure."""
+    """Apply the presentable style iff args.presentable, and install the --out_fmt
+    output-format override iff set. Call once before creating any figure."""
+    applied = False
     if getattr(args, 'presentable', False):
         apply_presentable_style(**kwargs)
-        return True
-    return False
+        applied = True
+    fmt = getattr(args, 'out_fmt', None)
+    if fmt:
+        dpi = getattr(args, 'out_dpi', None)
+        if dpi is None and fmt in _RASTER_EXTS:
+            dpi = 200  # slide-friendly default; 600 vector-dpi bloats bitmaps
+        _install_format_override(fmt, dpi)
+    return applied

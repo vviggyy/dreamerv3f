@@ -815,12 +815,12 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon, ach_subset=None,
                             fontsize=5, ha='center', va='top', color='0.6')
     axes[0].set_yticks(range(len(achs)))
     axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
-    fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
-                 label=f'P(unlock ≤ {horizon} steps | vital)')
+    cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02)
+    cb.set_label(f'P(unlock ≤ {horizon} | vital)', fontsize=11)
     fig.suptitle(f'{title} — empirical conditional '
                  '(n below each column)', fontsize=12)
     out = Path(save_path) / f'{fname}.{FIG_EXT}'
-    fig.savefig(out, dpi=130, bbox_inches='tight')
+    fig.savefig(out, dpi=130, bbox_inches='tight', pad_inches=0.2)
     plt.close(fig)
     return out
 
@@ -907,8 +907,11 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
                             fontsize=5, ha='center', va='top', color='0.4')
     axes[0].set_yticks(range(len(achs)))
     axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
-    cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02,
-                      label='lift  p(unlock | vital) / p(unlock)   (1 = baseline)')
+    cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02)
+    # Short label at a fixed size: the full p(·|vital)/p(·) formula is already in
+    # the suptitle, and a long vertical label overflows the thin colorbar (clips
+    # under the larger presentable fonts).
+    cb.set_label('lift  (1 = baseline)', fontsize=11)
     if cbar_ticks is not None:                       # log scale: explicit ticks
         cb.ax.minorticks_off()                        # drop LogNorm's minor labels
         cb.set_ticks(cbar_ticks)
@@ -924,7 +927,7 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
                  f'(horizon {horizon}; cols <{n_min} steps masked; {scale_txt})',
                  fontsize=12)
     out = Path(save_path) / f'{fname}.{FIG_EXT}'
-    fig.savefig(out, dpi=130, bbox_inches='tight')
+    fig.savefig(out, dpi=130, bbox_inches='tight', pad_inches=0.2)
     plt.close(fig)
     return out
 
