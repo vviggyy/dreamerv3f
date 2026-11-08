@@ -114,7 +114,15 @@ def main():
                          'colors unchanged. Overridden by an explicit --layers.')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    # --presentable applies the Tier-2 POSTER style (poster figure): Source Sans,
+    # large type, no gridlines, despined. Plot content unchanged.
+    pp.maybe_apply(args, poster=True, small_figsize=False)
+    _poster = pp.is_poster()
+    fs_tick = None if _poster else 9
+    fs_ylabel = None if _poster else 11
+    fs_title = None if _poster else 13
+    fw_title = None if _poster else 'bold'
+    fs_legend = None if _poster else 8
 
     if args.cond:
         conditions = {}
@@ -193,14 +201,14 @@ def main():
 
     ax.set_xticks(range(n_layers))
     short_names = [ln.replace('mlp/', '') for ln in layers]
-    ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=9)
+    ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=fs_tick)
     # Color x-tick labels by section
     for idx, ln in enumerate(layers):
         ax.get_xticklabels()[idx].set_color(_section_color(ln))
 
-    ax.set_ylabel('Manhattan error (tiles)', fontsize=11)
+    ax.set_ylabel('Manhattan error (tiles)', fontsize=fs_ylabel)
     ax.set_title(f'{args.title} — tested on World {args.test_seed}',
-                 fontsize=13, fontweight='bold')
+                 fontsize=fs_title, fontweight=fw_title)
     top_y = max(whisker_tops) + max(whisker_tops) * 0.08
     ax.set_ylim(ax.get_ylim()[0], top_y)
 
@@ -215,8 +223,9 @@ def main():
             hatch=sty['hatch'], linestyle=sty['linestyle'],
             linewidth=sty.get('linewidth', 1.0),
             label=cond))
-    ax.legend(handles=cond_patches, fontsize=8, loc='upper left')
-    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend(handles=cond_patches, fontsize=fs_legend, loc='upper left')
+    if not _poster:
+        ax.grid(True, axis='y', alpha=0.3)   # poster style = no gridlines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     fig.tight_layout()

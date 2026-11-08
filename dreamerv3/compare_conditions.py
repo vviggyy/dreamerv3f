@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
 from scipy.stats import mannwhitneyu
+import plot_presentable as pp
 
 # ---------------------------------------------------------------------------
 # Constants (mirrored from decode_position.py and tuning_curve.py)
@@ -307,14 +308,24 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
                         ha='center', va='bottom', fontsize=6, fontweight='bold',
                         color='0.2')
 
+    # Under the poster style, let the house rcParams govern type sizes/weight and
+    # drop the gridlines; otherwise keep the original hardcoded values.
+    _poster = pp.is_poster()
+    fs_tick = None if _poster else 9
+    fs_ylabel = None if _poster else 11
+    fs_title = None if _poster else 13
+    fw_title = None if _poster else 'bold'
+    fs_legend = None if _poster else 8
+
     ax.set_xticks(range(n_layers))
     short_names = [ln.replace('mlp/', '') for ln in layers]
-    ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=9)
+    ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=fs_tick)
     for idx, ln in enumerate(layers):
         ax.get_xticklabels()[idx].set_color(_section_color(ln))
 
-    ax.set_ylabel(metric_name, fontsize=11)
-    ax.set_title(f'Layer Decoding — {metric_name}', fontsize=13, fontweight='bold')
+    ax.set_ylabel(metric_name, fontsize=fs_ylabel)
+    ax.set_title(f'Layer Decoding — {metric_name}', fontsize=fs_title,
+                 fontweight=fw_title)
     if no_sig:
         ax.set_ylim(ax.get_ylim()[0], y_max_global * 1.1)
     else:
@@ -332,8 +343,9 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
     if not no_sig:
         cond_patches.append(Patch(facecolor='none', edgecolor='none',
                                   label='Mann-Whitney U, Bonferroni'))
-    ax.legend(handles=cond_patches, fontsize=8, loc='upper left')
-    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend(handles=cond_patches, fontsize=fs_legend, loc='upper left')
+    if not _poster:
+        ax.grid(True, axis='y', alpha=0.3)   # poster style = no gridlines
     _style_ax(ax)
     fig.tight_layout()
     out = Path(save_dir) / 'decode_boxplot.png'
@@ -626,7 +638,11 @@ def main():
                              'pol, val + BOTH world-model layers (dyn/deter, '
                              'dyn/stoch). Section colors unchanged. Equivalent to '
                              'passing those 8 names to --layers.')
+    pp.add_presentable_arg(parser)
     args = parser.parse_args()
+    # --presentable here applies the Tier-2 POSTER style (these are poster figures):
+    # Source Sans, large type, no gridlines, despined. Plot content unchanged.
+    pp.maybe_apply(args, poster=True, small_figsize=False)
 
     if args.key_layers and not args.layers:
         args.layers = _key_layers(LAYER_ORDER)
