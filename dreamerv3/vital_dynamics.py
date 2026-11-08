@@ -709,7 +709,8 @@ def plot_averaged_vitals(groups, save_path, fname=None):
             if not multi:
                 ax.fill_between(x, s['mean'] - s['std'], s['mean'] + s['std'],
                                 color=VITAL_COLORS[v], alpha=0.18)
-        ax.set_title(v, color=VITAL_COLORS[v])
+        ax.set_title(v, color=VITAL_COLORS[v],
+                     fontsize=(14 if pp.is_poster() else None))
         ax.set_ylim(-0.5, VITAL_MAX + 0.5)
         ax.set_xlabel('step (clipped to common episode length)')
         ax.set_ylabel('vital level (0-9)')
@@ -832,21 +833,30 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon, ach_subset=None,
     for ax, v in zip(axes, VITALS):
         s = stats[v]
         im = ax.imshow(P[v], aspect='auto', cmap='magma', vmin=0, vmax=vmax)
-        ax.set_xticks(range(len(s['levels'])))
-        ax.set_xticklabels(s['levels'], fontsize=7)
-        ax.set_xlabel('vital level')
-        ax.set_title(v, color=VITAL_COLORS[v])
+        # endpoint-only level ticks (0 and max) instead of every 0-9
+        ax.set_xticks([0, len(s['levels']) - 1])
+        ax.set_xticklabels([s['levels'][0], s['levels'][-1]],
+                           fontsize=(14 if pp.is_poster() else 9))
+        # Vital name ON the x-axis (replaces the generic 'vital level' label +
+        # the redundant per-column title); the 0-9 ticks are that vital's level.
+        ax.set_xlabel(v, color=VITAL_COLORS[v],
+                      fontsize=(16 if pp.is_poster() else 12))
         # sample size under each column
         for j, lvl in enumerate(s['levels']):
             if s['counts'][j] > 0:
                 ax.annotate(f'{int(s["counts"][j])}', xy=(j, len(achs) - 0.4),
                             fontsize=5, ha='center', va='top', color='0.6')
     axes[0].set_yticks(range(len(achs)))
-    axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
+    axes[0].set_yticklabels([a.replace('_', ' ') for a in achs],
+                            fontsize=(12 if pp.is_poster() else 7))
     cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02)
-    cb.set_label(f'P(unlock ≤ {horizon} | vital)', fontsize=11)
-    fig.suptitle(f'{title} — empirical conditional '
-                 '(n below each column)', fontsize=12)
+    cb.set_label(f'P(unlock ≤ {horizon} | vital)',
+                 fontsize=(14 if pp.is_poster() else 11))
+    if pp.is_poster():
+        fig.suptitle(title, fontsize=14, y=1.02)
+    else:
+        fig.suptitle(f'{title} — empirical conditional '
+                     '(n below each column)', fontsize=12)
     out = Path(save_path) / f'{fname}.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight', pad_inches=0.2)
     plt.close(fig)
@@ -925,21 +935,27 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
     for ax, v in zip(axes, VITALS):
         s = stats[v]
         im = ax.imshow(lift[v], aspect='auto', cmap=cmap, norm=norm)
-        ax.set_xticks(range(len(s['levels'])))
-        ax.set_xticklabels(s['levels'], fontsize=7)
-        ax.set_xlabel('vital level')
-        ax.set_title(v, color=VITAL_COLORS[v])
+        # endpoint-only level ticks (0 and max) instead of every 0-9
+        ax.set_xticks([0, len(s['levels']) - 1])
+        ax.set_xticklabels([s['levels'][0], s['levels'][-1]],
+                           fontsize=(14 if pp.is_poster() else 9))
+        # Vital name ON the x-axis (replaces 'vital level' + the redundant title);
+        # the 0-9 ticks are that vital's level.
+        ax.set_xlabel(v, color=VITAL_COLORS[v],
+                      fontsize=(16 if pp.is_poster() else 12))
         for j, lvl in enumerate(s['levels']):
             if s['counts'][j] > 0:
                 ax.annotate(f'{int(s["counts"][j])}', xy=(j, len(achs) - 0.4),
                             fontsize=5, ha='center', va='top', color='0.4')
     axes[0].set_yticks(range(len(achs)))
-    axes[0].set_yticklabels([a.replace('_', ' ') for a in achs], fontsize=6)
+    axes[0].set_yticklabels([a.replace('_', ' ') for a in achs],
+                            fontsize=(12 if pp.is_poster() else 7))
     cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.02)
-    # Short label at a fixed size: the full p(·|vital)/p(·) formula is already in
-    # the suptitle, and a long vertical label overflows the thin colorbar (clips
-    # under the larger presentable fonts).
-    cb.set_label('lift  (1 = baseline)', fontsize=11)
+    # Colorbar carries the metric formula itself (the title minus any
+    # [subset]/[day] tag); modest font so the long vertical label fits the thin
+    # colorbar even under the larger presentable type.
+    cb.set_label(title.split('[')[0].strip(),
+                 fontsize=(14 if pp.is_poster() else 11))
     if cbar_ticks is not None:                       # log scale: explicit ticks
         cb.ax.minorticks_off()                        # drop LogNorm's minor labels
         cb.set_ticks(cbar_ticks)
@@ -951,9 +967,12 @@ def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
             for i, t in enumerate(cbar_ticks)])
     scale_txt = (f'log scale, clipped [{vmin:g}, {vmax:g}]' if log
                  else f'linear scale, cap {vmax_cap:g}')
-    fig.suptitle(f'{title} — enrichment vs base rate '
-                 f'(horizon {horizon}; cols <{n_min} steps masked; {scale_txt})',
-                 fontsize=12)
+    if pp.is_poster():
+        fig.suptitle(title, fontsize=14, y=1.02)   # formula only; details -> caption
+    else:
+        fig.suptitle(f'{title} — enrichment vs base rate '
+                     f'(horizon {horizon}; cols <{n_min} steps masked; {scale_txt})',
+                     fontsize=12)
     out = Path(save_path) / f'{fname}.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight', pad_inches=0.2)
     plt.close(fig)
@@ -1004,7 +1023,9 @@ def main():
                              'instead of the single --data set.')
     pp.add_presentable_arg(parser)
     args = parser.parse_args()
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    # --presentable applies the Tier-2 POSTER house style (Source Sans, larger
+    # type, despined, no gridlines); no-op unless the flag is set.
+    pp.maybe_apply(args, poster=True, small_figsize=False)
 
     global FIG_EXT
     FIG_EXT = args.fmt
