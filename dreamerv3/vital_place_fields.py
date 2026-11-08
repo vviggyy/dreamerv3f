@@ -278,15 +278,28 @@ def _occ_grid(count, area):
     return np.where(g > 0, g, np.nan)
 
 
-def plot(results, save_dir, fmt='svg'):
+def _occ_prob_grid(count, area):
+    """Occupancy as a visit-PROBABILITY grid (count / total visits), NaN on
+    unvisited. Per-condition normalization makes coverage comparable across
+    conditions of different total length (vital lo vs hi, day vs night) — raw
+    counts would otherwise just reflect how many steps fell in that condition,
+    not where the agent actually went."""
+    c = np.asarray(count, float)
+    tot = c.sum()
+    g = _grid(c / tot if tot > 0 else c, area)
+    return np.where(g > 0, g, np.nan)
+
+
+def _plot_one_vital(results, v, save_dir, fmt):
+    """One figure for a single vital: occupancy (lo/hi, probability-normalized) +
+    per-neuron full/lo/hi place-field maps for THIS vital's own selected neurons."""
     area = tuple(results['area'])
-    vitals = results['vitals']
-    sel = results['selected']
     ev = results['ev']
-    nbins = area[0] * area[1]
-    cols = ['full'] + [f'{v}_{lab}' for v in vitals for lab in ('lo', 'hi')]
-    nmap = len(cols)                 # map columns (full + lo/hi per vital)
-    nrow, ncol = len(sel) + 1, nmap + 1   # + a thin trailing colorbar column
+    pv = results['per_vital'][v]
+    sel = pv['selected']; reason = pv['reason']; cv = pv['cond']
+    remap = np.asarray(pv['remap'])
+    nmap = 3                               # full + lo + hi
+    nrow, ncol = len(sel) + 1, nmap + 1    # + a thin trailing colorbar column
     fig, ax = plt.subplots(nrow, ncol, figsize=(2.1 * nmap + 0.8, 2.1 * nrow),
                            gridspec_kw={'width_ratios': [1] * nmap + [0.12]},
                            squeeze=False)
@@ -303,120 +316,114 @@ def plot(results, save_dir, fmt='svg'):
         cb.ax.tick_params(labelsize=6)
         cb.set_label(label, fontsize=7)
 
-    # occupancy header row, SHARED scale across all columns so low/high occupancy
-    # (which differ systematically for vitals) is directly comparable.
-    # lo/hi occupancy panels share ONE scale so they're comparable (vital lo vs hi
-    # occupancy differ systematically). The FULL-occupancy panel is a different
-    # total so it keeps its own autoscale. Cap the shared scale at the 98th pct of
-    # pooled lo/hi visits so one hot bin doesn't wash the rest to black.
-    cond_grids = []
-    for v in vitals:
-        cv = results['cond'][v]
-        cond_grids.append(_occ_grid(cv['c_lo'], area))
-        cond_grids.append(_occ_grid(cv['c_hi'], area))
-    pooled = np.concatenate([g[np.isfinite(g)] for g in cond_grids
-                             if np.isfinite(g).any()]) if cond_grids else np.array([])
+    # occupancy header: probability-normalized (count/total) so lo vs hi coverage
+    # is comparable despite differing numbers of lo/hi steps. lo/hi share one
+    # scale; the all-steps panel keeps its own autoscale.
+    g_lo = _occ_prob_grid(cv['c_lo'], area)
+    g_hi = _occ_prob_grid(cv['c_hi'], area)
+    pooled = np.concatenate([g[np.isfinite(g)] for g in (g_lo, g_hi)
+                             if np.isfinite(g).any()]) \
+        if (np.isfinite(g_lo).any() or np.isfinite(g_hi).any()) else np.array([])
     occ_vmax = np.percentile(pooled, 98) if pooled.size else 1
-    full_occ = _occ_grid(results['occ_full'], area)
+    full_occ = _occ_prob_grid(results['occ_full'], area)
     ff = full_occ[np.isfinite(full_occ)]
     show(ax[0, 0], full_occ, 0, np.percentile(ff, 98) if ff.size else None, 'magma')
     ax[0, 0].set_title('occupancy (all)', fontsize=8)
     ax[0, 0].set_ylabel('OCCUPANCY', fontsize=8)
-    ci, gi = 1, 0
-    im_occ = None
-    for v in vitals:
-        for lab in ('lo', 'hi'):
-            im_occ = show(ax[0, ci], cond_grids[gi], 0, occ_vmax, 'magma')
-            ax[0, ci].set_title(f'{v}_{lab}', fontsize=8,
-                                color=VITAL_COLORS.get(v, 'k'))
-            ci += 1; gi += 1
-    if im_occ is not None:
-        cbar(im_occ, 0, 'visits (lo/hi, shared)')
+    show(ax[0, 1], g_lo, 0, occ_vmax, 'magma')
+    ax[0, 1].set_title(f'{v}_lo', fontsize=8, color=VITAL_COLORS.get(v, 'k'))
+    im_occ = show(ax[0, 2], g_hi, 0, occ_vmax, 'magma')
+    ax[0, 2].set_title(f'{v}_hi', fontsize=8, color=VITAL_COLORS.get(v, 'k'))
+    cbar(im_occ, 0, 'visit prob (lo/hi, shared)')
 
     for r, nidx in enumerate(sel, start=1):
-        full_map = _grid(results['tc_full'][:, r - 1], area)
+        full_map = _grid(pv['tc_full'][:, r - 1], area)
         finite = full_map[np.isfinite(full_map)]
         vmin = np.percentile(finite, 2) if finite.size else 0
         vmax = np.percentile(finite, 98) if finite.size else 1
-        im = show(ax[r, 0], full_map, vmin, vmax)
-        rsn = results.get('reason', {}).get(nidx, '')
-        rmp = results.get('remap', {})
-        rmp_v = rmp[nidx] if len(rmp) else np.nan
-        ax[r, 0].set_ylabel(f'n{nidx} [{rsn}]\nEV={ev[nidx]:.2f} rmp={rmp_v:.2f}',
-                            fontsize=7)
-        ci = 1
-        for v in vitals:
-            cv = results['cond'][v]
-            for mk in ('m_lo', 'm_hi'):
-                im = show(ax[r, ci], _grid(cv[mk][:, r - 1], area), vmin, vmax)
-                ci += 1
-            # annotate shape corr vs null-median (effect size) + sig on hi panel
-            pr, pp = cv['r'][r - 1], cv['p'][r - 1]
-            nm = cv.get('null_med', np.full_like(cv['r'], np.nan))[r - 1]
-            star = '*' if pp < 0.05 else ''
-            ax[r, ci - 1].set_title(
-                f'{v} r={pr:.2f}{star}\n null={nm:.2f} g={cv["gain"][r-1]:.2f}',
-                fontsize=6.5, color=VITAL_COLORS.get(v, 'k'))
+        show(ax[r, 0], full_map, vmin, vmax)
+        rsn = reason.get(nidx, '')
+        ax[r, 0].set_ylabel(f'n{nidx} [{rsn}]\nEV={ev[nidx]:.2f} '
+                            f'rmp={remap[nidx]:.2f}', fontsize=7)
+        show(ax[r, 1], _grid(cv['m_lo'][:, r - 1], area), vmin, vmax)
+        im = show(ax[r, 2], _grid(cv['m_hi'][:, r - 1], area), vmin, vmax)
+        pr, pvp = cv['r'][r - 1], cv['p'][r - 1]
+        nm = cv.get('null_med', np.full_like(cv['r'], np.nan))[r - 1]
+        star = '*' if pvp < 0.05 else ''
+        ax[r, 2].set_title(
+            f'{v} r={pr:.2f}{star}\n null={nm:.2f} g={cv["gain"][r-1]:.2f}',
+            fontsize=6.5, color=VITAL_COLORS.get(v, 'k'))
         cbar(im, r, 'mean act')
 
+    sel_mode = results.get('args', {}).get('select', '')
     fig.suptitle(
-        f'Vital-conditioned place fields ({results["layer"]}, top-{len(sel)} EV)\n'
+        f'{v}-conditioned place fields ({results["layer"]}, '
+        f'top-{len(sel)} by {sel_mode})\n'
         'low r (*) = field remaps with vital (shape); gain = hi/lo activation ratio',
         fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     p = (Path(save_dir) /
-         f'vital_place_fields_{results["layer"].replace("/", "_")}.{fmt}')
+         f'vital_place_fields_{results["layer"].replace("/", "_")}_{v}.{fmt}')
     fig.savefig(p, bbox_inches='tight', pad_inches=0.3, dpi=130); plt.close(fig)
     print(f'Saved {p}')
+
+
+def plot(results, save_dir, fmt='svg'):
+    """One place-field figure PER vital (each with its own selected neurons)."""
+    for v in results['vitals']:
+        _plot_one_vital(results, v, save_dir, fmt)
 
 
 def plot_population(results, save_dir, fmt='svg'):
-    """Population view: EV vs remap-score scatter (selected highlighted) +
-    remap-score histogram over all neurons. Answers 'does ANY cell remap, and
-    how much does the population?' independent of which cells we chose to show."""
-    if 'remap' not in results or not len(results['remap']):
-        return
-    ev = np.asarray(results['ev']); remap = np.asarray(results['remap'])
-    sel = results['selected']; reason = results.get('reason', {})
-    fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
-    fin = np.isfinite(ev) & np.isfinite(remap)
-    a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
-    for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728'), ('conj', '#2ca02c'),
-                     ('medium', '#9467bd')):
-        idx = [i for i in sel if reason.get(i) == rsn]
-        if idx:
-            a0.scatter(ev[idx], remap[idx], s=42, c=col, edgecolor='k',
-                       label=f'shown ({rsn})', zorder=3)
-    if np.isfinite(results.get('ev_floor', np.nan)):
-        a0.axvline(results['ev_floor'], color='0.4', ls='--', lw=1,
-                   label='remap EV floor')
-    a0.set_xlabel('EV (spatial reliability)')
-    a0.set_ylabel('remap score  (mean 1 − r,  low vs high)')
-    a0.set_title('Spatial reliability vs vital-remapping')
-    a0.legend(fontsize=8, frameon=False); a0.grid(alpha=0.3)
-    a1.hist(remap[np.isfinite(remap)], bins=60, color='#8888cc')
-    a1.set_xlabel('remap score (mean 1 − r)'); a1.set_ylabel('neurons')
-    a1.set_title('Remap-score distribution (all neurons)')
-    a1.grid(alpha=0.3)
-    fig.suptitle(f'{results["layer"]}: does vital state remap the spatial code?',
-                 fontsize=12)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    p = (Path(save_dir) /
-         f'vital_place_fields_population_{results["layer"].replace("/", "_")}.{fmt}')
-    fig.savefig(p, bbox_inches='tight', pad_inches=0.3, dpi=130); plt.close(fig)
-    print(f'Saved {p}')
+    """Population view PER vital: EV vs that vital's remap-score scatter (selected
+    highlighted) + its remap-score histogram over all neurons. One r per vital —
+    no averaging across vitals — so remapping is vital-specific."""
+    ev = np.asarray(results['ev'])
+    for v in results['vitals']:
+        pv = results['per_vital'][v]
+        remap = np.asarray(pv['remap'])
+        sel = pv['selected']; reason = pv['reason']
+        fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
+        fin = np.isfinite(ev) & np.isfinite(remap)
+        a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
+        for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728'),
+                         ('conj', '#2ca02c'), ('medium', '#9467bd')):
+            idx = [i for i in sel if reason.get(i) == rsn]
+            if idx:
+                a0.scatter(ev[idx], remap[idx], s=42, c=col, edgecolor='k',
+                           label=f'shown ({rsn})', zorder=3)
+        if np.isfinite(pv.get('ev_floor', np.nan)):
+            a0.axvline(pv['ev_floor'], color='0.4', ls='--', lw=1,
+                       label='remap EV floor')
+        a0.set_xlabel('EV (spatial reliability)')
+        a0.set_ylabel(f'remap score  (1 − r,  {v} low vs high)')
+        a0.set_title(f'Spatial reliability vs {v}-remapping')
+        a0.legend(fontsize=8, frameon=False); a0.grid(alpha=0.3)
+        a1.hist(remap[np.isfinite(remap)], bins=60, color='#8888cc')
+        a1.set_xlabel(f'remap score (1 − r, {v})'); a1.set_ylabel('neurons')
+        a1.set_title(f'{v} remap-score distribution (all neurons)')
+        a1.grid(alpha=0.3)
+        fig.suptitle(f'{results["layer"]}: does {v} remap the spatial code?',
+                     fontsize=12)
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        p = (Path(save_dir) /
+             f'vital_place_fields_population_{results["layer"].replace("/", "_")}'
+             f'_{v}.{fmt}')
+        fig.savefig(p, bbox_inches='tight', pad_inches=0.3, dpi=130); plt.close(fig)
+        print(f'Saved {p}')
 
 
 def print_summary(results):
     print('\n=== remapping summary (shape corr low-vs-high; null=null-median r) ===')
     for v in results['vitals']:
-        cv = results['cond'][v]
+        pv = results['per_vital'][v]
+        cv = pv['cond']; sel = pv['selected']; reason = pv['reason']
         print(f'[{v}]  n_lo={cv["n_lo"]} n_hi={cv["n_hi"]}  '
               f'(lo<={cv["lo"]}, hi>={cv["hi"]})')
         nmed = cv.get('null_med', np.full_like(cv['r'], np.nan))
-        for r, nidx in enumerate(results['selected']):
+        for r, nidx in enumerate(sel):
             sig = '*' if cv['p'][r] < 0.05 else ' '
-            rsn = results.get('reason', {}).get(nidx, '')
+            rsn = reason.get(nidx, '')
             print(f'   n{nidx:<4d}[{rsn:>5s}] EV={results["ev"][nidx]:.2f}  '
                   f'r={cv["r"][r]:+.2f} (null {nmed[r]:+.2f}) '
                   f'p={cv["p"][r]:.3f}{sig}  gain={cv["gain"][r]:.2f}')
@@ -481,33 +488,35 @@ def main():
     flatbin = _flatbin(pos, area)
     print(f'Area {area}, {nbins} bins')
 
-    # EV (spatial reliability) + all-neuron remap score (selection + pop view)
+    # EV (spatial reliability) + PER-VITAL remap r (one r per vital, NOT averaged
+    # across vitals — so selection + remap score are vital-specific).
     ev = _ev(X, flatbin, nbins)
-    allr, remap = _allneuron_remap(X, flatbin, vit, nbins, args.lo, args.hi,
-                                   args.min_visits)
+    allr, _ = _allneuron_remap(X, flatbin, vit, nbins, args.lo, args.hi,
+                               args.min_visits)
     _ev_band = tuple(float(x) for x in args.ev_band.split(','))
     _remap_band = tuple(float(x) for x in args.remap_band.split(','))
-    selected, reason, ev_floor = _select(ev, remap, args.top_n, args.select,
-                                         args.remap_ev_pct, _ev_band, _remap_band)
-    print(f'Selected {len(selected)} neurons (mode={args.select}, EV floor '
-          f'{ev_floor:.2f}):\n  ' + '\n  '.join(
-              f'n{i}[{reason[i]}] EV={ev[i]:.2f} remap={remap[i]:.2f}'
-              for i in selected))
+    # all-steps occupancy (visit counts) — depends only on position, shared by all
+    occ_full = np.bincount(flatbin, minlength=nbins).astype(float)
 
-    X_sel = X[:, selected]
-    tc_full, occ_full = _maps(flatbin, X_sel, nbins)
-
-    cond = {}
+    per_vital = {}
     for v in vitals:
+        remap_v = 1.0 - np.asarray(allr[v])       # this vital's remap score (D,)
+        selected, reason, ev_floor = _select(ev, remap_v, args.top_n, args.select,
+                                             args.remap_ev_pct, _ev_band, _remap_band)
+        print(f'[{v}] selected {len(selected)} neurons (mode={args.select}, EV '
+              f'floor {ev_floor:.2f}): ' + ', '.join(
+                  f'n{i}[{reason[i]}]' for i in selected))
+        X_sel = X[:, selected]
+        tc_full, _ = _maps(flatbin, X_sel, nbins)
         print(f'conditioning on {v} (lo<={args.lo}, hi>={args.hi}, '
               f'{args.n_shuffle} shuffles) ...')
-        cond[v] = _condition(X_sel, flatbin, vit[v], nbins, args.lo, args.hi,
-                             args.min_visits, args.n_shuffle, rng)
+        cond_v = _condition(X_sel, flatbin, vit[v], nbins, args.lo, args.hi,
+                            args.min_visits, args.n_shuffle, rng)
+        per_vital[v] = dict(remap=remap_v, selected=selected, reason=reason,
+                            ev_floor=ev_floor, tc_full=tc_full, cond=cond_v)
 
-    results = dict(layer=args.layer, area=list(area), vitals=vitals,
-                   selected=selected, reason=reason, ev=ev, remap=remap,
-                   ev_floor=ev_floor, tc_full=tc_full, occ_full=occ_full,
-                   cond=cond, args=vars(args))
+    results = dict(layer=args.layer, area=list(area), vitals=vitals, ev=ev,
+                   occ_full=occ_full, per_vital=per_vital, args=vars(args))
     pkl = save_dir / 'vital_place_fields_results.pkl'
     with open(pkl, 'wb') as f:
         pickle.dump(results, f)
