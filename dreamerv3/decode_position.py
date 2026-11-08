@@ -992,6 +992,14 @@ def plot_occupancy_vs_error(pos, pred, width, height, save_dir,
     print(f"  Saved {fname}")
 
 
+# Occupancy log-scale floor: visit counts below this collapse to a single
+# "incidental" color (random-start single pass-throughs), so the hot colormap
+# only reflects genuine repeated occupancy. 10^1 per the poster convention.
+OCC_LOG_VMIN = 10
+OCC_UNDER_COLOR = '#9a9a9a'   # neutral gray = "visited, but incidental" (de-
+                             # emphasized; avoids clashing with blue water bg)
+
+
 def plot_fullset_occupancy(pos_all, width, height, save_dir,
                            repr_name='deter', metadata=None,
                            show_resources=True, log=True, fname_suffix=''):
@@ -1016,22 +1024,31 @@ def plot_fullset_occupancy(pos_all, width, height, save_dir,
     occ = stats['tile_visits'].copy().astype(float)
     occ[occ == 0] = np.nan                       # unvisited -> transparent
     norm = None
+    extend = 'neither'
     if log:
         from matplotlib.colors import LogNorm
         vmax = np.nanmax(occ) if np.isfinite(occ).any() else 1.0
-        norm = LogNorm(vmin=1, vmax=max(vmax, 2))  # counts are integers >= 1
+        # Floor the color scale at OCC_LOG_VMIN (10^1): tiles visited fewer than
+        # that many times (e.g. a single pass-through from a random start) all
+        # collapse to ONE "incidental" color via cmap.set_under, so the hot ramp
+        # is reserved for genuine, repeated occupancy. Colorbar extends below.
+        norm = LogNorm(vmin=OCC_LOG_VMIN, vmax=max(vmax, OCC_LOG_VMIN + 1))
+        extend = 'min'
     # Match the tuning-curve colormap (black->red->orange) at FULL opacity so the
     # occupancy reads like a tuning map rather than a faded overlay. NaN
-    # (unvisited) stays transparent so the faint world map shows through.
+    # (unvisited) stays transparent so the faint world map shows through;
+    # below-floor (incidental) visits render as the single OCC_UNDER_COLOR.
     from matplotlib.colors import LinearSegmentedColormap
     cmap = LinearSegmentedColormap.from_list(
         'kr', ['black', '#cc0000', '#ff3b00', '#ff8a00']).copy()
     cmap.set_bad(alpha=0.0)
+    if log:
+        cmap.set_under(OCC_UNDER_COLOR)
     im = ax.imshow(occ.T, origin='lower', cmap=cmap, aspect='equal',
                    interpolation='nearest', extent=world_extent, norm=norm)
     _overlay_resources(ax, _get_resource_tiles(metadata) if show_resources else {})
-    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label('Visit count' + (' (log scale)' if log else ''))
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8, extend=extend)
+    cbar.set_label('Visit count')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_xlim(world_extent[0], world_extent[1])
