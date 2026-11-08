@@ -79,7 +79,7 @@ defaults:
     warmup: 0         # 0 -> dense over ALL warmups W in [1, report_length-horizon] (mirrors training's dyn.starts); N>0 -> single warmup N
     warmup_stride: 1  # subsample the dense warmup set to control memory/compile
     horizon: 0        # dream rollout length (0 -> imag_length); warmup+horizon <= report_length
-    central: median   # curve central tendency: 'median' (spread=IQR) or 'mean' (spread=std)
+    central: mean     # curve central tendency: 'mean' (spread=±1 std) or 'median' (spread=IQR)
     shading: band     # spread display: 'band' (filled), 'bars' (error bars), or 'none'
     fmt: png          # figure output format: png | svg | pdf (svg/pdf = Illustrator-editable vector)
     theme: dark       # color theme: dark | light (light = white bg + dark text/points for posters)

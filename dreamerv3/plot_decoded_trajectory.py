@@ -28,6 +28,7 @@ from matplotlib.lines import Line2D
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from decode_position import load_classifier_model  # noqa: E402
 from render_poster_frame import render_world, world_to_img  # noqa: E402
+import plot_presentable as pp  # noqa: E402
 
 
 def decode_episode(ep, clf, meta):
@@ -70,7 +71,14 @@ def main():
     ap.add_argument('--drop_first', type=int, default=1,
                     help='drop the first N steps (t=0 deter is the uninformative '
                          'reset state and decodes to a fixed corner). Default 1.')
+    pp.add_presentable_arg(ap)
     args = ap.parse_args()
+    applied = pp.maybe_apply(args, small_figsize=False)  # Tier-1 style + --out_fmt
+    # Under presentable, let the house type scale govern; else keep the original
+    # hardcoded sizes so default-mode output is unchanged.
+    fs_title = None if applied else 13
+    fs_suptitle = None if applied else 12
+    fs_legend = None if applied else 9
 
     data = Path(args.data)
     ep_file = data / f'episode_{args.episode:03d}.pkl'
@@ -112,7 +120,7 @@ def main():
     for ax, title in zip(axes, titles):
         ax.imshow(world, origin='upper', interpolation='nearest')
         ax.axis('off')
-        ax.set_title(title, fontsize=13)
+        ax.set_title(title, fontsize=fs_title)
 
     # Panel 1: real (viridis by time)
     _time_colored_path(axes[0], real, ts, 'viridis', lw=2.5)
@@ -135,11 +143,11 @@ def main():
         Line2D([0], [0], marker='s', color='none', markerfacecolor='red',
                mec='black', ms=8, label='end'),
     ]
-    axes[2].legend(handles=handles, loc='upper right', fontsize=9, framealpha=0.85)
+    axes[2].legend(handles=handles, loc='upper right', fontsize=fs_legend, framealpha=0.85)
 
     fig.suptitle(f'{data.parent.name} — episode {args.episode} '
                  f'(deter decoder, {meta["width"]}x{meta["height"]} grid)',
-                 fontsize=12, y=1.02)
+                 fontsize=fs_suptitle, y=1.02)
     out = args.save or str(data.parent / f'decoded_trajectory_ep{args.episode}.svg')
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, bbox_inches='tight')

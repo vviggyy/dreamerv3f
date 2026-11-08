@@ -22,8 +22,48 @@ Usage in a script:
 Palette / rc values are lifted from the plot-style skill's figkit.py so figures
 built here match the skill's examples.
 """
+import os
+import glob
 import matplotlib as mpl
 from matplotlib import ticker
+
+# --- Font registration ------------------------------------------------------
+# Arial/Helvetica are usually absent on HPC; matplotlib then falls back to
+# DejaVu Sans, which (a) looks clunkier than the clean sans in the Cosyne figs
+# and (b) ships ONLY Regular(400)+Bold(700) — no true medium weight, so a poster
+# "medium" look is impossible. We bundle/register Source Sans 3 (Regular 400,
+# Medium 500, Bold 700) from the user font dir if present, giving a clean,
+# Arial-like sans with a genuine in-between weight. Self-contained: registered
+# per-process via addfont so every repo plotter that imports this module gets it
+# without depending on the global matplotlib font cache.
+_PREFERRED_SANS = 'Source Sans 3'
+_USER_FONT_DIRS = [
+    os.path.expanduser('~/.local/share/fonts'),
+    os.path.expanduser('~/.fonts'),
+]
+_FONTS_REGISTERED = False
+
+
+def _register_fonts():
+    """addfont() any Source Sans 3 TTFs found in the user font dirs. Idempotent."""
+    global _FONTS_REGISTERED
+    if _FONTS_REGISTERED:
+        return
+    from matplotlib import font_manager as fm
+    have = {f.fname for f in fm.fontManager.ttflist}
+    for d in _USER_FONT_DIRS:
+        for ttf in glob.glob(os.path.join(d, 'SourceSans3-*.ttf')):
+            if ttf not in have:
+                try:
+                    fm.fontManager.addfont(ttf)
+                except Exception:
+                    pass
+    _FONTS_REGISTERED = True
+
+
+def _sans_available(name):
+    from matplotlib import font_manager as fm
+    return any(f.name == name for f in fm.fontManager.ttflist)
 
 # --- Okabe-Ito colorblind-safe palette (from figkit.OKABE/CYCLE) ---
 OKABE = {
@@ -61,37 +101,192 @@ _TYPE = {
     'ytick.labelsize': 14, 'legend.fontsize': 14, 'axes.titlesize': 17,
 }
 
+# --- Tier-2 POSTER type scale (figkit._TYPE * ~1.75) ---------------------------
+# Posters are viewed from ~1-1.5 m, so type must read much larger than the
+# print-scale Tier-1 above. These are points at final panel size; pair with a
+# correspondingly larger per-panel figsize (square spatial panels ~4-5 in).
+# DELIBERATELY NOT heavy-bold: the Cosyne figures' bold was a paper-PDF
+# convention; a poster wants LARGE but not HEAVY text (plot-style's weight at
+# poster size). Weight is set by apply_presentable_style(weight=...), default
+# 'medium' for poster; only the panel-letter helper stays bold. Heavier
+# lines/spines (not text) help thin strokes survive distance viewing.
+_POSTER_TYPE = {
+    'font.size': 24, 'axes.labelsize': 26, 'xtick.labelsize': 22,
+    'ytick.labelsize': 22, 'legend.fontsize': 22, 'axes.titlesize': 28,
+    'axes.linewidth': 1.4, 'lines.linewidth': 2.2,
+    'xtick.major.width': 1.4, 'ytick.major.width': 1.4,
+    'xtick.major.size': 5, 'ytick.major.size': 5,
+}
+# Default text weight per mode: poster -> 'medium' (between plot-style's regular
+# and Cosyne's heavy bold); Tier-1 keeps matplotlib's normal.
+_POSTER_WEIGHT = 'medium'
+
 # Single-column print width is the sensible small default; scripts that pass an
 # explicit figsize keep theirs (rcParams only affects figures that DON'T).
 _DEFAULT_FIGSIZE = (3.5, 2.6)
+_POSTER_FIGSIZE = (5.0, 4.2)
 
 # Module-level flag so helpers (save, etc.) can no-op gracefully if never applied.
 _APPLIED = False
+_POSTER = False
 
 
-def apply_presentable_style(small_figsize=True, prop_cycle=True, **extra):
-    """Apply the Tier-1 house style globally via rcParams.
+def apply_presentable_style(small_figsize=True, prop_cycle=True, poster=False,
+                            scale=None, weight=None, **extra):
+    """Apply the house style globally via rcParams. Call ONCE before any figure.
 
-    Call ONCE before creating any figure. Affects every subsequent plot drawn
-    into the active rcParams (fonts, spines, ticks, sizes, color cycle).
+    Tier 1 (default): print-scale fonts that retroactively restyle existing code
+    (fonts, spines, ticks, sizes, color cycle).
 
-    small_figsize: set a single-column (3.5x2.6in) default figsize. Only affects
-        figures created WITHOUT an explicit figsize — scripts that hardcode a
-        size keep it (shrink those at the call site if desired).
-    prop_cycle: install the Okabe-Ito color cycle as the default. Figures with
-        hardcoded colors keep them; only default-cycled series change.
+    poster=True: Tier-2 POSTER scale — much larger, bold sans type + heavier
+        lines/spines to match the Cosyne figure look, intended for large-format
+        panels assembled into a poster. Combine with the Tier-2 layout helpers
+        below (endpoint_ticks, highlow_colorbar, panel_letter, square_panel).
+
+    small_figsize: set a default figsize for figures created WITHOUT an explicit
+        figsize (single-column 3.5x2.6in; poster -> 5.0x4.2in). Scripts that
+        hardcode a size keep it.
+    prop_cycle: install the Okabe-Ito color cycle as the default.
+    scale: optional multiplier applied on top of the chosen type scale (e.g.
+        scale=1.2 to nudge all fonts up 20% without picking new absolute sizes).
+    weight: title/label font weight ('normal', 'medium', 'semibold', 'bold', or a
+        numeric 100-900). Poster default is 'medium' (between plot-style's regular
+        and Cosyne's heavy bold); pass 'normal' for the lightest look or 'semibold'
+        to push toward Cosyne. Tier-1 leaves matplotlib's default unless set.
     extra: any additional rcParams to override (e.g. figure.figsize=(7.2, 4)).
     """
-    global _APPLIED
-    rc = {**_BASE_RC, **_TYPE}
+    global _APPLIED, _POSTER
+    _register_fonts()
+    type_rc = dict(_POSTER_TYPE if poster else _TYPE)
+    # prefer the clean multi-weight sans when it's available (else keep the
+    # Arial/Helvetica/DejaVu fallback chain from _BASE_RC untouched)
+    if _sans_available(_PREFERRED_SANS):
+        type_rc['font.sans-serif'] = (
+            [_PREFERRED_SANS] + list(_BASE_RC['font.sans-serif']))
+    if scale and scale != 1.0:
+        for k in ('font.size', 'axes.labelsize', 'xtick.labelsize',
+                  'ytick.labelsize', 'legend.fontsize', 'axes.titlesize'):
+            if k in type_rc:
+                type_rc[k] = round(type_rc[k] * scale, 1)
+    w = weight if weight is not None else (_POSTER_WEIGHT if poster else None)
+    if w is not None:
+        type_rc['axes.labelweight'] = w
+        type_rc['axes.titleweight'] = w
+    rc = {**_BASE_RC, **type_rc}
     if small_figsize:
-        rc['figure.figsize'] = _DEFAULT_FIGSIZE
+        rc['figure.figsize'] = _POSTER_FIGSIZE if poster else _DEFAULT_FIGSIZE
     if prop_cycle:
         rc['axes.prop_cycle'] = mpl.cycler(color=CYCLE)
     rc.update(extra)
     mpl.rcParams.update(rc)
     _APPLIED = True
+    _POSTER = bool(poster)
     return rc
+
+
+def is_poster():
+    return _POSTER
+
+
+# ============================================================================
+# Tier-2 poster layout helpers (the Cosyne "format that works")
+# ----------------------------------------------------------------------------
+# Six rules distilled from the Cosyne Fig1-3 panels:
+#   1. big bold sans type            -> apply_presentable_style(poster=True)
+#   2. endpoint-only ticks           -> endpoint_ticks(ax)
+#   3. despined data / clean-box img -> rcParams (data) / box_only(ax) (images)
+#   4. short labels                  -> caller supplies
+#   5. High/Low qualitative colorbar -> highlow_colorbar(...)
+#   6. square panels + bold letters  -> square_panel(ax), panel_letter(ax, 'A')
+# These touch a single Axes/Figure each; they never set global state, so a script
+# can adopt them panel-by-panel without disturbing the rest of the figure.
+# ============================================================================
+
+def endpoint_ticks(ax, axis='both', x=None, y=None, xlabels=None, ylabels=None,
+                   fmt=None):
+    """Reduce an axis to just its two endpoint ticks (min & max), Cosyne-style.
+
+    By default reads each axis's current data limits and places one tick at each
+    end. Pass explicit `x`/`y` (2-tuples/lists of tick positions) to override,
+    and `xlabels`/`ylabels` to set custom strings (e.g. ['0', '1.0M']).
+
+    fmt: optional callable(value)->str applied to auto endpoint labels when no
+        explicit labels are given (e.g. pp.kfmt for compact big numbers).
+    """
+    def _apply(a, lo_hi, labels, setter, labeler):
+        if lo_hi is None:
+            lo, hi = a.get_view_interval()
+            ticks = [lo, hi]
+        else:
+            ticks = list(lo_hi)
+        setter(ticks)
+        if labels is not None:
+            labeler([str(t) for t in labels])
+        elif fmt is not None:
+            labeler([fmt(t) for t in ticks])
+    if axis in ('x', 'both'):
+        _apply(ax.xaxis, x, xlabels, ax.set_xticks, ax.set_xticklabels)
+    if axis in ('y', 'both'):
+        _apply(ax.yaxis, y, ylabels, ax.set_yticks, ax.set_yticklabels)
+    return ax
+
+
+def box_only(ax):
+    """Restore all 4 spines (a clean frame) with no ticks — for image/heatmap
+    panels like the Cosyne Fig2B spatial maps (despined looks wrong on images)."""
+    for s in ax.spines.values():
+        s.set_visible(True)
+        s.set_linewidth(mpl.rcParams.get('axes.linewidth', 1.6))
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return ax
+
+
+def square_panel(ax):
+    """Force a square data box (equal aspect on the box, not the data) — for
+    spatial/activation panels that should read as a square tile."""
+    ax.set_box_aspect(1)
+    return ax
+
+
+def panel_letter(ax, letter, x=-0.18, y=1.08, size=None, weight='bold', **kw):
+    """Draw a bold panel-letter tag (A, B, ...) in axes-fraction coords, placed
+    just outside the top-left of the Axes like the Cosyne panels.
+
+    x/y are in axes fraction (default slightly left of and above the axes).
+    size defaults to ~1.3x the title size so letters dominate.
+    """
+    if size is None:
+        size = mpl.rcParams.get('axes.titlesize', 30)
+        try:
+            size = float(size) * 1.3
+        except (TypeError, ValueError):
+            size = 34
+    return ax.text(x, y, letter, transform=ax.transAxes, fontsize=size,
+                   fontweight=weight, va='bottom', ha='right', **kw)
+
+
+def highlow_colorbar(mappable, ax=None, cax=None, label_high='High',
+                     label_low='Low', fraction=0.046, pad=0.04, weight='bold',
+                     size=None):
+    """A qualitative colorbar labeled only 'High' (top) / 'Low' (bottom) with no
+    numeric ticks — the Cosyne Fig2B/Fig3B style for maps where the absolute
+    scale is not the point. Returns the Colorbar.
+    """
+    import matplotlib.pyplot as plt
+    fig = (ax.figure if ax is not None else
+           (cax.figure if cax is not None else plt.gcf()))
+    cb_kw = {} if cax is not None else {'ax': ax, 'fraction': fraction, 'pad': pad}
+    cb = fig.colorbar(mappable, cax=cax, **cb_kw)
+    cb.set_ticks([])
+    cb.outline.set_linewidth(mpl.rcParams.get('axes.linewidth', 1.6))
+    if size is None:
+        size = mpl.rcParams.get('ytick.labelsize', 24)
+    cb.ax.text(0.5, 1.02, label_high, transform=cb.ax.transAxes, ha='center',
+               va='bottom', fontsize=size, fontweight=weight)
+    cb.ax.text(0.5, -0.02, label_low, transform=cb.ax.transAxes, ha='center',
+               va='top', fontsize=size, fontweight=weight)
+    return cb
 
 
 def is_applied():

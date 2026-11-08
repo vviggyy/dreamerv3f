@@ -45,6 +45,7 @@ from scipy.ndimage import gaussian_filter
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import plot_presentable as pp
 
 # Field-shape classification thresholds (gating vs relocation)
 STRENGTH_FLOOR = 0.35   # weaker condition's peak < this x stronger's -> "gated off"
@@ -217,7 +218,8 @@ def _pctrank(x):
     return rank / max(len(x) - 1, 1)
 
 
-def _select(ev, remap, top_n, mode, remap_ev_pct):
+def _select(ev, remap, top_n, mode, remap_ev_pct, ev_band=(0.5, 0.8),
+            remap_band=(0.4, 0.8)):
     """Pick neurons to display. Returns (indices, reason-per-index dict).
 
     mode 'ev'    -> top EV (stable spatial baseline).
@@ -243,6 +245,15 @@ def _select(ev, remap, top_n, mode, remap_ev_pct):
         conj = np.where(ev >= ev_floor, conj, -np.inf)        # keep the noise gate
         picks = list(np.argsort(conj)[::-1][:top_n])
         for i in picks: reason[int(i)] = 'conj'
+    elif mode == 'medium':
+        lo_e, hi_e = ev_band; lo_r, hi_r = remap_band
+        band = ((ev > lo_e) & (ev < hi_e) & (remap > lo_r) & (remap < hi_r)
+                & np.isfinite(ev) & np.isfinite(remap))
+        cand = np.where(band)[0]
+        ce, cr = (lo_e + hi_e) / 2, (lo_r + hi_r) / 2   # rank by centrality in band
+        order = np.argsort((ev[cand] - ce) ** 2 + (remap[cand] - cr) ** 2)
+        picks = list(cand[order][:top_n])
+        for i in picks: reason[int(i)] = 'medium'
     else:  # both
         picks = []
         ne = top_n // 2
@@ -274,35 +285,60 @@ def plot(results, save_dir, fmt='svg'):
     ev = results['ev']
     nbins = area[0] * area[1]
     cols = ['full'] + [f'{v}_{lab}' for v in vitals for lab in ('lo', 'hi')]
-    nrow, ncol = len(sel) + 1, len(cols)
-    fig, ax = plt.subplots(nrow, ncol, figsize=(2.1 * ncol, 2.1 * nrow),
+    nmap = len(cols)                 # map columns (full + lo/hi per vital)
+    nrow, ncol = len(sel) + 1, nmap + 1   # + a thin trailing colorbar column
+    fig, ax = plt.subplots(nrow, ncol, figsize=(2.1 * nmap + 0.8, 2.1 * nrow),
+                           gridspec_kw={'width_ratios': [1] * nmap + [0.12]},
                            squeeze=False)
 
     def show(a, grid, vmin, vmax, cmap='viridis'):
         cm = plt.get_cmap(cmap).copy(); cm.set_bad('#4d4d4d')
-        a.imshow(grid.T, origin='lower', cmap=cm, vmin=vmin, vmax=vmax,
-                 interpolation='nearest')
+        im = a.imshow(grid.T, origin='lower', cmap=cm, vmin=vmin, vmax=vmax,
+                      interpolation='nearest')
         a.set_xticks([]); a.set_yticks([])
+        return im
 
-    # occupancy header row
-    show(ax[0, 0], _occ_grid(results['occ_full'], area), None, None, 'magma')
-    ax[0, 0].set_title('occupancy', fontsize=8)
-    ax[0, 0].set_ylabel('OCCUPANCY', fontsize=8)
-    ci = 1
+    def cbar(im, r, label):
+        cb = fig.colorbar(im, cax=ax[r, -1])
+        cb.ax.tick_params(labelsize=6)
+        cb.set_label(label, fontsize=7)
+
+    # occupancy header row, SHARED scale across all columns so low/high occupancy
+    # (which differ systematically for vitals) is directly comparable.
+    # lo/hi occupancy panels share ONE scale so they're comparable (vital lo vs hi
+    # occupancy differ systematically). The FULL-occupancy panel is a different
+    # total so it keeps its own autoscale. Cap the shared scale at the 98th pct of
+    # pooled lo/hi visits so one hot bin doesn't wash the rest to black.
+    cond_grids = []
     for v in vitals:
         cv = results['cond'][v]
-        for lab, ckey in (('lo', 'c_lo'), ('hi', 'c_hi')):
-            show(ax[0, ci], _occ_grid(cv[ckey], area), None, None, 'magma')
+        cond_grids.append(_occ_grid(cv['c_lo'], area))
+        cond_grids.append(_occ_grid(cv['c_hi'], area))
+    pooled = np.concatenate([g[np.isfinite(g)] for g in cond_grids
+                             if np.isfinite(g).any()]) if cond_grids else np.array([])
+    occ_vmax = np.percentile(pooled, 98) if pooled.size else 1
+    full_occ = _occ_grid(results['occ_full'], area)
+    ff = full_occ[np.isfinite(full_occ)]
+    show(ax[0, 0], full_occ, 0, np.percentile(ff, 98) if ff.size else None, 'magma')
+    ax[0, 0].set_title('occupancy (all)', fontsize=8)
+    ax[0, 0].set_ylabel('OCCUPANCY', fontsize=8)
+    ci, gi = 1, 0
+    im_occ = None
+    for v in vitals:
+        for lab in ('lo', 'hi'):
+            im_occ = show(ax[0, ci], cond_grids[gi], 0, occ_vmax, 'magma')
             ax[0, ci].set_title(f'{v}_{lab}', fontsize=8,
                                 color=VITAL_COLORS.get(v, 'k'))
-            ci += 1
+            ci += 1; gi += 1
+    if im_occ is not None:
+        cbar(im_occ, 0, 'visits (lo/hi, shared)')
 
     for r, nidx in enumerate(sel, start=1):
         full_map = _grid(results['tc_full'][:, r - 1], area)
         finite = full_map[np.isfinite(full_map)]
         vmin = np.percentile(finite, 2) if finite.size else 0
         vmax = np.percentile(finite, 98) if finite.size else 1
-        show(ax[r, 0], full_map, vmin, vmax)
+        im = show(ax[r, 0], full_map, vmin, vmax)
         rsn = results.get('reason', {}).get(nidx, '')
         rmp = results.get('remap', {})
         rmp_v = rmp[nidx] if len(rmp) else np.nan
@@ -312,7 +348,7 @@ def plot(results, save_dir, fmt='svg'):
         for v in vitals:
             cv = results['cond'][v]
             for mk in ('m_lo', 'm_hi'):
-                show(ax[r, ci], _grid(cv[mk][:, r - 1], area), vmin, vmax)
+                im = show(ax[r, ci], _grid(cv[mk][:, r - 1], area), vmin, vmax)
                 ci += 1
             # annotate shape corr vs null-median (effect size) + sig on hi panel
             pr, pp = cv['r'][r - 1], cv['p'][r - 1]
@@ -321,6 +357,7 @@ def plot(results, save_dir, fmt='svg'):
             ax[r, ci - 1].set_title(
                 f'{v} r={pr:.2f}{star}\n null={nm:.2f} g={cv["gain"][r-1]:.2f}',
                 fontsize=6.5, color=VITAL_COLORS.get(v, 'k'))
+        cbar(im, r, 'mean act')
 
     fig.suptitle(
         f'Vital-conditioned place fields ({results["layer"]}, top-{len(sel)} EV)\n'
@@ -329,7 +366,7 @@ def plot(results, save_dir, fmt='svg'):
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     p = (Path(save_dir) /
          f'vital_place_fields_{results["layer"].replace("/", "_")}.{fmt}')
-    fig.savefig(p, bbox_inches='tight', dpi=130); plt.close(fig)
+    fig.savefig(p, bbox_inches='tight', pad_inches=0.3, dpi=130); plt.close(fig)
     print(f'Saved {p}')
 
 
@@ -344,7 +381,8 @@ def plot_population(results, save_dir, fmt='svg'):
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
     fin = np.isfinite(ev) & np.isfinite(remap)
     a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
-    for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728'), ('conj', '#2ca02c')):
+    for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728'), ('conj', '#2ca02c'),
+                     ('medium', '#9467bd')):
         idx = [i for i in sel if reason.get(i) == rsn]
         if idx:
             a0.scatter(ev[idx], remap[idx], s=42, c=col, edgecolor='k',
@@ -365,7 +403,7 @@ def plot_population(results, save_dir, fmt='svg'):
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     p = (Path(save_dir) /
          f'vital_place_fields_population_{results["layer"].replace("/", "_")}.{fmt}')
-    fig.savefig(p, bbox_inches='tight', dpi=130); plt.close(fig)
+    fig.savefig(p, bbox_inches='tight', pad_inches=0.3, dpi=130); plt.close(fig)
     print(f'Saved {p}')
 
 
@@ -396,9 +434,14 @@ def main():
     ap.add_argument('--vitals', default='food,drink')
     ap.add_argument('--top_n', type=int, default=10, help='neurons to show')
     ap.add_argument('--select', default='both',
-                    choices=['ev', 'remap', 'conj', 'both'],
+                    choices=['ev', 'remap', 'conj', 'both', 'medium'],
                     help='ev=top spatial (stable baseline), remap=top vital-remappers, '
-                    'conj=jointly high EV AND remap (candidate splitter cells), both')
+                    'conj=jointly high EV AND remap (candidate splitter cells), both, '
+                    'medium=intermediate band (EV & remap both mid; --ev_band/--remap_band)')
+    ap.add_argument('--ev_band', default='0.5,0.8',
+                    help='[--select medium] EV window "lo,hi" (default 0.5,0.8)')
+    ap.add_argument('--remap_band', default='0.4,0.8',
+                    help='[--select medium] remap window "lo,hi" (default 0.4,0.8)')
     ap.add_argument('--remap_ev_pct', type=float, default=75.0,
                     help='remap candidates must have EV >= this percentile of EV '
                     '(gates out weakly-spatial vital-gain cells; raise toward 90 if '
@@ -412,7 +455,9 @@ def main():
     ap.add_argument('--fmt', default='svg', choices=['svg', 'png', 'pdf'],
                     help='figure format (svg=vector for Illustrator; png=quick view)')
     ap.add_argument('--from_pkl', default='', help='replot from results pkl')
+    pp.add_presentable_arg(ap)
     args = ap.parse_args()
+    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
 
     if args.from_pkl:
         with open(args.from_pkl, 'rb') as f:
@@ -440,8 +485,10 @@ def main():
     ev = _ev(X, flatbin, nbins)
     allr, remap = _allneuron_remap(X, flatbin, vit, nbins, args.lo, args.hi,
                                    args.min_visits)
+    _ev_band = tuple(float(x) for x in args.ev_band.split(','))
+    _remap_band = tuple(float(x) for x in args.remap_band.split(','))
     selected, reason, ev_floor = _select(ev, remap, args.top_n, args.select,
-                                         args.remap_ev_pct)
+                                         args.remap_ev_pct, _ev_band, _remap_band)
     print(f'Selected {len(selected)} neurons (mode={args.select}, EV floor '
           f'{ev_floor:.2f}):\n  ' + '\n  '.join(
               f'n{i}[{reason[i]}] EV={ev[i]:.2f} remap={remap[i]:.2f}'

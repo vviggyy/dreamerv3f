@@ -126,10 +126,14 @@ if [ "${ROLLOUT_K:-0}" -gt 0 ]; then
     MODEL_ARGS+=" --agent.loss_scales.rollout_dyn $ROLLOUT_DYN_SCALE"
 fi
 
-# Shared env args (train + eval differ only in fixed_seed + disable_mobs).
-# _build_env_args <fixed_seed> <disable_mobs> -> echoes the arg string.
+# Shared env args (train + eval differ only in fixed_seed + disable_mobs +
+# fixed_layout). _build_env_args <fixed_seed> <disable_mobs> [fixed_layout]
+# -> echoes the arg string. fixed_layout defaults to $FIXED_LAYOUT so existing
+# wrappers are unchanged; pass a 3rd arg (EVAL_FIXED_LAYOUT) to decouple eval,
+# e.g. a multiworld (fixed_layout=False) training net evaluated on a frozen
+# fixed_layout world for apples-to-apples comparison with fixed_layout nets.
 _build_env_args() {
-    local fs="$1" dm="$2"
+    local fs="$1" dm="$2" fl="${3:-$FIXED_LAYOUT}"
     local a=""
     a+=" --env.crafter.random_spawn $RANDOM_SPAWN"
     a+=" --env.crafter.fixed_seed $fs"
@@ -137,7 +141,7 @@ _build_env_args() {
     a+=" --env.crafter.size $IMAGE_SIZE $IMAGE_SIZE"
     a+=" --env.crafter.upright_sprites $UPRIGHT_SPRITES"
     a+=" --env.crafter.disable_mobs $dm"
-    a+=" --env.crafter.fixed_layout $FIXED_LAYOUT"
+    a+=" --env.crafter.fixed_layout $fl"
     a+=" --env.crafter.island_border $ISLAND_BORDER"
     a+=" --env.crafter.island_seed $ISLAND_SEED"
     a+=" --env.crafter.island_fill $ISLAND_FILL"
@@ -157,8 +161,12 @@ _build_env_args() {
     [ -n "${CUSTOM_WORLD:-}" ] && a+=" --env.crafter.custom_world $CUSTOM_WORLD"
     echo "$a"
 }
-TRAIN_ENV_ARGS="$(_build_env_args "$TRAIN_FIXED_SEED" "$DISABLE_MOBS")"
-EVAL_ENV_ARGS="$(_build_env_args "$EVAL_FIXED_SEED" "$EVAL_DISABLE_MOBS")"
+# EVAL_FIXED_LAYOUT defaults to FIXED_LAYOUT (identical to pre-decoupling
+# behavior); a wrapper may set it to eval on a different layout regime than it
+# trained on (e.g. multiworld-trained Cinf evaluated on frozen fixed_layout 45).
+: "${EVAL_FIXED_LAYOUT:=$FIXED_LAYOUT}"
+TRAIN_ENV_ARGS="$(_build_env_args "$TRAIN_FIXED_SEED" "$DISABLE_MOBS" "$FIXED_LAYOUT")"
+EVAL_ENV_ARGS="$(_build_env_args "$EVAL_FIXED_SEED" "$EVAL_DISABLE_MOBS" "$EVAL_FIXED_LAYOUT")"
 
 # RUN_ANALYSIS=false -> vitals_only eval (no activations/images) + skip heavy
 # analysis steps (4,5,6,7,9). Default true keeps full-activation behavior.
@@ -194,6 +202,7 @@ random_spawn=$RANDOM_SPAWN
 train_fixed_seed=$TRAIN_FIXED_SEED
 eval_fixed_seed=$EVAL_FIXED_SEED
 fixed_layout=$FIXED_LAYOUT
+eval_fixed_layout=$EVAL_FIXED_LAYOUT
 island_border=$ISLAND_BORDER
 island_seed=$ISLAND_SEED
 island_fill=$ISLAND_FILL
@@ -394,7 +403,7 @@ if step_done 3c; then skip_note 3c; else
     OCC_ARGS="--data $TRAJ_DIR --save ${LOGDIR}/occupancy --mode occupancy"
     OCC_ARGS+=" --max_episodes 0"
     OCC_ARGS+=" $PRESENTABLE_ARG"
-    [ "$FIXED_LAYOUT" = "True" ]  && OCC_ARGS+=" --fixed_layout"
+    [ "$EVAL_FIXED_LAYOUT" = "True" ]  && OCC_ARGS+=" --fixed_layout"
     [ "$ISLAND_BORDER" = "True" ] && OCC_ARGS+=" --island --island_seed $ISLAND_SEED --island_fill $ISLAND_FILL --island_roughness $ISLAND_ROUGHNESS"
     MPLBACKEND=Agg python dreamerv3/decode_position.py $OCC_ARGS
     mark_done 3c
