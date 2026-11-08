@@ -54,6 +54,13 @@ from run_info import log_run_info
 # friendly) and ignores dpi; png/pdf also supported.
 FIG_EXT = 'png'
 
+# Fixed width (inches) for the per-episode strip, INDEPENDENT of episode length:
+# long episodes condense horizontally into the same footprint instead of growing
+# unboundedly wide (a 2000-step episode would otherwise be ~25 in). Keeps every
+# vitals_episode_*.png the same size for poster assembly. matplotlib has no
+# practical point limit, so 2k+ step episodes just read denser.
+EP_STRIP_WIDTH = 5.0
+
 VITALS = ['health', 'food', 'drink', 'energy']
 VITAL_COLORS = {
     'health': '#d62728', 'food': '#ff7f0e',
@@ -460,7 +467,7 @@ def plot_episode(ep, save_path, ep_idx, meta=None):
     # trace panels, all sharing the step axis. Narrow width + short panels so the
     # whole thing reads as a compact strip. Height grows with #trace panels.
     BAR_H, TR_H = 0.20, 0.58
-    width = max(5.0, T / 80.0)
+    width = EP_STRIP_WIDTH               # fixed: long episodes condense, not widen
     height = 0.7 + 2 * BAR_H + n_tr * TR_H
     fig = plt.figure(figsize=(width, height))
     gs = fig.add_gridspec(2 + n_tr, 1,
