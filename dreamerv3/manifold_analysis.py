@@ -427,26 +427,67 @@ def _setup_dark_style():
     })
 
 
+# 2-D position colormap --------------------------------------------------------
+# Map (x, y) -> RGB by a bilinear blend of 4 corner colors, so nearby positions
+# get nearby colors EVERYWHERE. Replaces the old polar atan2/hsv map, which is
+# wrong for a rectangular world: angle-from-center flips hue wildly near the
+# center and folds opposite sides of the map onto the same color.
+_POS_CORNERS = {
+    'bl': np.array([0.11, 0.27, 0.72]),   # x_min, y_min -> blue
+    'br': np.array([0.85, 0.37, 0.08]),   # x_max, y_min -> orange
+    'tl': np.array([0.00, 0.60, 0.45]),   # x_min, y_max -> green
+    'tr': np.array([0.96, 0.88, 0.25]),   # x_max, y_max -> yellow
+}
+
+
+def _pos_to_rgb(px, py, x0, x1, y0, y1):
+    """Bilinear 2-D colormap: (x, y) -> RGB in [0,1]. px/py arrays of any shape;
+    returns that shape + a trailing length-3 axis."""
+    xn = np.clip((np.asarray(px, float) - x0) / max(x1 - x0, 1e-9), 0, 1)[..., None]
+    yn = np.clip((np.asarray(py, float) - y0) / max(y1 - y0, 1e-9), 0, 1)[..., None]
+    return np.clip(_POS_CORNERS['bl'] * (1 - xn) * (1 - yn)
+                   + _POS_CORNERS['br'] * xn * (1 - yn)
+                   + _POS_CORNERS['tl'] * (1 - xn) * yn
+                   + _POS_CORNERS['tr'] * xn * yn, 0, 1)
+
+
+def _pos_bounds(pos):
+    return (float(pos[:, 0].min()), float(pos[:, 0].max()),
+            float(pos[:, 1].min()), float(pos[:, 1].max()))
+
+
+def _draw_pos_colorkey_inset(ax, bounds, loc='lower right'):
+    """Small inset square showing the 2-D position colormap (x horizontal, y
+    vertical) so the scatter colors can be read as a position legend."""
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+    x0, x1, y0, y1 = bounds
+    g = np.linspace(0, 1, 64)
+    GX, GY = np.meshgrid(g, g)
+    key = _pos_to_rgb(GX, GY, 0, 1, 0, 1)
+    cax = inset_axes(ax, width='26%', height='26%', loc=loc, borderpad=0.5)
+    cax.imshow(key, origin='lower', interpolation='bilinear')
+    cax.set_xticks([]); cax.set_yticks([])
+    cax.set_xlabel('x', fontsize=8, labelpad=1)
+    cax.set_ylabel('y', fontsize=8, labelpad=1)
+    return cax
+
+
 def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
                          mapcenter=None):
-    """Isomap colored by full-circle atan2(x, y) position angle (cyclic hsv).
+    """Isomap colored by a 2-D position colormap (x,y -> RGB; see _pos_to_rgb).
 
-    Uses atan2 (−π..π, full 360°) with a cyclic colormap so opposite headings
-    get distinct colors and the wrap is seamless — unlike arctan(x/y) which only
-    spans 180° and folds opposite sides of the map onto the same color."""
+    A rectangular world gets a rectangular color encoding: both axes are encoded
+    and nearby positions get nearby colors everywhere. (`mapcenter` kept for
+    signature compatibility; unused.)"""
     _setup_dark_style()
 
-    if mapcenter is None:
-        mapcenter = [pos_wake[:, 0].mean(), pos_wake[:, 1].mean()]
-    color = np.arctan2(pos_wake[:, 0] - mapcenter[0],
-                       pos_wake[:, 1] - mapcenter[1])
+    bounds = _pos_bounds(pos_wake)
+    rgb = _pos_to_rgb(pos_wake[:, 0], pos_wake[:, 1], *bounds)
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
-    sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color, cmap='hsv',
-                    vmin=-np.pi, vmax=np.pi, s=4, alpha=0.6, edgecolors='none')
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.8, ticks=[-np.pi, 0, np.pi])
-    cbar.ax.set_yticklabels(['−π', '0', 'π'])
-    cbar.set_label('position angle atan2(x, y)', fontsize=9)
+    ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=rgb,
+               s=4, alpha=0.6, edgecolors='none')
+    _draw_pos_colorkey_inset(ax, bounds)
     ax.axis('off')
     ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
@@ -459,10 +500,9 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
 def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
                                     mapcenter=None, env_seed=None, area=None):
     """Companion 'color key' for plot_isomap_position: render the world map
-    tinted by the SAME full-circle atan2(x, y) position-angle colormap (cyclic
-    hsv, −π..π), so the abstract isomap colors can be read back to real world
-    locations. Saved as a SEPARATE file (align/overlay with the isomap in
-    Illustrator)."""
+    tinted by the SAME 2-D position colormap (x,y -> RGB; see _pos_to_rgb), so the
+    abstract isomap colors can be read back to real world locations. Saved as a
+    SEPARATE file (align/overlay with the isomap in Illustrator)."""
     _setup_dark_style()
     try:
         from plot_trajectories import _render_crafter_world
@@ -477,24 +517,25 @@ def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
     if world_img is None:
         print("  colorkey: no world image; skipping world color key")
         return
-    if mapcenter is None:  # match plot_isomap_position's default exactly
-        mapcenter = [pos_wake[:, 0].mean(), pos_wake[:, 1].mean()]
+    # Same coordinate mapping as before (X=col, Y=row) so the world<->isomap
+    # correspondence is unchanged; only the colormap itself is now 2-D. Normalized
+    # by the visited-position bounds so it matches plot_isomap_position exactly.
+    bounds = _pos_bounds(pos_wake)
     W, H = (int(area[0]), int(area[1])) if area is not None else (32, 32)
-    X, Y = np.meshgrid(np.arange(W), np.arange(H))  # X[y,x], Y[y,x]
-    field = np.arctan2(X - mapcenter[0], Y - mapcenter[1])  # (H, W), −π..π
+    X, Y = np.meshgrid(np.arange(W), np.arange(H))  # X[y,x]=col, Y[y,x]=row
+    # Display is origin='upper' but player positions sit at row = H-1-y (y points
+    # up), so tint pixel-row r with tile_y = (H-1)-r — otherwise the key is
+    # vertically flipped vs the isomap (the old atan2 key had this latent flip).
+    field = _pos_to_rgb(X, (H - 1) - Y, *bounds)    # (H, W, 3)
     field_px = np.repeat(np.repeat(field, ts, axis=0), ts, axis=1)  # -> world px
 
-    # Grayscale the world (luminance) so the arctan colormap is the ONLY color
-    # signal — the crafter tile colors otherwise fight the viridis overlay.
+    # Grayscale the world (luminance) so the position colormap is the ONLY color
+    # signal — the crafter tile colors otherwise fight the overlay.
     gray = world_img.astype(np.float32) @ np.array([0.299, 0.587, 0.114])
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     ax.imshow(gray, origin='upper', cmap='gray', interpolation='nearest')
-    im = ax.imshow(field_px, origin='upper', cmap='hsv', alpha=0.6,
-                   vmin=-np.pi, vmax=np.pi, interpolation='nearest')
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8, ticks=[-np.pi, 0, np.pi])
-    cbar.ax.set_yticklabels(['−π', '0', 'π'])
-    cbar.set_label('position angle atan2(x, y)', fontsize=9)
+    ax.imshow(field_px, origin='upper', alpha=0.6, interpolation='nearest')
     ax.axis('off')
     ax.set_title(f'{layer_name} — position color key (world)',
                  fontsize=11, fontweight='bold')
@@ -822,15 +863,13 @@ def plot_wake_sleep_figure(layer_results, layer_name, save_dir):
         emb_dream = r['isomap_dream']
         pos_wake = r['pos_wake']
 
-        # Panel 3: Isomap colored by position angle (pRNN style)
+        # Panel 3: Isomap colored by a 2-D position colormap (x,y -> RGB)
         ax = axes[2]
-        cx, cy = pos_wake[:, 0].mean(), pos_wake[:, 1].mean()
-        color = np.arctan2(pos_wake[:, 0] - cx, pos_wake[:, 1] - cy)
-        sc = ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=color,
-                        cmap='hsv', vmin=-np.pi, vmax=np.pi,
-                        s=4, alpha=0.6, edgecolors='none')
-        cb = fig.colorbar(sc, ax=ax, shrink=0.7, ticks=[-np.pi, 0, np.pi])
-        cb.ax.set_yticklabels(['−π', '0', 'π'])
+        bounds = _pos_bounds(pos_wake)
+        rgb = _pos_to_rgb(pos_wake[:, 0], pos_wake[:, 1], *bounds)
+        ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=rgb,
+                   s=4, alpha=0.6, edgecolors='none')
+        _draw_pos_colorkey_inset(ax, bounds)
         ax.axis('off')
         ax.set_title('position', fontsize=9, color=FG)
 
