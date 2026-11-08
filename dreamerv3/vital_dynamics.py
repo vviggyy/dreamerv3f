@@ -728,14 +728,21 @@ def plot_averaged_vitals(groups, save_path, fname=None):
 # --------------------------------------------------------------------------- #
 # 5. Empirical p(achievement unlock within horizon | vital level)
 # --------------------------------------------------------------------------- #
-def compute_achievement_rate_vs_vital(episodes, horizon=15, extra_actions=None):
+def compute_achievement_rate_vs_vital(episodes, horizon=15, extra_actions=None,
+                                      phase=None, bright=0.8, dark=0.2):
     """For each vital and level L, P(behavior b occurs within the next `horizon`
     steps | vital == L), pooled over all steps/episodes. This is the OBSERVATIONAL
     conditional (correlational) — the policy net has no achievement head, so this
     comes from behavior, not a forward pass. Behaviors = achievement unlocks plus
     any `extra_actions` ({name: action_idx}, e.g. BEHAVIOR_ACTIONS for 'sleep'),
     folded in via get_events. Returns {vital: {'levels', 'ach', 'P'(n_ach,
-    n_levels), 'counts'(n_levels)}}."""
+    n_levels), 'counts'(n_levels)}}.
+
+    `phase` (None/'day'/'night') restricts the CONDITIONING steps by time of day
+    (peak-window daylight: day = daylight >= `bright`, night <= `dark`; twilight
+    excluded), so the conditional becomes P(b soon | vital==L, time-of-day). The
+    look-ahead window is unaffected (a behavior may land just after the phase).
+    Episodes without recorded daylight are skipped when `phase` is set."""
     levels = np.arange(VITAL_MAX + 1)
     ach_names = sorted({a for ep in episodes for a in get_events(ep, extra_actions)})
     idx = {a: i for i, a in enumerate(ach_names)}
@@ -746,6 +753,13 @@ def compute_achievement_rate_vs_vital(episodes, horizon=15, extra_actions=None):
         if vit is None or not ach_names:
             continue
         T = len(vit['health'])
+        pmask = None
+        if phase is not None:
+            dl = get_daylight(ep)
+            if dl is None:
+                continue
+            dl = np.asarray(dl)[:T]
+            pmask = (dl >= bright) if phase == 'day' else (dl <= dark)
         unlocks = get_events(ep, extra_actions)
         # future[a, t] = behavior a occurs at some t0 in [t, t+horizon]
         future = np.zeros((len(ach_names), T), dtype=bool)
@@ -760,6 +774,8 @@ def compute_achievement_rate_vs_vital(episodes, horizon=15, extra_actions=None):
             vv = np.asarray(vit[v])[:T]
             for lvl in levels:
                 mask = vv == lvl
+                if pmask is not None:
+                    mask = mask & pmask
                 n = int(mask.sum())
                 if n == 0:
                     continue
@@ -839,7 +855,7 @@ def plot_achievement_rate_vs_vital(stats, save_path, horizon, ach_subset=None,
 
 def plot_achievement_lift_vs_vital(stats, save_path, horizon, ach_subset=None,
                                    fname='achievement_lift_vs_vital',
-                                   title='p(achievement | vital) / p(achievement)',
+                                   title='p(action | vital) / p(action)',
                                    n_min=20, log=True, vmin=0.5, vmax=2.0,
                                    vmax_cap=4.0):
     """Lift heatmap per vital: rows = achievements, cols = vital level, color =
@@ -1099,12 +1115,39 @@ def main():
                 av_stats, save_dir, args.achievement_horizon,
                 ach_subset=SUBSET_ACHIEVEMENTS,
                 fname='achievement_lift_vs_vital_subset',
-                title='p(achievement | vital) / p(achievement) [subset]',
+                title='p(action | vital) / p(action) [subset]',
                 n_min=args.lift_min_count, log=not args.lift_linear,
                 vmin=args.lift_vmin, vmax=args.lift_vmax)
             if out5d:
                 outputs.append(str(out5d))
                 print(f'Wrote {out5d}')
+
+            # 5e. Day/night gain views — same enrichment, split by time of day
+            # (full + subset for each phase). Needs per-step daylight.
+            if any(get_daylight(ep) is not None for ep in episodes):
+                for phase in ('day', 'night'):
+                    ph_stats = compute_achievement_rate_vs_vital(
+                        episodes, horizon=args.achievement_horizon,
+                        extra_actions=BEHAVIOR_ACTIONS, phase=phase)
+                    o_full = plot_achievement_lift_vs_vital(
+                        ph_stats, save_dir, args.achievement_horizon,
+                        fname=f'achievement_lift_vs_vital_{phase}',
+                        title=f'p(action | vital) / p(action) [{phase}]',
+                        n_min=args.lift_min_count, log=not args.lift_linear,
+                        vmin=args.lift_vmin, vmax=args.lift_vmax)
+                    o_sub = plot_achievement_lift_vs_vital(
+                        ph_stats, save_dir, args.achievement_horizon,
+                        ach_subset=SUBSET_ACHIEVEMENTS,
+                        fname=f'achievement_lift_vs_vital_subset_{phase}',
+                        title=f'p(action | vital) / p(action) [{phase}, subset]',
+                        n_min=args.lift_min_count, log=not args.lift_linear,
+                        vmin=args.lift_vmin, vmax=args.lift_vmax)
+                    for o in (o_full, o_sub):
+                        if o:
+                            outputs.append(str(o))
+                            print(f'Wrote {o}')
+            else:
+                print('No daylight recorded; skipping day/night gain plots')
 
     res_file = save_dir / 'vital_dynamics_results.pkl'
     with open(res_file, 'wb') as f:
