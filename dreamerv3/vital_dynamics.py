@@ -73,6 +73,8 @@ SUBSET_ACHIEVEMENTS = [
 BEHAVIOR_ACTIONS = {'sleep': 6}
 # Cow-count overlay color (distinct from the vital + hunger-cause palette).
 COW_COLOR = '#5c4033'
+# Hostile-mob-count color (distinct from vitals/cow/hurt palette).
+MOB_COLOR = '#9467bd'
 
 # crafter action index -> name (crafter.constants.actions)
 ACTION_NAMES = [
@@ -253,6 +255,21 @@ def get_cows(ep):
     return out
 
 
+def get_mobs(ep):
+    """Return {world, inview: np.array(T)} per-step hostile-mob counts (zombies +
+    skeletons) from the crafter wrapper's log/num_mobs_* counters, or None if not
+    recorded. Mob counting was added 2026-11-08, so trajectories eval'd before
+    then have no mob trace (the plot simply omits that panel). world = live map
+    total; inview = subset in the agent's view window (threat exposure)."""
+    src = {'world': 'num_mobs_world', 'inview': 'num_mobs_inview'}
+    out = {}
+    for k, key in src.items():
+        if key not in ep or len(ep[key]) == 0:
+            return None
+        out[k] = np.asarray(ep[key])
+    return out
+
+
 def get_daylight(ep):
     """Per-step daylight in [0,1] for the episode (1=noon, ~0=midnight), or None
     if it can't be derived.
@@ -383,118 +400,106 @@ def _draw_episode_map(ax, ep, meta, drops):
     return True
 
 
+def _daynight_strip(ax, daylight, T):
+    """Draw a thin day/night bar: warm daytime -> indigo night, interpolated by
+    the per-step daylight value. No ticks; shares the step x-axis."""
+    ax.set_ylim(0, 1)
+    if daylight is None or len(daylight) == 0:
+        ax.set_facecolor('0.95')
+    else:
+        dl = np.clip(np.asarray(daylight, dtype=float), 0, 1).reshape(1, -1, 1)
+        day_col = np.array([1.0, 0.97, 0.80])     # warm noon
+        night_col = np.array([0.10, 0.10, 0.30])  # indigo midnight
+        strip = night_col * (1 - dl) + day_col * dl          # (1, T, 3)
+        ax.imshow(strip, aspect='auto', extent=[0, max(1, T - 1), 0, 1],
+                  origin='lower', interpolation='nearest', zorder=0)
+    ax.set_yticks([])
+    ax.set_ylabel('day/\nnight', rotation=0, ha='right', va='center', fontsize=9)
+    ax.tick_params(labelbottom=False)
+
+
+def _sleep_strip(ax, actions, steps, T):
+    """Draw a thin lane with a tick wherever the agent sleeps (action==6)."""
+    ax.set_ylim(0, 1)
+    if len(actions) == T:
+        sleep_steps = steps[actions == VITAL_ACTIONS['sleep']]
+        if len(sleep_steps):
+            ax.vlines(sleep_steps, 0, 1, color='#222222', lw=0.9, zorder=3)
+    ax.set_yticks([])
+    ax.set_ylabel('sleep', rotation=0, ha='right', va='center', fontsize=9)
+    ax.tick_params(labelbottom=False)
+    for s in ('top', 'right', 'left'):
+        ax.spines[s].set_visible(False)
+
+
 def plot_episode(ep, save_path, ep_idx, meta=None):
     vitals = get_vitals(ep)
     if vitals is None:
         return False
     actions = get_actions(ep)
-    unlocks = get_unlocks(ep)
     T = len(next(iter(vitals.values())))
     steps = np.arange(T)
-    drops = classify_health_drops(vitals, actions)
     death = cause_of_death(vitals, actions)
     daylight = get_daylight(ep)        # per-step day/night cycle (None if unknown)
-
-    # Figure: left column split into two stacked time-series panels sharing the
-    # step axis — TOP = events (achievement unlocks + vital-relevant actions),
-    # BOTTOM = vital trajectories — and a square world map (right) spanning both.
-    ts_w = max(8, T / 40)
-    fig = plt.figure(figsize=(ts_w + 5.2, 6.0))
-    gs = fig.add_gridspec(2, 2, width_ratios=[ts_w, 5.0],
-                          height_ratios=[1.0, 1.4], wspace=0.12, hspace=0.10)
-    ax_ev = fig.add_subplot(gs[0, 0])                    # achievements + actions
-    ax = fig.add_subplot(gs[1, 0], sharex=ax_ev)         # vital trajectories
-    ax_map = fig.add_subplot(gs[:, 1])                   # world map (both rows)
-
-    # ---- TOP: event lanes inside the frame — an achievements lane (one dot per
-    #          unlock, colored vital-relevant vs other, with only the FIRST
-    #          occurrence of each achievement name labeled) above the do/sleep
-    #          action lanes. ----
-    ACH_LANE, DO_LANE, SLEEP_LANE = 0.80, 0.45, 0.15
-    labeled_ach = {'vital': False, 'other': False}
-    for name, when in unlocks.items():
-        if not when:
-            continue
-        is_vital = name in VITAL_EVENTS
-        col = 'k' if is_vital else '0.6'
-        grp = 'vital' if is_vital else 'other'
-        lbl = f'achievement ({grp})' if not labeled_ach[grp] else None
-        labeled_ach[grp] = True
-        ax_ev.scatter(when, np.full(len(when), ACH_LANE), marker='o',
-                      s=20 if is_vital else 12, color=col, edgecolors='none',
-                      zorder=4, label=lbl)
-        # label only the first unlock of each achievement type
-        ax_ev.annotate(name, xy=(when[0], ACH_LANE + 0.04), rotation=90,
-                       fontsize=6, va='bottom', ha='center', color=col)
-    a_marks = {'do': DO_LANE, 'sleep': SLEEP_LANE}
-    for aname, aidx in VITAL_ACTIONS.items():
-        tsx = steps[actions == aidx] if len(actions) == T else []
-        if len(tsx):
-            ax_ev.scatter(tsx, np.full(len(tsx), a_marks[aname]), marker='|',
-                          s=40, color=ACTION_CLASS_COLORS.get(aname, 'k'),
-                          label=f'action={aname}')
-    ax_ev.set_ylim(0, 1.0)
-    _shade_daynight(ax_ev, daylight, T)                  # darker = night
-    ax_ev.set_yticks([ACH_LANE, DO_LANE, SLEEP_LANE])
-    ax_ev.set_yticklabels(['achiev.', 'do', 'sleep'], fontsize=7)
-    ax_ev.set_ylabel('events')
-    ax_ev.tick_params(labelbottom=False)                 # x shared with bottom
-    ax_ev.legend(loc='upper right', fontsize=6.5, ncol=3, framealpha=0.9)
-
-    # ---- BOTTOM: vital trajectories (+ cause-of-hurt markers on health). ----
-    for v in VITALS:
-        ax.plot(steps, vitals[v], color=VITAL_COLORS[v], lw=1.6, label=v)
-    ax.set_ylim(-0.5, VITAL_MAX + 0.5)
-    ax.set_ylabel('vital level (0-9)')
-    ax.set_xlabel('step')
-    ax.set_xlim(0, max(1, T - 1))
-    _shade_daynight(ax, daylight, T)                     # darker = night
-
-    # ---- Cows over time: overlay the in-view cow count (exposure) on a twin
-    #      axis. In-view is what the agent can act on (eat_cow -> food), so it
-    #      reads naturally against the food trace; the much larger world-total
-    #      and worldgen supply go in the title instead of crowding the axis. ----
     cows = get_cows(ep)
-    ax_cow = None
+    mobs = get_mobs(ep)                 # None on pkls that predate mob counting
+
+    # Trace panels, one series per panel, stacked top->bottom: the 4 vitals, then
+    # cow level and mob level when recorded. (key, label, color, data, y-max).
+    trace_panels = [('vital', v, VITAL_COLORS[v], np.asarray(vitals[v]), VITAL_MAX)
+                    for v in VITALS]
     if cows is not None:
-        ax_cow = ax.twinx()
-        ax_cow.plot(steps, cows['inview'], color=COW_COLOR, lw=1.4, alpha=0.9,
-                    label='cows in view', zorder=1)
-        ax_cow.fill_between(steps, 0, cows['inview'], color=COW_COLOR, alpha=0.12)
-        ax_cow.set_ylim(0, max(1, int(np.max(cows['inview']))) + 1)
-        ax_cow.set_ylabel('cows in view', color=COW_COLOR, fontsize=9)
-        ax_cow.tick_params(axis='y', labelcolor=COW_COLOR)
-        ax_cow.spines['top'].set_visible(False)
+        trace_panels.append(('cow', 'cows\nin view', COW_COLOR, cows['inview'],
+                             None))
+    if mobs is not None:
+        trace_panels.append(('mob', 'mobs\nin view', MOB_COLOR, mobs['inview'],
+                             None))
+    n_tr = len(trace_panels)
 
-    hy = np.asarray(vitals['health'])
-    seen = set()
-    for (t, d, cause) in drops:
-        col = HURT_CAUSE_COLORS.get(cause.split('+')[0], 'k')
-        lbl = f'hurt: {cause}' if cause not in seen else None
-        seen.add(cause)
-        ax.scatter([t], [hy[t]], marker='v', color=col, s=48, edgecolors='k',
-                   linewidths=0.5, zorder=6, label=lbl)
-    handles, labels = ax.get_legend_handles_labels()
-    if ax_cow is not None:
-        h2, l2 = ax_cow.get_legend_handles_labels()
-        handles += h2
-        labels += l2
-    ax.legend(handles, labels, loc='lower right', fontsize=6.5, ncol=3,
-              framealpha=0.9)
+    # Thin vertical column: two thin bars (day/night, sleep) over the stacked
+    # trace panels, all sharing the step axis. Narrow width + short panels so the
+    # whole thing reads as a compact strip. Height grows with #trace panels.
+    BAR_H, TR_H = 0.20, 0.58
+    width = max(5.0, T / 80.0)
+    height = 0.7 + 2 * BAR_H + n_tr * TR_H
+    fig = plt.figure(figsize=(width, height))
+    gs = fig.add_gridspec(2 + n_tr, 1,
+                          height_ratios=[BAR_H, BAR_H] + [TR_H] * n_tr,
+                          hspace=0.32)
+    ax_dn = fig.add_subplot(gs[0, 0])
+    ax_sl = fig.add_subplot(gs[1, 0], sharex=ax_dn)
+    axes = [fig.add_subplot(gs[2 + i, 0], sharex=ax_dn) for i in range(n_tr)]
 
-    if not _draw_episode_map(ax_map, ep, meta, drops):
-        ax_map.axis('off')
-        ax_map.text(0.5, 0.5, 'world map\nunavailable', ha='center', va='center',
-                    fontsize=10, color='grey', transform=ax_map.transAxes)
+    _daynight_strip(ax_dn, daylight, T)
+    _sleep_strip(ax_sl, actions, steps, T)
 
-    cow_bit = ''
-    if cows is not None:
-        cow_bit = (f'  ·  cows: worldgen {int(cows["worldgen"][0])}, '
-                   f'world~{np.mean(cows["world"]):.0f}, in-view~{np.mean(cows["inview"]):.1f}')
-    fig.suptitle(
-        f'Episode {ep.get("episode", ep_idx)}  ·  length={T}  ·  outcome: {death}'
-        f'{cow_bit}',
-        fontsize=12, fontweight='bold', y=1.04)
+    for ax, (kind, label, color, data, ymax) in zip(axes, trace_panels):
+        ax.plot(steps, data, color=color, lw=1.6, zorder=3)
+        ax.fill_between(steps, 0, data, color=color, alpha=0.10, zorder=1)
+        if kind == 'vital':
+            ax.set_ylim(-0.5, VITAL_MAX + 0.5)
+            ax.set_yticks([0, VITAL_MAX])
+        else:  # cow / mob counts
+            top = max(1, int(np.max(data))) + 1
+            ax.set_ylim(0, top)
+            ax.set_yticks([0, top])
+        ax.set_ylabel(label, rotation=0, ha='right', va='center', fontsize=9)
+        ax.tick_params(axis='y', labelsize=8, pad=1)
+        if ax is not axes[-1]:
+            ax.tick_params(labelbottom=False)
+
+    axes[-1].set_xlabel('step')
+    ax_dn.set_xlim(0, max(1, T - 1))
+    try:
+        pp.nice_ticks(axes[-1], n=4, axis='x')
+    except Exception:
+        pass
+
+    # Concise title above the top (day/night) bar; details that would widen the
+    # thin column (cow/mob averages) live in the panels themselves.
+    ax_dn.set_title(
+        f'Episode {ep.get("episode", ep_idx)}  ·  len {T}  ·  {death}',
+        fontsize=11, fontweight='bold', pad=6)
     out = Path(save_path) / f'vitals_episode_{ep_idx:03d}.{FIG_EXT}'
     fig.savefig(out, dpi=130, bbox_inches='tight')
     plt.close(fig)

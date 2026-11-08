@@ -376,6 +376,9 @@ class Crafter(embodied.Env):
     # branches above. _worldgen_cows is stamped at each reset (see step()).
     import crafter.objects as _co_count
     self._cow_type = _co_count.Cow
+    # Hostile-mob types for the per-step mob counters (log/num_mobs_world,
+    # log/num_mobs_inview). Arrow is a projectile, not a mob, so it's excluded.
+    self._mob_types = (_co_count.Zombie, _co_count.Skeleton)
     self._worldgen_cows = 0
     self._episode = 0
     self._length = None
@@ -496,6 +499,15 @@ class Crafter(embodied.Env):
         'log/num_cows_worldgen': elements.Space(np.int32),
         'log/num_cows_world': elements.Space(np.int32),
         'log/num_cows_inview': elements.Space(np.int32),
+    })
+    # Hostile-mob counters (zombies + skeletons), analogous to the cow counters.
+    # num_mobs_world is the live map total (tracks the balancer's darkness-driven
+    # spawn/despawn), num_mobs_inview is the subset in the agent's view window
+    # (actual threat exposure). No worldgen count: hostiles spawn dynamically with
+    # the day/night cycle rather than from a fixed initial supply.
+    spaces.update({
+        'log/num_mobs_world': elements.Space(np.int32),
+        'log/num_mobs_inview': elements.Space(np.int32),
     })
     # Include achievements for trajectory analysis (log/ prefix = ignored by agent)
     spaces.update({
@@ -643,6 +655,28 @@ class Crafter(embodied.Env):
     px, py = self._env._player.pos
     inview = sum(
         1 for o in cows
+        if abs(o.pos[0] - px) <= vhx and abs(o.pos[1] - py) <= vhy)
+    return total, inview
+
+  def _count_mobs(self):
+    """Return (total hostile mobs in world, mobs inside the agent's view window).
+
+    Hostile = Zombie or Skeleton (Arrow projectiles excluded). Same iteration and
+    view-window logic as _count_cows: world-total iterates ``world._objects``
+    (isinstance skips None holes); in-view uses the render view half-extent
+    (egocentric V×V when ego mode is on, else crafter's allocentric ``_view``).
+    """
+    world = self._env._world
+    mobs = [o for o in world._objects if isinstance(o, self._mob_types)]
+    total = len(mobs)
+    if self._egocentric_view is not None:
+      vhx = vhy = self._ego_V // 2
+    else:
+      vx, vy = self._env._view
+      vhx, vhy = vx // 2, vy // 2
+    px, py = self._env._player.pos
+    inview = sum(
+        1 for o in mobs
         if abs(o.pos[0] - px) <= vhx and abs(o.pos[1] - py) <= vhy)
     return total, inview
 
@@ -805,6 +839,12 @@ class Crafter(embodied.Env):
         'log/num_cows_worldgen': np.int32(self._worldgen_cows),
         'log/num_cows_world': np.int32(world_cows),
         'log/num_cows_inview': np.int32(inview_cows),
+    })
+    # Hostile-mob counters (zombies + skeletons): live world total + in-view.
+    world_mobs, inview_mobs = self._count_mobs()
+    obs.update({
+        'log/num_mobs_world': np.int32(world_mobs),
+        'log/num_mobs_inview': np.int32(inview_mobs),
     })
     return obs
 
