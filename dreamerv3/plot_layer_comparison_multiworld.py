@@ -73,6 +73,22 @@ def _lighten(color, factor):
     return (r + (1 - r) * factor, g + (1 - g) * factor, b + (1 - b) * factor)
 
 
+def _key_layers(ordered):
+    """Key-layer subset: first+last of each enc/pol/val section + BOTH world-model
+    (dyn) layers, in the given order. Section colors are unchanged (keyed to
+    layer prefix)."""
+    secs = {}
+    for ln in ordered:
+        secs.setdefault(ln.split('/')[0], []).append(ln)
+    keep = []
+    for s in ('enc', 'dyn', 'pol', 'val'):
+        ls = secs.get(s, [])
+        if not ls:
+            continue
+        keep += ls if s == 'dyn' else ([ls[0]] if len(ls) == 1 else [ls[0], ls[-1]])
+    return keep
+
+
 def main():
     ap = argparse.ArgumentParser(description='Cross-condition layer decoding boxplot')
     ap.add_argument('--base_45', default=DEFAULTS['base_45'], help='train-45 model logdir')
@@ -92,6 +108,10 @@ def main():
                     help='optional subset of layer names to plot (exact names, e.g. '
                          'enc/tokens dyn/deter val/mlp/linear2 pol/mlp/linear2). '
                          'Default: all layers.')
+    ap.add_argument('--key_layers', action='store_true',
+                    help='Confine to the key layers: first+last of enc, pol, val + '
+                         'BOTH world-model layers (dyn/deter, dyn/stoch). Section '
+                         'colors unchanged. Overridden by an explicit --layers.')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
     pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
@@ -119,6 +139,9 @@ def main():
     cond_labels = list(conditions.keys())
     n_conds = len(cond_labels)
     layers = [ln for ln in ordered if ln in data[cond_labels[0]]]
+    if args.key_layers and not args.layers:
+        args.layers = _key_layers(layers)
+        print(f'--key_layers -> {args.layers}')
     if args.layers:
         want = set(args.layers)
         missing = want - set(layers)

@@ -70,6 +70,25 @@ def _order_layers(layer_names):
     return known + unknown
 
 
+def _key_layers(ordered):
+    """The 'key layers' subset: first+last of each enc/pol/val section + BOTH
+    world-model (dyn) layers, in LAYER_ORDER. `ordered` must be ordered (e.g.
+    LAYER_ORDER or _order_layers output). Robust to which exact layers exist."""
+    secs = {}
+    for ln in ordered:
+        secs.setdefault(ln.split('/')[0], []).append(ln)
+    keep = []
+    for s in ('enc', 'dyn', 'pol', 'val'):
+        ls = secs.get(s, [])
+        if not ls:
+            continue
+        if s == 'dyn':
+            keep += ls                                   # both world-model layers
+        else:
+            keep += [ls[0]] if len(ls) == 1 else [ls[0], ls[-1]]  # first + last
+    return keep
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -602,7 +621,16 @@ def main():
     parser.add_argument('--manifold_subdir', default='manifold_results',
                         help='Subfolder containing manifold_results.pkl')
     parser.add_argument('--no_sig', action='store_true', help='Skip significance brackets on boxplot')
+    parser.add_argument('--key_layers', action='store_true',
+                        help='Confine to the key layers only: first+last of enc, '
+                             'pol, val + BOTH world-model layers (dyn/deter, '
+                             'dyn/stoch). Section colors unchanged. Equivalent to '
+                             'passing those 8 names to --layers.')
     args = parser.parse_args()
+
+    if args.key_layers and not args.layers:
+        args.layers = _key_layers(LAYER_ORDER)
+        print(f'--key_layers -> {args.layers}')
 
     conditions = parse_conditions(args.conditions)
     labels = [label for _, label, _ in conditions]
