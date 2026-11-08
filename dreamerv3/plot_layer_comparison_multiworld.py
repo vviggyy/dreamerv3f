@@ -58,6 +58,20 @@ def _section_color(layer_name):
             return color
     return '#888888'
 
+
+def _pretty_layer(ln):
+    """Poster-friendly short tick label: enc/cnn0->enc0, enc/tokens->enc-tok,
+    dyn/stoch->wm-stoch, dyn/deter->wm-deter, {pol,val}/mlp/linear{n}->{pol,val}{n}."""
+    fixed = {'dyn/stoch': 'wm-stoch', 'dyn/deter': 'wm-deter',
+             'enc/tokens': 'enc-tok'}
+    if ln in fixed:
+        return fixed[ln]
+    for pre, out in (('enc/cnn', 'enc'), ('enc/mlp', 'enc-mlp'),
+                     ('pol/mlp/linear', 'pol'), ('val/mlp/linear', 'val')):
+        if ln.startswith(pre):
+            return out + ln[len(pre):]
+    return ln.replace('mlp/', '')
+
 # Per-condition style: (alpha, hatch, lighten_factor)
 # lighten_factor: 0 = original color, 1 = white
 CONDITION_STYLES = [
@@ -200,7 +214,7 @@ def main():
         whisker_tops.append(layer_max)
 
     ax.set_xticks(range(n_layers))
-    short_names = [ln.replace('mlp/', '') for ln in layers]
+    short_names = [_pretty_layer(ln) for ln in layers]
     ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=fs_tick)
     # Color x-tick labels by section
     for idx, ln in enumerate(layers):

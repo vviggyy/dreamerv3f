@@ -62,6 +62,21 @@ def _section_color(layer_name):
     return '#888888'
 
 
+def _pretty_layer(ln):
+    """Poster-friendly short tick label: enc/cnn0->enc0, enc/tokens->enc-tok,
+    dyn/stoch->wm-stoch, dyn/deter->wm-deter, {pol,val}/mlp/linear{n}->{pol,val}{n}.
+    Falls back to stripping 'mlp/' for anything unrecognized."""
+    fixed = {'dyn/stoch': 'wm-stoch', 'dyn/deter': 'wm-deter',
+             'enc/tokens': 'enc-tok'}
+    if ln in fixed:
+        return fixed[ln]
+    for pre, out in (('enc/cnn', 'enc'), ('enc/mlp', 'enc-mlp'),
+                     ('pol/mlp/linear', 'pol'), ('val/mlp/linear', 'val')):
+        if ln.startswith(pre):
+            return out + ln[len(pre):]
+    return ln.replace('mlp/', '')
+
+
 def _order_layers(layer_names):
     """Sort layers by LAYER_ORDER, unknowns appended alphabetically."""
     order_map = {ln: i for i, ln in enumerate(LAYER_ORDER)}
@@ -318,7 +333,7 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
     fs_legend = None if _poster else 8
 
     ax.set_xticks(range(n_layers))
-    short_names = [ln.replace('mlp/', '') for ln in layers]
+    short_names = [_pretty_layer(ln) for ln in layers]
     ax.set_xticklabels(short_names, rotation=45, ha='right', fontsize=fs_tick)
     for idx, ln in enumerate(layers):
         ax.get_xticklabels()[idx].set_color(_section_color(ln))
