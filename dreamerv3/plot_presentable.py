@@ -31,13 +31,16 @@ from matplotlib import ticker
 # Arial/Helvetica are usually absent on HPC; matplotlib then falls back to
 # DejaVu Sans, which (a) looks clunkier than the clean sans in the Cosyne figs
 # and (b) ships ONLY Regular(400)+Bold(700) — no true medium weight, so a poster
-# "medium" look is impossible. We bundle/register Source Sans 3 (Regular 400,
-# Medium 500, Bold 700) from the user font dir if present, giving a clean,
-# Arial-like sans with a genuine in-between weight. Self-contained: registered
-# per-process via addfont so every repo plotter that imports this module gets it
-# without depending on the global matplotlib font cache.
+# "medium" look is impossible. We VENDOR Source Sans 3 (Regular 400, Medium 500,
+# Bold 700; OFL-1.1) into the repo at dreamerv3/fonts/ so the house style renders
+# identically on any machine/clone with no external font install. Self-contained:
+# registered per-process via addfont so every repo plotter that imports this
+# module gets it without depending on the global matplotlib font cache. The user
+# font dirs are kept as a fallback (e.g. if the repo copy is ever removed).
 _PREFERRED_SANS = 'Source Sans 3'
-_USER_FONT_DIRS = [
+_REPO_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+_FONT_DIRS = [
+    _REPO_FONT_DIR,                           # vendored in-repo (preferred)
     os.path.expanduser('~/.local/share/fonts'),
     os.path.expanduser('~/.fonts'),
 ]
@@ -45,13 +48,13 @@ _FONTS_REGISTERED = False
 
 
 def _register_fonts():
-    """addfont() any Source Sans 3 TTFs found in the user font dirs. Idempotent."""
+    """addfont() any Source Sans 3 TTFs found in the repo/user font dirs. Idempotent."""
     global _FONTS_REGISTERED
     if _FONTS_REGISTERED:
         return
     from matplotlib import font_manager as fm
     have = {f.fname for f in fm.fontManager.ttflist}
-    for d in _USER_FONT_DIRS:
+    for d in _FONT_DIRS:
         for ttf in glob.glob(os.path.join(d, 'SourceSans3-*.ttf')):
             if ttf not in have:
                 try:
