@@ -1159,7 +1159,10 @@ def main():
         except Exception:
             args.device = 'cpu'
     print(f"SW-distance compute device: {args.device}")
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    # --presentable applies the Tier-2 POSTER style (Source Sans, larger type,
+    # despined, no grid); composes with --theme (which only sets bg/text colors,
+    # so use --theme light for a white poster background). No-op unless set.
+    pp.maybe_apply(args, poster=True, small_figsize=False)
 
     global SAVE_FMT
     SAVE_FMT = args.fmt
