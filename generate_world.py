@@ -65,6 +65,11 @@ def render_world(env_seed, area=(32, 32), tile_size=8):
 
     # Match plot_trajectories.py: transpose + flip to standard image orientation
     world_img = world_img.transpose(1, 0, 2)[::-1]
+    # The [::-1] flips the map into the y-up frame but also mirrors each sprite's
+    # internal pixels (upside-down trees/furnace). Un-flip each tile block
+    # vertically so sprites render upright without moving the (x, y) frame.
+    H, W = world_img.shape[:2]
+    world_img = world_img.reshape(H // tile_size, tile_size, W, 3)[:, ::-1].reshape(H, W, 3)
     return world_img
 
 

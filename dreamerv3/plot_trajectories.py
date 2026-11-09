@@ -422,6 +422,13 @@ def _render_crafter_world(metadata=None, tile_size=8):
                 world_img[px:px+tile_size, py:py+tile_size] = blended.astype(np.uint8)
 
     world_img = world_img.transpose(1, 0, 2)[::-1]
+    # The [::-1] flips the map into the y-up (origin='lower') frame the tuning/
+    # decode overlays use, but it also mirrors each sprite's internal pixels
+    # (trees/furnace render upside down). Un-flip each tile block vertically so
+    # sprites are upright WITHOUT moving the map's (x, y) frame — overlays stay
+    # aligned (cosmetic only).
+    H, W = world_img.shape[:2]
+    world_img = world_img.reshape(H // tile_size, tile_size, W, 3)[:, ::-1].reshape(H, W, 3)
     return world_img, env_seed, tile_size
 
 
