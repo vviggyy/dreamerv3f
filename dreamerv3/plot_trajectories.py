@@ -384,12 +384,22 @@ def _reconstruct_crafter_env(metadata=None):
     return env, env_seed
 
 
-def _render_crafter_world(metadata=None, tile_size=8, include_player=True):
+def _render_crafter_world(metadata=None, tile_size=8, include_player=True,
+                          frame='tuning'):
     """Render the full Crafter world map image.
 
     ``include_player=False`` skips the Player object so the agent's spawn sprite
     is not baked into the map (useful when the caller marks the agent's actual
     per-step position itself).
+
+    ``frame`` selects the output orientation:
+      - ``'tuning'`` (default): y-up ``(x, y)`` frame used by the tuning/decode
+        overlays (``origin='lower'``). This is a vertical *reflection* of how
+        the agent experiences the world.
+      - ``'native'``: Crafter's true gameplay orientation (y increases
+        downward, ``origin='upper'``) — matches the egocentric observation's
+        handedness.
+    Both keep sprites upright.
 
     Returns (world_img, env_seed, tile_size) or (None, None, None) on failure.
     """
@@ -427,14 +437,20 @@ def _render_crafter_world(metadata=None, tile_size=8, include_player=True):
                 blended = alpha * rgb + (1 - alpha) * current
                 world_img[px:px+tile_size, py:py+tile_size] = blended.astype(np.uint8)
 
-    world_img = world_img.transpose(1, 0, 2)[::-1]
-    # The [::-1] flips the map into the y-up (origin='lower') frame the tuning/
-    # decode overlays use, but it also mirrors each sprite's internal pixels
-    # (trees/furnace render upside down). Un-flip each tile block vertically so
-    # sprites are upright WITHOUT moving the map's (x, y) frame — overlays stay
-    # aligned (cosmetic only).
-    H, W = world_img.shape[:2]
-    world_img = world_img.reshape(H // tile_size, tile_size, W, 3)[:, ::-1].reshape(H, W, 3)
+    # native: Crafter's render() convention (rows=y, cols=x), upright sprites,
+    # y increases downward — exactly what the agent experiences.
+    native = world_img.transpose(1, 0, 2)
+    if frame == 'native':
+        world_img = np.ascontiguousarray(native)
+    else:
+        # tuning: vertical flip into the y-up (origin='lower') frame the
+        # tuning/decode overlays use. The [::-1] also mirrors each sprite's
+        # internal pixels (trees/furnace upside down), so un-flip each tile
+        # block vertically to keep sprites upright WITHOUT moving the (x, y)
+        # frame — overlays stay aligned (cosmetic only).
+        world_img = native[::-1]
+        H, W = world_img.shape[:2]
+        world_img = world_img.reshape(H // tile_size, tile_size, W, 3)[:, ::-1].reshape(H, W, 3)
     return world_img, env_seed, tile_size
 
 
@@ -517,14 +533,18 @@ def plot_world_only(metadata=None, tile_size=8, save_path=None):
 
 
 def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
-                  trail=True, save_path=None):
+                  trail=True, frame='native', save_path=None):
     """Two-panel view of a single step: allocentric world (left) + egocentric obs (right).
 
-    Left: the full Crafter world map in the *tuning-curve orientation* (origin
-    at lower-left, y increases upward, ``(x, y)`` tile frame) with upright
-    sprites, the agent's path up to ``step`` (gold), its current tile (white
-    dot) and facing arrow. The spawn player sprite is suppressed so the only
-    agent marker is the real per-step position.
+    Left: the full Crafter world map with upright sprites, the agent's path up
+    to ``step`` (gold), its current tile (white dot) and facing arrow. The spawn
+    player sprite is suppressed so the only agent marker is the real per-step
+    position. ``frame`` sets the orientation:
+      - ``'native'`` (default): Crafter's true gameplay orientation (y increases
+        downward) — matches the egocentric observation's handedness, so left and
+        right panels agree.
+      - ``'tuning'``: the y-up ``(x, y)`` frame used by the tuning/decode
+        overlays (a vertical reflection of gameplay).
 
     Right: the stored egocentric observation ``image[step]`` exactly as the
     agent saw it (includes the inventory bar).
@@ -554,18 +574,25 @@ def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
     fac = np.asarray(ep['player_facing']) if 'player_facing' in ep else None
 
     world_img, env_seed, tile_size = _render_crafter_world(
-        metadata, tile_size, include_player=False)
+        metadata, tile_size, include_player=False, frame=frame)
     if world_img is None:
         print("Could not reconstruct world (missing env_seed metadata).")
         return
     nx = world_img.shape[1] // tile_size
     ny = world_img.shape[0] // tile_size
-    extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]
+    # Both frames place the array with origin='upper'; only the y-extent differs:
+    # native runs y downward (top=0), tuning runs y upward (bottom=0).
+    if frame == 'native':
+        extent = [-0.5, nx - 0.5, ny - 0.5, -0.5]   # y increases downward
+        ylabel, frame_txt = 'y (down)', 'Crafter orientation'
+    else:
+        extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]   # y increases upward
+        ylabel, frame_txt = 'y (up)', 'tuning orientation'
 
     x, y = pos[step]
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6.4))
 
-    # LEFT: allocentric world, tuning-curve orientation (y up), upright sprites
+    # LEFT: allocentric world, upright sprites, in the selected orientation
     axL.imshow(world_img, origin='upper', extent=extent, aspect='equal')
     if trail:
         axL.plot(pos[:step + 1, 0], pos[:step + 1, 1], '-',
@@ -580,11 +607,11 @@ def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
         facing_txt = f' facing=({fx:+d},{fy:+d})'
     else:
         facing_txt = ''
-    axL.set_xlim(-0.5, nx - 0.5)
-    axL.set_ylim(-0.5, ny - 0.5)
+    axL.set_xlim(extent[0], extent[1])
+    axL.set_ylim(extent[2], extent[3])
     axL.set_xlabel('x')
-    axL.set_ylabel('y')
-    axL.set_title(f'Allocentric world (tuning orientation)\n'
+    axL.set_ylabel(ylabel)
+    axL.set_title(f'Allocentric world ({frame_txt})\n'
                   f'step {step}, pos=({x:.0f},{y:.0f}){facing_txt}', fontsize=10)
 
     # RIGHT: egocentric observation exactly as the agent saw it
@@ -1298,6 +1325,10 @@ def main():
                              'negative indexes from the end).')
     parser.add_argument('--ep_index', type=int, default=0,
                         help='Episode index for --plot allo_ego (default: 0).')
+    parser.add_argument('--allo_frame', type=str, default='native',
+                        choices=['native', 'tuning'],
+                        help='allo_ego left-panel orientation: native (Crafter '
+                             'gameplay, matches the ego; default) or tuning (y-up).')
     _pstyle.add_presentable_arg(parser)
     args = parser.parse_args()
     _pstyle.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
@@ -1374,7 +1405,7 @@ def main():
         sfx = f'_ep{args.ep_index}_step{args.step}' if args.step is not None else f'_ep{args.ep_index}'
         save_path = save_dir / f'allo_ego{sfx}.png' if save_dir else None
         plot_allo_ego(episodes, metadata, step=args.step, ep_index=args.ep_index,
-                      save_path=save_path)
+                      frame=args.allo_frame, save_path=save_path)
 
     if args.plot in ('worldview',):
         save_path = save_dir / f'worldview_agentview{ext}' if save_dir else None
