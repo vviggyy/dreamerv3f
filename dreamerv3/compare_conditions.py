@@ -23,6 +23,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
+from matplotlib.colors import to_rgb
 from scipy.stats import mannwhitneyu
 import plot_presentable as pp
 
@@ -260,6 +261,7 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
 
     fig, ax = plt.subplots(figsize=(max(12, n_layers * 1.5),
                                      6 if no_sig else 6 + n_cond * (n_cond - 1) // 2 * 0.6))
+    plt.rcParams['hatch.linewidth'] = 1.3   # bolder hatch so it reads on the boxes
     width = 0.7 / n_cond
     offsets = np.linspace(-(n_cond - 1) / 2 * width,
                           (n_cond - 1) / 2 * width, n_cond)
@@ -286,9 +288,12 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
                             whiskerprops=dict(color=layer_color, linewidth=1, alpha=alpha),
                             capprops=dict(color=layer_color, linewidth=1, alpha=alpha))
             for patch in bp['boxes']:
-                patch.set_facecolor(layer_color)
-                patch.set_alpha(alpha)
+                # Bake alpha into the FILL only (RGBA) and keep the edge/hatch at
+                # full opacity — patch.set_alpha() would fade the hatch strokes too
+                # (they'd vanish on the box while still showing in the legend).
+                patch.set_facecolor((*to_rgb(layer_color), alpha))
                 patch.set_edgecolor(layer_color)
+                patch.set_linewidth(1.0)
                 patch.set_hatch(hatch)
             wtop = max(w.get_ydata()[1] for w in bp['whiskers'][1::2])
             layer_max = max(layer_max, wtop)
