@@ -174,8 +174,11 @@ def _condition_colors(n):
     return [cmap(i % 10) for i in range(n)]
 
 
-CONDITION_HATCHES = ['', '///', '...', 'xxx', '\\\\\\', '+++']
-CONDITION_ALPHAS = [0.85, 0.50, 0.25, 0.15, 0.10, 0.08]
+# cond 0 = bold solid, cond 1 = lighter solid, cond 2 = crosshatch (so e.g.
+# A / B-or-C / untrained are all clearly distinct — alpha alone washed out the
+# diagonal-vs-dot hatches at low opacity).
+CONDITION_HATCHES = ['', '', 'xxx', '///', '\\\\\\', '+++']
+CONDITION_ALPHAS = [0.85, 0.50, 0.45, 0.20, 0.12, 0.08]
 
 
 # ---------------------------------------------------------------------------
