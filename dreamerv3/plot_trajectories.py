@@ -384,8 +384,12 @@ def _reconstruct_crafter_env(metadata=None):
     return env, env_seed
 
 
-def _render_crafter_world(metadata=None, tile_size=8):
+def _render_crafter_world(metadata=None, tile_size=8, include_player=True):
     """Render the full Crafter world map image.
+
+    ``include_player=False`` skips the Player object so the agent's spawn sprite
+    is not baked into the map (useful when the caller marks the agent's actual
+    per-step position itself).
 
     Returns (world_img, env_seed, tile_size) or (None, None, None) on failure.
     """
@@ -411,6 +415,8 @@ def _render_crafter_world(metadata=None, tile_size=8):
                 world_img[px:px+tile_size, py:py+tile_size] = texture
 
     for obj in world.objects:
+        if not include_player and type(obj).__name__ == 'Player':
+            continue
         texture = textures.get(obj.texture, (tile_size, tile_size))
         if texture.shape[-1] == 4:
             alpha = texture[..., 3:].astype(np.float32) / 255
@@ -507,6 +513,89 @@ def plot_world_only(metadata=None, tile_size=8, save_path=None):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved world image to {save_path}")
 
+    plt.show()
+
+
+def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
+                  trail=True, save_path=None):
+    """Two-panel view of a single step: allocentric world (left) + egocentric obs (right).
+
+    Left: the full Crafter world map in the *tuning-curve orientation* (origin
+    at lower-left, y increases upward, ``(x, y)`` tile frame) with upright
+    sprites, the agent's path up to ``step`` (gold), its current tile (white
+    dot) and facing arrow. The spawn player sprite is suppressed so the only
+    agent marker is the real per-step position.
+
+    Right: the stored egocentric observation ``image[step]`` exactly as the
+    agent saw it (includes the inventory bar).
+
+    ``step`` defaults to the middle of the episode; negative indexes from the
+    end. Requires an episode that stored ``image`` (not a behavior-only run).
+    """
+    episodes = _filter_valid_episodes(episodes, 'plot_allo_ego')
+    if not episodes:
+        print("No valid episodes for allo_ego plot.")
+        return
+    if ep_index >= len(episodes):
+        print(f"ep_index {ep_index} out of range ({len(episodes)} episodes).")
+        return
+    ep = episodes[ep_index]
+    if 'image' not in ep or ep['image'] is None:
+        print("allo_ego needs stored observation images; this episode has none "
+              "(behavior-only run). Re-eval with RUN_ANALYSIS=true.")
+        return
+
+    pos = np.asarray(ep['player_pos'])
+    imgs = np.asarray(ep['image'])
+    n = min(len(pos), len(imgs))
+    if step is None:
+        step = n // 2
+    step = int(step) % n  # supports negative indexing
+    fac = np.asarray(ep['player_facing']) if 'player_facing' in ep else None
+
+    world_img, env_seed, tile_size = _render_crafter_world(
+        metadata, tile_size, include_player=False)
+    if world_img is None:
+        print("Could not reconstruct world (missing env_seed metadata).")
+        return
+    nx = world_img.shape[1] // tile_size
+    ny = world_img.shape[0] // tile_size
+    extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]
+
+    x, y = pos[step]
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6.4))
+
+    # LEFT: allocentric world, tuning-curve orientation (y up), upright sprites
+    axL.imshow(world_img, origin='upper', extent=extent, aspect='equal')
+    if trail:
+        axL.plot(pos[:step + 1, 0], pos[:step + 1, 1], '-',
+                 color='gold', lw=1.2, alpha=0.85, zorder=4)
+    axL.plot(x, y, 'o', color='white', mec='k', ms=11, zorder=5)
+    if fac is not None:
+        fx, fy = fac[step]
+        if fx or fy:
+            axL.annotate('', xy=(x + 1.6 * fx, y + 1.6 * fy), xytext=(x, y),
+                         arrowprops=dict(arrowstyle='-|>', color='white', lw=2.2,
+                                         mutation_scale=16), zorder=6)
+        facing_txt = f' facing=({fx:+d},{fy:+d})'
+    else:
+        facing_txt = ''
+    axL.set_xlim(-0.5, nx - 0.5)
+    axL.set_ylim(-0.5, ny - 0.5)
+    axL.set_xlabel('x')
+    axL.set_ylabel('y')
+    axL.set_title(f'Allocentric world (tuning orientation)\n'
+                  f'step {step}, pos=({x:.0f},{y:.0f}){facing_txt}', fontsize=10)
+
+    # RIGHT: egocentric observation exactly as the agent saw it
+    axR.imshow(imgs[step], origin='upper')
+    axR.axis('off')
+    axR.set_title('Egocentric observation (agent view)', fontsize=10)
+
+    fig.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved allo/ego view to {save_path}")
     plt.show()
 
 
@@ -857,8 +946,13 @@ def animate_worldview_agentview(
     if world_img is None:
         return
 
-    # Flip so north is at top (matches Crafter observation orientation)
+    # Flip so north is at top (matches Crafter observation orientation). The
+    # full-array flip also re-inverts each sprite (since _render_crafter_world
+    # already returns upright sprites), so un-flip each tile block to keep
+    # sprites upright.
     world_img = world_img[::-1].copy()
+    _H, _W = world_img.shape[:2]
+    world_img = world_img.reshape(_H // tile_size, tile_size, _W, 3)[:, ::-1].reshape(_H, _W, 3)
 
     img_h, img_w = world_img.shape[:2]
     win_px = window_tiles * tile_size
@@ -1161,7 +1255,7 @@ def main():
     parser.add_argument('--data', type=str, required=True,
                         help='Path to trajectory data directory')
     parser.add_argument('--plot', type=str, default='all',
-                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'animate', 'animate_world', 'worldview', 'world_only', 'all'],
+                        choices=['trajectories', 'heatmap', 'activation', 'spatial', 'world', 'fullworld', 'animate', 'animate_world', 'worldview', 'allo_ego', 'world_only', 'all'],
                         help='Type of plot to generate')
     parser.add_argument('--unit', type=int, default=0,
                         help='Unit index for activation plot')
@@ -1199,6 +1293,11 @@ def main():
                         help='Island land fraction for --island (default 0.72).')
     parser.add_argument('--island_roughness', type=float, default=0.16,
                         help='Island coastline roughness for --island (default 0.16).')
+    parser.add_argument('--step', type=int, default=None,
+                        help='Step index for --plot allo_ego (default: middle; '
+                             'negative indexes from the end).')
+    parser.add_argument('--ep_index', type=int, default=0,
+                        help='Episode index for --plot allo_ego (default: 0).')
     _pstyle.add_presentable_arg(parser)
     args = parser.parse_args()
     _pstyle.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
@@ -1270,6 +1369,12 @@ def main():
     if args.plot in ('animate_world', 'all'):
         save_path = save_dir / f'fullworld_trajectories{ext}' if save_dir else None
         animate_fullworld_trajectories(episodes, metadata, save_path=save_path)
+
+    if args.plot in ('allo_ego',):
+        sfx = f'_ep{args.ep_index}_step{args.step}' if args.step is not None else f'_ep{args.ep_index}'
+        save_path = save_dir / f'allo_ego{sfx}.png' if save_dir else None
+        plot_allo_ego(episodes, metadata, step=args.step, ep_index=args.ep_index,
+                      save_path=save_path)
 
     if args.plot in ('worldview',):
         save_path = save_dir / f'worldview_agentview{ext}' if save_dir else None
