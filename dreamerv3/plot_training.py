@@ -481,7 +481,7 @@ def main():
     args = parser.parse_args()
     # Tier-1 house style (rcParams only) — call before any figure is created.
     # No-op unless --presentable is passed, so default output is unchanged.
-    pp.maybe_apply(args, small_figsize=False)  # keep the multi-panel figsize
+    pp.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster style
 
     logdir = pathlib.Path(args.logdir)
     scores_path  = logdir / 'scores.jsonl'

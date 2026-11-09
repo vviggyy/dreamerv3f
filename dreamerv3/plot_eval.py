@@ -326,7 +326,7 @@ def main():
                         help='Skip the per-episode cow-count panel')
     pp.add_presentable_arg(parser)
     args = parser.parse_args()
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    pp.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
 
     episodes, meta = load_episodes(args.data)
     if not episodes:

@@ -2124,7 +2124,7 @@ if __name__ == '__main__':
                              'Requires --save for output directory.')
     pp.add_presentable_arg(parser)
     args = parser.parse_args()
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    pp.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
     # Resolve max_iters: if set, override n_iters
     if args.max_iters is not None:
         args.n_iters = args.max_iters

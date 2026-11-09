@@ -1194,7 +1194,7 @@ def main():
                         help='Island coastline roughness for --island (default 0.16).')
     _pstyle.add_presentable_arg(parser)
     args = parser.parse_args()
-    _pstyle.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    _pstyle.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
 
     print(f"Loading episodes from {args.data}")
     episodes, metadata = load_episodes(args.data)

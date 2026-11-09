@@ -1843,7 +1843,7 @@ def main():
                              'layer(s); output goes to --save (or the pkl dir).')
     pp.add_presentable_arg(parser)
     args = parser.parse_args()
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    pp.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
 
     # Interactive viewer or autocorr plots from precomputed pkl
     if args.from_pkl:
