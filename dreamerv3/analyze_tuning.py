@@ -5,8 +5,10 @@ Three modes:
   autocorr (default): PCA / t-SNE / UMAP on spatial autocorrelation maps
     of tuning curves + HDBSCAN clustering.
   metrics: Isomap on per-neuron metric feature vectors (SI, EV, Moran's I,
-    Geary's C, Getis-Ord G, field size, pf_peaks). Supports --interactive
-    for a click-to-inspect viewer (scatter + tuning curve panel).
+    Geary's C, Getis-Ord G, field size, #peaks, coherence, sparsity). Emits one
+    isomap colored by EACH metric (_isomap_metrics_<metric>.svg) + cell type, so
+    the direction each metric varies is visible. Supports --interactive for a
+    click-to-inspect viewer (scatter + tuning curve panel).
   distributions: Per-metric histogram + example tuning curves at quantile
     positions. Shows how each metric is distributed and what tuning curves
     look like at different metric values.
@@ -319,13 +321,19 @@ def process_layer(layer_name, layer_data, save_dir, args):
 # ---------------------------------------------------------------------------
 
 METRIC_FEATURES = [
-    'SI', 'EVs', 'morans_i', 'fieldsize', 'pf_peaks',
+    'SI', 'EVs', 'morans_i', 'gearys_c', 'getis_ord_g',
+    'fieldsize', 'pf_peaks', 'coherence', 'sparsity',
 ]
 
 METRIC_DISPLAY = {
     'SI': 'SI', 'EVs': 'EV', 'morans_i': "Moran's I", 'gearys_c': "Geary's C",
     'getis_ord_g': "Getis-Ord G", 'fieldsize': 'Field size', 'pf_peaks': '# peaks',
+    'coherence': 'Coherence', 'sparsity': 'Sparsity',
 }
+
+# Filename slugs for the per-metric isomap files (SI/EV kept lowercase for
+# backward compatibility with the old _isomap_metrics_si.svg name).
+METRIC_SLUG = {'SI': 'si', 'EVs': 'ev'}
 
 
 def _build_feature_matrix(metrics):
@@ -444,12 +452,19 @@ def process_layer_metrics(layer_name, layer_data, save_dir, args):
                  label_names=GROUP_NAMES,
                  xlabel='Isomap 1', ylabel='Isomap 2')
 
-    plot_scatter(embedding, si[valid_idx],
-                 f'{layer_name} — Isomap metrics (SI)',
-                 save_dir / f'{prefix}_isomap_metrics_si.svg',
-                 is_continuous=True,
-                 xlabel='Isomap 1', ylabel='Isomap 2',
-                 colorbar_label='Spatial Information')
+    # One isomap per metric, colored by that metric's raw value — shows the
+    # direction each metric varies across the metric-space embedding. (SI keeps
+    # the _si.svg name for backward compatibility.)
+    for key in used_keys:
+        vals = np.asarray(metrics[key], dtype=float)[valid_idx]
+        disp = METRIC_DISPLAY.get(key, key)
+        slug = METRIC_SLUG.get(key, key)
+        plot_scatter(embedding, vals,
+                     f'{layer_name} — Isomap metrics ({disp})',
+                     save_dir / f'{prefix}_isomap_metrics_{slug}.svg',
+                     is_continuous=True,
+                     xlabel='Isomap 1', ylabel='Isomap 2',
+                     colorbar_label=disp)
 
     # Metric correlation heatmap (independence of bases)
     plot_metric_covariance(X, used_keys, layer_name,
