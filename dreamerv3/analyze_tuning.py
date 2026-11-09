@@ -130,7 +130,8 @@ def plot_scatter(embedding, labels, title, save_path, cmap=None,
             color = cm(i % cm.N) if hasattr(cm, 'N') else cm(i / max(len(unique) - 1, 1))
             ax.scatter(embedding[mask, 0], embedding[mask, 1], s=4, alpha=0.6,
                        label=name, color=color)
-        ax.legend(fontsize=6, markerscale=3, loc='best', framealpha=0.7)
+        ax.legend(fontsize=(10 if pp.is_poster() else 6), markerscale=3,
+                  loc='best', framealpha=0.7)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -754,7 +755,9 @@ def main():
 
     pp.add_presentable_arg(parser)
     args = parser.parse_args()
-    pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
+    # --presentable applies the Tier-2 POSTER style (Source Sans, larger type,
+    # despined, no grid); no-op unless the flag is set.
+    pp.maybe_apply(args, poster=True, small_figsize=False)
 
     # Load
     print(f'Loading {args.from_pkl}')
