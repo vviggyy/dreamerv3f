@@ -96,7 +96,7 @@ def main():
 
     colors = args.colors.split(',') if args.colors else DEFAULT_COLORS
 
-    fig, ax = plt.subplots(figsize=(5.0, 4.0))
+    fig, ax = plt.subplots(figsize=(9.0, 6.0) if pp.is_poster() else (5.0, 4.0))
     bins = np.linspace(*xr, args.bins + 1) if xr else args.bins
     for i, (label, path) in enumerate(conds):
         vals = _load_metric(path, args.layer, args.metric)

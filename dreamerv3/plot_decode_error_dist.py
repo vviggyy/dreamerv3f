@@ -73,7 +73,7 @@ def main():
         xr = (0.0, float(max(np.percentile(v, 99) for v in allvals)))
     bins = np.linspace(xr[0], xr[1], args.bins + 1)
 
-    fig, ax = plt.subplots(figsize=(5.0, 4.0))
+    fig, ax = plt.subplots(figsize=(9.0, 6.0) if pp.is_poster() else (5.0, 4.0))
     for i, ((label, _), vals) in enumerate(zip(conds, allvals)):
         col = colors[i % len(colors)]
         ax.hist(vals, bins=bins, density=args.density, histtype='stepfilled',
