@@ -175,11 +175,15 @@ def _condition_colors(n):
     return [cmap(i % 10) for i in range(n)]
 
 
-# cond 0 = bold solid, cond 1 = lighter solid, cond 2 = crosshatch (so e.g.
-# A / B-or-C / untrained are all clearly distinct — alpha alone washed out the
-# diagonal-vs-dot hatches at low opacity).
-CONDITION_HATCHES = ['', '', 'xxx', '///', '\\\\\\', '+++']
+# Condition styling: cond 0 = bold solid, cond 1 = lighter solid, cond 2 =
+# lighter solid with a BOLD BLACK BORDER (e.g. A / B-or-C / untrained). Hatches
+# don't render reliably on boxplot boxes (they show in the legend but not the
+# boxes), so the 3rd condition is distinguished by a thick edge instead.
+CONDITION_HATCHES = ['', '', '', '', '', '']
 CONDITION_ALPHAS = [0.85, 0.50, 0.45, 0.20, 0.12, 0.08]
+# Per-condition box edge: None -> section color (thin); a color -> that edge (bold).
+CONDITION_EDGECOLORS = [None, None, 'black', 'black', 'black', 'black']
+CONDITION_LINEWIDTHS = [1.0, 1.0, 2.6, 2.6, 2.6, 2.6]
 
 
 # ---------------------------------------------------------------------------
@@ -287,14 +291,14 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
                             medianprops=dict(color='white', linewidth=1.5),
                             whiskerprops=dict(color=layer_color, linewidth=1, alpha=alpha),
                             capprops=dict(color=layer_color, linewidth=1, alpha=alpha))
+            ec = CONDITION_EDGECOLORS[ci % len(CONDITION_EDGECOLORS)] or layer_color
+            lw = CONDITION_LINEWIDTHS[ci % len(CONDITION_LINEWIDTHS)]
             for patch in bp['boxes']:
-                # Bake alpha into the FILL only (RGBA) and keep the edge/hatch at
-                # full opacity — patch.set_alpha() would fade the hatch strokes too
-                # (they'd vanish on the box while still showing in the legend).
+                # Bake alpha into the FILL only (RGBA) so the edge stays full
+                # opacity; the 3rd condition (untrained) gets a bold black border.
                 patch.set_facecolor((*to_rgb(layer_color), alpha))
-                patch.set_edgecolor(layer_color)
-                patch.set_linewidth(1.0)
-                patch.set_hatch(hatch)
+                patch.set_edgecolor(ec)
+                patch.set_linewidth(lw)
             wtop = max(w.get_ydata()[1] for w in bp['whiskers'][1::2])
             layer_max = max(layer_max, wtop)
         whisker_tops.append(layer_max)
@@ -359,8 +363,9 @@ def plot_decode_boxplot(decode_data, labels, layers, metric_name, save_dir,
     # Condition legend
     cond_patches = [Patch(facecolor='#888888',
                           alpha=CONDITION_ALPHAS[i % len(CONDITION_ALPHAS)],
-                          edgecolor='black',
-                          hatch=CONDITION_HATCHES[i % len(CONDITION_HATCHES)],
+                          edgecolor=(CONDITION_EDGECOLORS[i % len(CONDITION_EDGECOLORS)]
+                                     or 'black'),
+                          linewidth=CONDITION_LINEWIDTHS[i % len(CONDITION_LINEWIDTHS)],
                           label=labels[i])
                     for i in range(n_cond)]
     if not no_sig:
