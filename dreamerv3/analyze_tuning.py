@@ -602,7 +602,8 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
                              quantiles=(0.1, 0.3, 0.5, 0.7, 0.9)):
     """Combined figure: histogram of metric + example TCs at quantile positions.
 
-    Top panel: density histogram with vertical lines at each quantile.
+    Top panel: fraction-normalized histogram (bins sum to 1) with vertical lines
+    at each quantile.
     Bottom panel: grid of example tuning curves (n_quantiles cols x n_per_quantile rows).
     """
     valid = np.isfinite(metric_values)
@@ -619,20 +620,23 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
     fig = plt.figure(figsize=(3.2 * n_q, 2.5 + 2.2 * n_per_quantile))
     gs = fig.add_gridspec(1 + n_per_quantile, n_q,
                           height_ratios=[2.5] + [2.0] * n_per_quantile,
-                          hspace=0.4, wspace=0.3)
+                          hspace=0.55, wspace=0.3)
 
     # --- Top panel: histogram spanning all columns ---
     ax_hist = fig.add_subplot(gs[0, :])
+    # Normalize to FRACTION of neurons per bin (weights -> bins sum to 1), so the
+    # y-axis is comparable across layers/metrics with different neuron counts.
     ax_hist.hist(vals, bins=min(50, max(20, len(vals) // 20)),
-                 density=False, color='steelblue', alpha=0.7, edgecolor='white',
-                 linewidth=0.5)
+                 weights=np.ones(len(vals)) / len(vals),
+                 color='steelblue', alpha=0.7, edgecolor='white', linewidth=0.5)
     for i, (q, qv) in enumerate(zip(quantiles, quantile_values)):
         ax_hist.axvline(qv, color='crimson', linestyle='--', linewidth=1, alpha=0.8)
         ax_hist.text(qv, ax_hist.get_ylim()[1] * 0.95, f'{int(q*100)}%',
                      ha='center', va='top', fontsize=7, color='crimson',
                      fontweight='bold')
-    ax_hist.set_xlabel(display_name)
-    ax_hist.set_ylabel('Count')
+    # No x-label: the metric is already named in the title, and a large poster
+    # x-label here collides with the example-tuning-curve grid below.
+    ax_hist.set_ylabel('Fraction')
     ax_hist.set_title(f'{layer_name} — {display_name} distribution (N={len(vals)})')
 
     # --- Bottom panel: example tuning curves at each quantile ---
