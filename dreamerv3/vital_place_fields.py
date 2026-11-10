@@ -290,7 +290,22 @@ def _occ_prob_grid(count, area):
     return np.where(g > 0, g, np.nan)
 
 
-def _plot_one_vital(results, v, save_dir, fmt):
+def _get_world_img(results):
+    """Render the faint Crafter world RGB for the map backgrounds (None on any
+    failure -> falls back to dark-grey unvisited tiles). Reuses tuning_curve's
+    reconstruction so the terrain frame matches the occupancy/tuning figures."""
+    wm = results.get('world_meta')
+    if not wm:
+        return None
+    try:
+        from tuning_curve import _render_world_img
+        return _render_world_img(wm, tuple(results['area']))
+    except Exception as e:
+        print(f'  (world background skipped: {e})')
+        return None
+
+
+def _plot_one_vital(results, v, save_dir, fmt, world_img=None):
     """One figure for a single vital: occupancy (lo/hi, probability-normalized) +
     per-neuron full/lo/hi place-field maps for THIS vital's own selected neurons."""
     area = tuple(results['area'])
@@ -304,10 +319,22 @@ def _plot_one_vital(results, v, save_dir, fmt):
                            gridspec_kw={'width_ratios': [1] * nmap + [0.12]},
                            squeeze=False)
 
+    extent = [-0.5, area[0] - 0.5, -0.5, area[1] - 0.5]
+
     def show(a, grid, vmin, vmax, cmap='viridis'):
-        cm = plt.get_cmap(cmap).copy(); cm.set_bad('#4d4d4d')
-        im = a.imshow(grid.T, origin='lower', cmap=cm, vmin=vmin, vmax=vmax,
-                      interpolation='nearest')
+        # With a world background, unvisited (NaN) tiles are left transparent so
+        # the faint Crafter terrain shows through (matches occupancy_fullset /
+        # the EV-sorted tuning maps); otherwise they stay dark grey.
+        cm = plt.get_cmap(cmap).copy()
+        if world_img is not None:
+            cm.set_bad(alpha=0.0)
+            a.imshow(world_img, origin='upper', aspect='equal', extent=extent,
+                     alpha=0.4, zorder=0)
+        else:
+            cm.set_bad('#4d4d4d')
+        im = a.imshow(np.ma.masked_invalid(grid.T), origin='lower', cmap=cm,
+                      vmin=vmin, vmax=vmax, interpolation='nearest',
+                      extent=extent, aspect='equal', zorder=1)
         a.set_xticks([]); a.set_yticks([])
         return im
 
@@ -368,10 +395,11 @@ def _plot_one_vital(results, v, save_dir, fmt):
     print(f'Saved {p}')
 
 
-def plot(results, save_dir, fmt='svg'):
+def plot(results, save_dir, fmt='svg', world_bg=True):
     """One place-field figure PER vital (each with its own selected neurons)."""
+    world_img = _get_world_img(results) if world_bg else None
     for v in results['vitals']:
-        _plot_one_vital(results, v, save_dir, fmt)
+        _plot_one_vital(results, v, save_dir, fmt, world_img=world_img)
 
 
 def plot_population(results, save_dir, fmt='svg'):
@@ -462,6 +490,11 @@ def main():
     ap.add_argument('--fmt', default='svg', choices=['svg', 'png', 'pdf'],
                     help='figure format (svg=vector for Illustrator; png=quick view)')
     ap.add_argument('--from_pkl', default='', help='replot from results pkl')
+    ap.add_argument('--world_bg', action='store_true', default=True,
+                    help='draw the faint Crafter world map behind the maps '
+                         '(unvisited tiles transparent); default on')
+    ap.add_argument('--no_world_bg', dest='world_bg', action='store_false',
+                    help='dark-grey unvisited tiles instead of the world map')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
     pp.maybe_apply(args, small_figsize=False)  # Tier-1 style; no-op unless --presentable
@@ -471,7 +504,8 @@ def main():
             results = pickle.load(f)
         sd = args.save if args.save != './vital_place_fields' else str(Path(args.from_pkl).parent)
         Path(sd).mkdir(parents=True, exist_ok=True)
-        plot(results, sd, args.fmt); plot_population(results, sd, args.fmt)
+        plot(results, sd, args.fmt, world_bg=args.world_bg)
+        plot_population(results, sd, args.fmt)
         print_summary(results)
         print(f'\nReplotted {args.from_pkl} -> {sd}')
         return
@@ -515,14 +549,21 @@ def main():
         per_vital[v] = dict(remap=remap_v, selected=selected, reason=reason,
                             ev_floor=ev_floor, tc_full=tc_full, cond=cond_v)
 
+    try:
+        from tuning_curve import _load_world_meta
+        world_meta = _load_world_meta(args.data)
+    except Exception as e:
+        print(f'(world_meta not loaded: {e})')
+        world_meta = None
     results = dict(layer=args.layer, area=list(area), vitals=vitals, ev=ev,
-                   occ_full=occ_full, per_vital=per_vital, args=vars(args))
+                   occ_full=occ_full, per_vital=per_vital, args=vars(args),
+                   world_meta=world_meta)
     pkl = save_dir / 'vital_place_fields_results.pkl'
     with open(pkl, 'wb') as f:
         pickle.dump(results, f)
     print(f'Saved {pkl}')
 
-    plot(results, str(save_dir), args.fmt)
+    plot(results, str(save_dir), args.fmt, world_bg=args.world_bg)
     plot_population(results, str(save_dir), args.fmt)
     print_summary(results)
 
