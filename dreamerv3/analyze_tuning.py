@@ -588,11 +588,13 @@ def _interactive_metric_scatter(layer_name, layer_data, result):
 DIST_METRICS = [
     ('SI', 'Spatial Information'),
     ('EVs', 'Explained Variance'),
+    ('coherence', 'Coherence'),
+    ('sparsity', 'Sparsity'),
+    ('pf_peaks', '# peaks'),
     ('morans_i', "Moran's I"),
     ('gearys_c', "Geary's C (lower = more spatial)"),
     ('getis_ord_g', "Getis-Ord G"),
     ('fieldsize', 'Field size'),
-    ('pf_peaks', '# peaks'),
 ]
 
 
@@ -666,22 +668,36 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
 
 def process_layer_distributions(layer_name, layer_data, save_dir, args):
     """Generate metric distribution plots for one layer."""
-    tc = layer_data['tuning_curves']
+    tc = np.asarray(layer_data['tuning_curves'])
     metrics = layer_data['metrics']
+    group_ids = np.asarray(layer_data.get('group_ids',
+                                          np.zeros(tc.shape[0], dtype=int)))
     N = tc.shape[0]
 
-    # EV threshold filtering
+    # Build the keep mask: optional dead-cell exclusion + optional EV threshold.
+    keep = np.ones(N, dtype=bool)
+    notes = []
+    if getattr(args, 'exclude_dead', False):
+        # Dead = never-activating ReLU unit: tuning-curve peak <= 0 (dying-ReLU /
+        # tau=0 dormant). Same definition as plot_ev_dist --exclude_dead; removes
+        # the EV=0 spike exactly.
+        peak = np.nanmax(tc.reshape(N, -1), axis=1)
+        peak = np.where(np.isfinite(peak), peak, 0.0)
+        dead = peak <= 0.0
+        keep &= ~dead
+        notes.append(f'{int(dead.sum())} dead excluded')
     if args.ev_thresh is not None:
         evs = np.asarray(metrics['EVs'], dtype=float)
-        ev_mask = np.isfinite(evs) & (evs > args.ev_thresh)
-        n_keep = ev_mask.sum()
-        print(f'\n--- {layer_name} ({N} neurons, {n_keep} with EV > {args.ev_thresh}) [distributions] ---')
-        idx = np.where(ev_mask)[0]
-        tc = tc[idx]
-        metrics = {k: np.asarray(v, dtype=float)[idx] for k, v in metrics.items()}
-        N = n_keep
-    else:
-        print(f'\n--- {layer_name} ({N} neurons) [distributions] ---')
+        keep &= np.isfinite(evs) & (evs > args.ev_thresh)
+        notes.append(f'EV>{args.ev_thresh}')
+    idx = np.where(keep)[0]
+    n_keep = len(idx)
+    note = (' [' + ', '.join(notes) + ']') if notes else ''
+    print(f'\n--- {layer_name} ({N} neurons, {n_keep} kept{note}) [distributions] ---')
+    tc = tc[idx]
+    metrics = {k: np.asarray(v, dtype=float)[idx] for k, v in metrics.items()}
+    group_ids = group_ids[idx] if len(group_ids) == N else group_ids
+    N = n_keep
 
     if N < 10:
         print(f'  Skipping {layer_name}: too few neurons ({N})')
@@ -689,6 +705,16 @@ def process_layer_distributions(layer_name, layer_data, save_dir, args):
 
     prefix = layer_name.replace('/', '_')
     summary = {}
+
+    # SI-vs-EV scatter on the SAME (dead-excluded) population as the distributions.
+    try:
+        from tuning_curve import plot_si_ev_scatter
+        if 'SI' in metrics and 'EVs' in metrics:
+            plot_si_ev_scatter(metrics, group_ids, layer_name,
+                               save_dir / f'{prefix}_si_ev_scatter.svg')
+            print(f'  Saved {prefix}_si_ev_scatter.svg')
+    except Exception as e:
+        print(f'  (SI-vs-EV scatter skipped: {e})')
 
     for metric_key, display_name in DIST_METRICS:
         if metric_key not in metrics:
@@ -748,6 +774,10 @@ def main():
     parser.add_argument('--ev_thresh', type=float, default=None,
                         help='Only include neurons with EV > this threshold '
                              '(metrics and distributions modes)')
+    parser.add_argument('--exclude_dead', action='store_true',
+                        help='Drop dead (never-activating) neurons — tuning-curve '
+                             'peak <= 0 (dying-ReLU / tau=0 dormant) — before '
+                             'computing distributions / SI-vs-EV (distributions mode)')
     parser.add_argument('--normalize', action='store_true', default=True,
                         help='Z-score normalize features')
     parser.add_argument('--no_normalize', action='store_false', dest='normalize')
