@@ -74,12 +74,19 @@ def main():
     bins = np.linspace(xr[0], xr[1], args.bins + 1)
 
     fig, ax = plt.subplots(figsize=(9.0, 6.0) if pp.is_poster() else (5.0, 4.0))
+    # Draw so the FIRST condition is frontmost (e.g. A over B over untrained):
+    # matplotlib's default z-order follows draw order (last = on top), which would
+    # bury the first condition; set an explicit decreasing z-order instead.
+    n = len(conds)
     for i, ((label, _), vals) in enumerate(zip(conds, allvals)):
         col = colors[i % len(colors)]
+        z = (n - i)  # cond 0 (A) highest -> drawn in front
         ax.hist(vals, bins=bins, density=args.density, histtype='stepfilled',
                 color=col, alpha=0.45, edgecolor=col, linewidth=1.4,
+                zorder=z,
                 label=f'{label}  (N={len(vals)}, med={np.median(vals):.1f})')
-        ax.axvline(np.median(vals), color=col, linestyle='--', linewidth=1.2, alpha=0.9)
+        ax.axvline(np.median(vals), color=col, linestyle='--', linewidth=1.2,
+                   alpha=0.9, zorder=z + 0.5)
 
     ax.set_xlabel('Manhattan decode error (tiles)')
     ax.set_ylabel('Density' if args.density else 'Count')
