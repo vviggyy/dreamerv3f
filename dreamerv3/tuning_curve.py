@@ -60,19 +60,32 @@ def _tc_cmap(world_bg=False):
     return cmap
 
 
-def _draw_tuning_map(ax, tc, world_img=None, **imshow_kw):
+def _draw_tuning_map(ax, tc, world_img=None, native=False, **imshow_kw):
     """Draw one neuron's 2D tuning map on ``ax``. When ``world_img`` is given, the
     faint Crafter world map is drawn behind it and unvisited (NaN) tiles are left
     transparent so the terrain shows through — identical to the occupancy_fullset
     style. Extent/orientation mirror plot_population_tuning_map so the world and
     the tuning map share one tile frame. Returns the tuning-map image handle
-    (for colorbars)."""
+    (for colorbars).
+
+    ``native``: orientation of the y-axis.
+      - False (default): the y-up "tuning" frame (origin='lower') used by the
+        decode/occupancy overlays — a vertical reflection of gameplay.
+      - True: Crafter's native gameplay orientation (y increases downward,
+        origin='upper'). The caller MUST render ``world_img`` with
+        ``_render_world_img(..., frame='native')`` so the terrain matches.
+    """
     nx, ny = tc.shape
-    extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]
+    if native:
+        extent = [-0.5, nx - 0.5, ny - 0.5, -0.5]   # y increases downward
+        tc_origin = 'upper'
+    else:
+        extent = [-0.5, nx - 0.5, -0.5, ny - 0.5]   # y increases upward
+        tc_origin = 'lower'
     if world_img is not None:
         ax.imshow(world_img, origin='upper', aspect='equal', extent=extent,
                   alpha=0.4, zorder=0)
-    return ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+    return ax.imshow(np.ma.masked_invalid(tc.T), origin=tc_origin,
                      interpolation='nearest',
                      cmap=_tc_cmap(world_bg=world_img is not None),
                      aspect='equal', extent=extent, zorder=1, **imshow_kw)
@@ -1017,7 +1030,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
                                sort_by='SI', ev_filter=0.0,
                                show_autocorr=False, world_img=None,
-                               two_tailed=False):
+                               two_tailed=False, native=False):
     """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.).
 
     Args:
@@ -1093,7 +1106,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
 
             # Tuning curve
             ax = axes[r, c_tc]
-            im = _draw_tuning_map(ax, tc, world_img=world_img)
+            im = _draw_tuning_map(ax, tc, world_img=world_img, native=native)
             ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
                          fontsize=7)
             ax.set_xticks([])
@@ -1122,7 +1135,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         else:
             c = idx % ncols
             ax = axes[r, c]
-            im = _draw_tuning_map(ax, tc, world_img=world_img)
+            im = _draw_tuning_map(ax, tc, world_img=world_img, native=native)
             ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
                          fontsize=7)
             ax.set_xticks([])
@@ -1579,17 +1592,21 @@ def _load_world_meta(data_path):
     return meta
 
 
-def _render_world_img(world_meta, area):
+def _render_world_img(world_meta, area, frame='tuning'):
     """Render the Crafter world RGB image for the reference panel, reusing
     plot_trajectories' reconstruction. Returns None on any failure (panel is
-    then simply omitted)."""
+    then simply omitted).
+
+    ``frame`` ('tuning' y-up, default, or 'native' y-down) must match how the
+    overlay is drawn: pass 'native' together with ``native=True`` to the tuning
+    maps for Crafter's upright gameplay orientation."""
     if not world_meta:
         return None
     try:
         from plot_trajectories import _render_crafter_world
         meta = dict(world_meta)
         meta.setdefault('area', list(area))
-        world_img, _, _ = _render_crafter_world(meta, tile_size=8)
+        world_img, _, _ = _render_crafter_world(meta, tile_size=8, frame=frame)
         return world_img
     except Exception as e:
         print(f"  (world-map panel skipped: {e})")

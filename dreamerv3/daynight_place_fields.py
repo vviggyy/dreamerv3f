@@ -174,29 +174,31 @@ def _phase_maps(X_sel, flatbin, masks, nbins):
 # ---------------------------------------------------------------------------
 # Plot
 # ---------------------------------------------------------------------------
-def _get_world_img(results):
+def _get_world_img(results, frame='tuning'):
     """Render the faint Crafter world RGB for the map backgrounds (None on any
     failure -> falls back to dark-grey unvisited tiles). Reuses tuning_curve's
-    reconstruction so the terrain frame matches the occupancy/tuning figures."""
+    reconstruction so the terrain frame matches the occupancy/tuning figures.
+    ``frame`` ('tuning' y-up / 'native' y-down) must match the map orientation."""
     wm = results.get('world_meta')
     if not wm:
         return None
     try:
         from tuning_curve import _render_world_img
-        return _render_world_img(wm, tuple(results['area']))
+        return _render_world_img(wm, tuple(results['area']), frame=frame)
     except Exception as e:
         print(f'  (world background skipped: {e})')
         return None
 
 
-def plot(results, save_dir, fmt='svg', world_bg=True):
+def plot(results, save_dir, fmt='svg', world_bg=True, native=False):
     area = tuple(results['area'])
     labels = results['phase_labels']
     sel = results['selected']
     ev = results['ev']
     P = len(labels)
     cond = results['cond']['daynight']
-    world_img = _get_world_img(results) if world_bg else None
+    world_img = _get_world_img(results, frame='native' if native else 'tuning') \
+        if world_bg else None
 
     cols = ['full'] + labels
     nmap = len(cols)                 # map columns (full + phases)
@@ -205,7 +207,14 @@ def plot(results, save_dir, fmt='svg', world_bg=True):
                            gridspec_kw={'width_ratios': [1] * nmap + [0.12]},
                            squeeze=False)
 
-    extent = [-0.5, area[0] - 0.5, -0.5, area[1] - 0.5]
+    # native=True => Crafter's upright gameplay orientation (y down); else the
+    # y-up "tuning" frame. world_img must already be rendered in the same frame.
+    if native:
+        extent = [-0.5, area[0] - 0.5, area[1] - 0.5, -0.5]
+        grid_origin = 'upper'
+    else:
+        extent = [-0.5, area[0] - 0.5, -0.5, area[1] - 0.5]
+        grid_origin = 'lower'
 
     def show(a, grid, vmin, vmax, cmap='viridis'):
         # With a world background, unvisited (NaN) tiles are left transparent so
@@ -218,7 +227,7 @@ def plot(results, save_dir, fmt='svg', world_bg=True):
                      alpha=0.4, zorder=0)
         else:
             cm.set_bad('#4d4d4d')
-        im = a.imshow(np.ma.masked_invalid(grid.T), origin='lower', cmap=cm,
+        im = a.imshow(np.ma.masked_invalid(grid.T), origin=grid_origin, cmap=cm,
                       vmin=vmin, vmax=vmax, interpolation='nearest',
                       extent=extent, aspect='equal', zorder=1)
         a.set_xticks([]); a.set_yticks([])
@@ -383,6 +392,9 @@ def main():
                          '(unvisited tiles transparent); default on')
     ap.add_argument('--no_world_bg', dest='world_bg', action='store_false',
                     help='dark-grey unvisited tiles instead of the world map')
+    ap.add_argument('--native', action='store_true',
+                    help="Crafter's upright gameplay orientation (y down) instead "
+                         'of the y-up tuning frame (vertical reflection)')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
     pp.maybe_apply(args, small_figsize=False)  # Tier-1 style + --out_fmt; no-op otherwise
@@ -392,7 +404,7 @@ def main():
             results = pickle.load(f)
         sd = args.save if args.save != './daynight_place_fields' else str(Path(args.from_pkl).parent)
         Path(sd).mkdir(parents=True, exist_ok=True)
-        plot(results, sd, args.fmt, world_bg=args.world_bg)
+        plot(results, sd, args.fmt, world_bg=args.world_bg, native=args.native)
         plot_population(results, sd, args.fmt)
         print_summary(results)
         print(f'\nReplotted {args.from_pkl} -> {sd}')
@@ -457,7 +469,7 @@ def main():
         pickle.dump(results, f)
     print(f'Saved {pkl}')
 
-    plot(results, str(save_dir), args.fmt, world_bg=args.world_bg)
+    plot(results, str(save_dir), args.fmt, world_bg=args.world_bg, native=args.native)
     plot_population(results, str(save_dir), args.fmt)
     print_summary(results)
 
