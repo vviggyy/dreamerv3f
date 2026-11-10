@@ -44,16 +44,47 @@ METRIC_INFO = {
 DEFAULT_COLORS = ['#377eb8', '#2ca02c', '#e41a1c', '#984ea3', '#ff7f00', '#666666']
 
 
-def _load_metric(pkl_path, layer, metric):
+def _dead_mask(layer_dict, tol=0.0):
+    """Per-neuron 'dead' mask: a (ReLU) unit that never activates anywhere.
+
+    Literature: dying-ReLU / dead units (Glorot 2011; Lu 2019) and the
+    dormant-neuron score at tau=0 (Sokar et al., ICML 2023) both reduce, for a
+    non-negative activation, to "max activation over the dataset <= 0". We read
+    it off the stored spatial tuning curve (mean activation per visited bin):
+    an all-(near-)zero tuning curve => the neuron fires nowhere. Returns None if
+    tuning curves are unavailable (older pkls).
+    """
+    tc = layer_dict.get('tuning_curves')
+    if tc is None:
+        return None
+    tc = np.asarray(tc, dtype=float)                 # (N, X, Y)
+    peak = np.nanmax(tc.reshape(tc.shape[0], -1), axis=1)
+    peak = np.where(np.isfinite(peak), peak, 0.0)    # all-NaN tuning curve -> 0
+    return peak <= tol
+
+
+def _load_metric(pkl_path, layer, metric, exclude_dead=False, dead_tol=0.0):
     d = pickle.load(open(pkl_path, 'rb'))
     layers = d['layers'] if 'layers' in d else d
     if layer not in layers:
         raise SystemExit(f'layer {layer!r} not in {pkl_path} (have: {list(layers)})')
-    metrics = layers[layer]['metrics']
+    ldict = layers[layer]
+    metrics = ldict['metrics']
     if metric not in metrics:
         raise SystemExit(f'metric {metric!r} not in {pkl_path}:{layer} (have: {list(metrics)})')
     vals = np.asarray(metrics[metric], dtype=float)
-    return vals[np.isfinite(vals)]
+    keep = np.isfinite(vals)
+    if exclude_dead:
+        dead = _dead_mask(ldict, tol=dead_tol)
+        if dead is None:
+            print(f'  [warn] no tuning_curves in {pkl_path}:{layer}; cannot '
+                  f'exclude dead neurons (keeping all)')
+        else:
+            n_dead = int((dead & keep).sum())
+            print(f'  [exclude_dead] {pkl_path}:{layer} dropped {n_dead} dead '
+                  f'(never-activating) neurons of {int(keep.sum())}')
+            keep &= ~dead
+    return vals[keep]
 
 
 def main():
@@ -75,6 +106,12 @@ def main():
     ap.add_argument('--xrange', default='', help='"lo,hi" x-limits (overrides metric default)')
     ap.add_argument('--colors', default='',
                     help='comma-separated colors overriding the default cycle')
+    ap.add_argument('--exclude_dead', action='store_true',
+                    help='drop dead (never-activating) neurons: tuning-curve '
+                         'peak <= --dead_tol (ReLU dead-unit / tau=0 dormant). '
+                         'For EVs this removes the EV=0 spike.')
+    ap.add_argument('--dead_tol', type=float, default=0.0,
+                    help='max-activation threshold for "dead" (default 0.0)')
     ap.add_argument('--title', default='', help='plot title')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
@@ -99,7 +136,8 @@ def main():
     fig, ax = plt.subplots(figsize=(9.0, 6.0) if pp.is_poster() else (5.0, 4.0))
     bins = np.linspace(*xr, args.bins + 1) if xr else args.bins
     for i, (label, path) in enumerate(conds):
-        vals = _load_metric(path, args.layer, args.metric)
+        vals = _load_metric(path, args.layer, args.metric,
+                            exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
         col = colors[i % len(colors)]
         ax.hist(vals, bins=bins, density=args.density, histtype='stepfilled',
                 color=col, alpha=0.45, edgecolor=col, linewidth=1.4,
@@ -122,7 +160,8 @@ def main():
     fig.savefig(str(out), bbox_inches='tight')
     print(f'Saved {out}')
     for label, path in conds:
-        vals = _load_metric(path, args.layer, args.metric)
+        vals = _load_metric(path, args.layer, args.metric,
+                            exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
         print(f'  {label:28s} N={len(vals):5d} median={np.median(vals):.3f} '
               f'mean={np.mean(vals):.3f}')
 
