@@ -601,13 +601,23 @@ DIST_METRICS = [
 def plot_metric_distribution(tc_array, metric_values, metric_name,
                              display_name, layer_name, save_path,
                              n_per_quantile=3,
-                             quantiles=(0.1, 0.3, 0.5, 0.7, 0.9)):
+                             quantiles=(0.1, 0.3, 0.5, 0.7, 0.9),
+                             world_img=None, native=False):
     """Combined figure: histogram of metric + example TCs at quantile positions.
 
     Top panel: fraction-normalized histogram (bins sum to 1) with vertical lines
     at each quantile.
     Bottom panel: grid of example tuning curves (n_quantiles cols x n_per_quantile rows).
+
+    When ``world_img`` is given or ``native`` is set, the example tuning maps are
+    drawn with tuning_curve._draw_tuning_map (faint Crafter world behind,
+    unvisited tiles transparent, black->red->orange cmap, optional upright/native
+    orientation) so they match the poster tuning panels; otherwise the legacy
+    viridis thumbnails are used.
     """
+    use_tc_map = native or world_img is not None
+    if use_tc_map:
+        from tuning_curve import _draw_tuning_map
     valid = np.isfinite(metric_values)
     if valid.sum() < 10:
         print(f'  Skipping {metric_name}: too few finite values ({valid.sum()})')
@@ -652,8 +662,11 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
             ax = fig.add_subplot(gs[1 + ri, qi])
             neuron_orig = valid_idx[sel]
             tc = tc_array[neuron_orig]
-            ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
-                      interpolation='nearest', cmap='viridis')
+            if use_tc_map:
+                _draw_tuning_map(ax, tc, world_img=world_img, native=native)
+            else:
+                ax.imshow(np.ma.masked_invalid(tc.T), origin='lower',
+                          interpolation='nearest', cmap='viridis')
             ax.set_xticks([])
             ax.set_yticks([])
             val_str = f'{vals[sel]:.3f}'
@@ -666,7 +679,8 @@ def plot_metric_distribution(tc_array, metric_values, metric_name,
     _save(fig, save_path)
 
 
-def process_layer_distributions(layer_name, layer_data, save_dir, args):
+def process_layer_distributions(layer_name, layer_data, save_dir, args,
+                                world_meta=None):
     """Generate metric distribution plots for one layer."""
     tc = np.asarray(layer_data['tuning_curves'])
     metrics = layer_data['metrics']
@@ -706,6 +720,19 @@ def process_layer_distributions(layer_name, layer_data, save_dir, args):
     prefix = layer_name.replace('/', '_')
     summary = {}
 
+    # Optional Crafter world-map background + native (upright) orientation for the
+    # example-TC thumbnails, so they match the poster tuning panels.
+    native = getattr(args, 'native', False)
+    world_img = None
+    if getattr(args, 'world_bg', False):
+        try:
+            from tuning_curve import _render_world_img
+            world_img = _render_world_img(
+                world_meta, tuple(tc.shape[1:]),
+                frame='native' if native else 'tuning')
+        except Exception as e:
+            print(f'  (world background skipped: {e})')
+
     # SI-vs-EV scatter on the SAME (dead-excluded) population as the distributions.
     try:
         from tuning_curve import plot_si_ev_scatter
@@ -723,7 +750,8 @@ def process_layer_distributions(layer_name, layer_data, save_dir, args):
         vals = np.asarray(metrics[metric_key], dtype=float)
         save_path = save_dir / f'{prefix}_dist_{metric_key}.svg'
         plot_metric_distribution(tc, vals, metric_key, display_name,
-                                 layer_name, save_path)
+                                 layer_name, save_path,
+                                 world_img=world_img, native=native)
         finite = vals[np.isfinite(vals)]
         if len(finite) > 0:
             summary[metric_key] = {
@@ -778,6 +806,18 @@ def main():
                         help='Drop dead (never-activating) neurons — tuning-curve '
                              'peak <= 0 (dying-ReLU / tau=0 dormant) — before '
                              'computing distributions / SI-vs-EV (distributions mode)')
+    parser.add_argument('--world_bg', action='store_true',
+                        help='Draw the faint Crafter world map behind the example '
+                             'tuning-curve thumbnails (distributions mode); matches '
+                             'the poster tuning panels')
+    parser.add_argument('--native', action='store_true',
+                        help="Crafter's upright gameplay orientation (y down) for "
+                             'the example tuning-curve thumbnails (distributions mode)')
+    parser.add_argument('--world_from', default=None,
+                        help='Trajectory dir to load world_meta from for the world '
+                             'background (overrides the pkl world_meta — needed for '
+                             'replay-on-A pkls whose stored world_meta is the replay '
+                             "net's own training env, not the trajectory world)")
     parser.add_argument('--normalize', action='store_true', default=True,
                         help='Z-score normalize features')
     parser.add_argument('--no_normalize', action='store_false', dest='normalize')
@@ -853,9 +893,20 @@ def main():
 
     if args.mode == 'distributions':
         # ----- Metric distribution plots -----
+        # world_meta for the optional world-map background: --world_from (load from
+        # a trajectory dir's sidecar; use for replay-on-A pkls) overrides the pkl's
+        # own top-level world_meta.
+        world_meta = data.get('world_meta')
+        if args.world_from:
+            try:
+                from tuning_curve import _load_world_meta
+                world_meta = _load_world_meta(args.world_from)
+            except Exception as e:
+                print(f'(world_from load failed, using pkl world_meta: {e})')
         all_results = {}
         for ln in all_layers:
-            result = process_layer_distributions(ln, layers_data[ln], save_dir, args)
+            result = process_layer_distributions(ln, layers_data[ln], save_dir, args,
+                                                 world_meta=world_meta)
             if result is not None:
                 all_results[ln] = result
 
