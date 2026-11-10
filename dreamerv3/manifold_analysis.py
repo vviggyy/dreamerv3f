@@ -439,16 +439,34 @@ _POS_CORNERS = {
     'tr': np.array([0.96, 0.88, 0.25]),   # x_max, y_max -> yellow
 }
 
+# Isomap-position figure knobs (tweak here, footprint/figsize unchanged):
+POS_COLOR_SAT = 1.6     # HSV saturation boost for the position colormap (1.0=off)
+ISOMAP_DOT_SIZE = 30    # scatter marker area (was 4); bigger = fatter dots
+ISOMAP_DOT_ALPHA = 0.55  # kept moderate so overlapping dots stay readable
 
-def _pos_to_rgb(px, py, x0, x1, y0, y1):
+
+def _saturate(rgb, factor):
+    """Boost the saturation of an RGB array (any shape + trailing length-3 axis)
+    by scaling S in HSV. factor=1.0 is a no-op; >1 = more vivid (clipped)."""
+    if factor == 1.0:
+        return rgb
+    import matplotlib.colors as mcolors
+    hsv = mcolors.rgb_to_hsv(np.clip(rgb, 0, 1))
+    hsv[..., 1] = np.clip(hsv[..., 1] * factor, 0, 1)
+    return mcolors.hsv_to_rgb(hsv)
+
+
+def _pos_to_rgb(px, py, x0, x1, y0, y1, sat=1.0):
     """Bilinear 2-D colormap: (x, y) -> RGB in [0,1]. px/py arrays of any shape;
-    returns that shape + a trailing length-3 axis."""
+    returns that shape + a trailing length-3 axis. ``sat`` optionally boosts
+    saturation (HSV) so the position colors read more vividly."""
     xn = np.clip((np.asarray(px, float) - x0) / max(x1 - x0, 1e-9), 0, 1)[..., None]
     yn = np.clip((np.asarray(py, float) - y0) / max(y1 - y0, 1e-9), 0, 1)[..., None]
-    return np.clip(_POS_CORNERS['bl'] * (1 - xn) * (1 - yn)
-                   + _POS_CORNERS['br'] * xn * (1 - yn)
-                   + _POS_CORNERS['tl'] * (1 - xn) * yn
-                   + _POS_CORNERS['tr'] * xn * yn, 0, 1)
+    rgb = np.clip(_POS_CORNERS['bl'] * (1 - xn) * (1 - yn)
+                  + _POS_CORNERS['br'] * xn * (1 - yn)
+                  + _POS_CORNERS['tl'] * (1 - xn) * yn
+                  + _POS_CORNERS['tr'] * xn * yn, 0, 1)
+    return _saturate(rgb, sat)
 
 
 def _pos_bounds(pos):
@@ -456,14 +474,15 @@ def _pos_bounds(pos):
             float(pos[:, 1].min()), float(pos[:, 1].max()))
 
 
-def _draw_pos_colorkey_inset(ax, bounds, loc='lower right'):
+def _draw_pos_colorkey_inset(ax, bounds, loc='lower right', sat=1.0):
     """Small inset square showing the 2-D position colormap (x horizontal, y
-    vertical) so the scatter colors can be read as a position legend."""
+    vertical) so the scatter colors can be read as a position legend. ``sat``
+    must match the scatter's saturation so the legend stays faithful."""
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
     x0, x1, y0, y1 = bounds
     g = np.linspace(0, 1, 64)
     GX, GY = np.meshgrid(g, g)
-    key = _pos_to_rgb(GX, GY, 0, 1, 0, 1)
+    key = _pos_to_rgb(GX, GY, 0, 1, 0, 1, sat=sat)
     cax = inset_axes(ax, width='26%', height='26%', loc=loc, borderpad=0.5)
     cax.imshow(key, origin='lower', interpolation='bilinear')
     cax.set_xticks([]); cax.set_yticks([])
@@ -482,12 +501,12 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
     _setup_dark_style()
 
     bounds = _pos_bounds(pos_wake)
-    rgb = _pos_to_rgb(pos_wake[:, 0], pos_wake[:, 1], *bounds)
+    rgb = _pos_to_rgb(pos_wake[:, 0], pos_wake[:, 1], *bounds, sat=POS_COLOR_SAT)
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=rgb,
-               s=4, alpha=0.6, edgecolors='none')
-    _draw_pos_colorkey_inset(ax, bounds)
+               s=ISOMAP_DOT_SIZE, alpha=ISOMAP_DOT_ALPHA, edgecolors='none')
+    _draw_pos_colorkey_inset(ax, bounds, sat=POS_COLOR_SAT)
     ax.axis('off')
     ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
