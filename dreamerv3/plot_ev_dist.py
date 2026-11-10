@@ -139,20 +139,26 @@ def main():
 
     fig, ax = plt.subplots(figsize=(9.0, 6.0) if pp.is_poster() else (5.0, 4.0))
     bins = np.linspace(*xr, args.bins + 1) if xr else args.bins
+    # Draw so the FIRST condition is frontmost (e.g. A over B, A over C):
+    # matplotlib's default z-order follows draw order (last = on top), which
+    # would bury the first condition; set an explicit decreasing z-order.
+    n = len(conds)
     for i, (label, path) in enumerate(conds):
         vals = _load_metric(path, args.layer, args.metric,
                             exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
         col = colors[i % len(colors)]
+        z = (n - i)  # cond 0 (A) highest -> drawn in front
         # --fraction: weight each neuron by 1/N so bar heights are the fraction
         # of neurons in that bin (summing to 1 per condition); mutually
         # exclusive with density normalization.
         weights = (np.full(len(vals), 1.0 / len(vals)) if args.fraction and len(vals)
                    else None)
         ax.hist(vals, bins=bins, density=(args.density and not args.fraction),
-                weights=weights, histtype='stepfilled',
+                weights=weights, histtype='stepfilled', zorder=z,
                 color=col, alpha=0.45, edgecolor=col, linewidth=1.4,
                 label=f'{label}  (N={len(vals)}, med={np.median(vals):.3f})')
-        ax.axvline(np.median(vals), color=col, linestyle='--', linewidth=1.2, alpha=0.9)
+        ax.axvline(np.median(vals), color=col, linestyle='--', linewidth=1.2,
+                   alpha=0.9, zorder=z + 0.5)
 
     ax.set_xlabel(disp)
     ax.set_ylabel('Fraction of neurons' if args.fraction
