@@ -112,6 +112,10 @@ def main():
                          'For EVs this removes the EV=0 spike.')
     ap.add_argument('--dead_tol', type=float, default=0.0,
                     help='max-activation threshold for "dead" (default 0.0)')
+    ap.add_argument('--fraction', action='store_true',
+                    help='y-axis = fraction of neurons per bin (bars sum to 1 '
+                         'per condition); more interpretable than density. '
+                         'Overrides --density/--counts.')
     ap.add_argument('--title', default='', help='plot title')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
@@ -139,13 +143,20 @@ def main():
         vals = _load_metric(path, args.layer, args.metric,
                             exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
         col = colors[i % len(colors)]
-        ax.hist(vals, bins=bins, density=args.density, histtype='stepfilled',
+        # --fraction: weight each neuron by 1/N so bar heights are the fraction
+        # of neurons in that bin (summing to 1 per condition); mutually
+        # exclusive with density normalization.
+        weights = (np.full(len(vals), 1.0 / len(vals)) if args.fraction and len(vals)
+                   else None)
+        ax.hist(vals, bins=bins, density=(args.density and not args.fraction),
+                weights=weights, histtype='stepfilled',
                 color=col, alpha=0.45, edgecolor=col, linewidth=1.4,
                 label=f'{label}  (N={len(vals)}, med={np.median(vals):.3f})')
         ax.axvline(np.median(vals), color=col, linestyle='--', linewidth=1.2, alpha=0.9)
 
     ax.set_xlabel(disp)
-    ax.set_ylabel('Density' if args.density else 'Count')
+    ax.set_ylabel('Fraction of neurons' if args.fraction
+                  else ('Density' if args.density else 'Count'))
     if xr:
         ax.set_xlim(*xr)
     ax.set_title(args.title or f'{args.layer} — {disp} distribution')
