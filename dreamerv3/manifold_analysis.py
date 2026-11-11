@@ -583,10 +583,10 @@ def plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir):
     _setup_dark_style()
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
-    ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=FG, s=4, alpha=0.3,
+    ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=FG, s=ISOMAP_DOT_SIZE, alpha=0.3,
                edgecolors='none', label='wake', zorder=2)
-    ax.scatter(emb_dream[:, 0], emb_dream[:, 1], c='#cc0000', s=4, alpha=0.5,
-               edgecolors='none', label='dream', zorder=3)
+    ax.scatter(emb_dream[:, 0], emb_dream[:, 1], c='#cc0000', s=ISOMAP_DOT_SIZE,
+               alpha=0.5, edgecolors='none', label='dream', zorder=3)
     ax.legend(fontsize=9, loc='upper right', facecolor=LEGEND_FC,
               edgecolor=LEGEND_EC, labelcolor=FG)
     ax.set_xlabel('Isomap 1', fontsize=10)
