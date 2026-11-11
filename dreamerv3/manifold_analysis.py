@@ -474,17 +474,20 @@ def _pos_bounds(pos):
             float(pos[:, 1].min()), float(pos[:, 1].max()))
 
 
-def _draw_pos_colorkey_inset(ax, bounds, loc='lower right', sat=1.0):
+def _draw_pos_colorkey_inset(ax, bounds, loc='lower right', sat=1.0, native=False):
     """Small inset square showing the 2-D position colormap (x horizontal, y
     vertical) so the scatter colors can be read as a position legend. ``sat``
-    must match the scatter's saturation so the legend stays faithful."""
+    must match the scatter's saturation so the legend stays faithful. ``native``
+    draws y increasing DOWNWARD (y=0 at top) to match the native Crafter maps."""
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
     x0, x1, y0, y1 = bounds
     g = np.linspace(0, 1, 64)
     GX, GY = np.meshgrid(g, g)
     key = _pos_to_rgb(GX, GY, 0, 1, 0, 1, sat=sat)
     cax = inset_axes(ax, width='26%', height='26%', loc=loc, borderpad=0.5)
-    cax.imshow(key, origin='lower', interpolation='bilinear')
+    # origin='upper' puts y=0 (y_min) at the top so the legend reads y-down,
+    # matching the native tuning/occupancy maps; 'lower' = legacy y-up frame.
+    cax.imshow(key, origin='upper' if native else 'lower', interpolation='bilinear')
     cax.set_xticks([]); cax.set_yticks([])
     cax.set_xlabel('x', fontsize=8, labelpad=1)
     cax.set_ylabel('y', fontsize=8, labelpad=1)
@@ -492,12 +495,13 @@ def _draw_pos_colorkey_inset(ax, bounds, loc='lower right', sat=1.0):
 
 
 def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
-                         mapcenter=None):
+                         mapcenter=None, native=False):
     """Isomap colored by a 2-D position colormap (x,y -> RGB; see _pos_to_rgb).
 
     A rectangular world gets a rectangular color encoding: both axes are encoded
     and nearby positions get nearby colors everywhere. (`mapcenter` kept for
-    signature compatibility; unused.)"""
+    signature compatibility; unused.) ``native`` only flips the inset color-key
+    legend to the y-down native frame — the abstract scatter colors are unchanged."""
     _setup_dark_style()
 
     bounds = _pos_bounds(pos_wake)
@@ -506,7 +510,7 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
     fig, ax = plt.subplots(1, 1, figsize=(7, 6))
     ax.scatter(emb_wake[:, 0], emb_wake[:, 1], c=rgb,
                s=ISOMAP_DOT_SIZE, alpha=ISOMAP_DOT_ALPHA, edgecolors='none')
-    _draw_pos_colorkey_inset(ax, bounds, sat=POS_COLOR_SAT)
+    _draw_pos_colorkey_inset(ax, bounds, sat=POS_COLOR_SAT, native=native)
     ax.axis('off')
     ax.set_title(f'{layer_name} — position', fontsize=11, fontweight='bold')
 
@@ -517,11 +521,15 @@ def plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
 
 
 def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
-                                    mapcenter=None, env_seed=None, area=None):
+                                    mapcenter=None, env_seed=None, area=None,
+                                    native=False):
     """Companion 'color key' for plot_isomap_position: render the world map
     tinted by the SAME 2-D position colormap (x,y -> RGB; see _pos_to_rgb), so the
     abstract isomap colors can be read back to real world locations. Saved as a
-    SEPARATE file (align/overlay with the isomap in Illustrator)."""
+    SEPARATE file (align/overlay with the isomap in Illustrator).
+
+    ``native`` renders the world in Crafter's upright (y-down) frame so this key
+    matches the native tuning/occupancy maps; otherwise the legacy y-up frame."""
     _setup_dark_style()
     try:
         from plot_trajectories import _render_crafter_world
@@ -532,20 +540,23 @@ def plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
         print("  colorkey: no env_seed (pass --world_env_seed); skipping world key")
         return
     md = {'env_seed': env_seed, 'area': tuple(area) if area is not None else None}
-    world_img, _es, ts = _render_crafter_world(md, tile_size=12)
+    world_img, _es, ts = _render_crafter_world(
+        md, tile_size=12, frame='native' if native else 'tuning')
     if world_img is None:
         print("  colorkey: no world image; skipping world color key")
         return
-    # Same coordinate mapping as before (X=col, Y=row) so the world<->isomap
-    # correspondence is unchanged; only the colormap itself is now 2-D. Normalized
-    # by the visited-position bounds so it matches plot_isomap_position exactly.
+    # Tint each world pixel-row with the position color for the tile it shows.
+    # Saturation matches the scatter (POS_COLOR_SAT) so the two read identically.
     bounds = _pos_bounds(pos_wake)
     W, H = (int(area[0]), int(area[1])) if area is not None else (32, 32)
     X, Y = np.meshgrid(np.arange(W), np.arange(H))  # X[y,x]=col, Y[y,x]=row
-    # Display is origin='upper' but player positions sit at row = H-1-y (y points
-    # up), so tint pixel-row r with tile_y = (H-1)-r — otherwise the key is
-    # vertically flipped vs the isomap (the old atan2 key had this latent flip).
-    field = _pos_to_rgb(X, (H - 1) - Y, *bounds)    # (H, W, 3)
+    if native:
+        # native world (origin='upper'): pixel-row r IS tile_y, no flip needed.
+        tile_y = Y
+    else:
+        # legacy y-up frame: player y points up, so pixel-row r shows tile (H-1)-r.
+        tile_y = (H - 1) - Y
+    field = _pos_to_rgb(X, tile_y, *bounds, sat=POS_COLOR_SAT)    # (H, W, 3)
     field_px = np.repeat(np.repeat(field, ts, axis=0), ts, axis=1)  # -> world px
 
     # Grayscale the world (luminance) so the position colormap is the ONLY color
@@ -1156,6 +1167,11 @@ def main():
                         help='Figure output format (svg/pdf = Illustrator-editable vector)')
     parser.add_argument('--theme', default='dark', choices=['dark', 'light'],
                         help='Color theme; light = white bg + dark points/text (poster)')
+    parser.add_argument('--native', action='store_true',
+                        help="Orient the position color KEYS (inset legend + world "
+                             "color-key) in Crafter's native y-down frame so colors "
+                             'map to the same locations as the native tuning/'
+                             'occupancy maps (the scatter encoding is unchanged)')
     parser.add_argument('--world_env_seed', type=int, default=None,
                         help='env_seed for the position color-key world render '
                              '(overrides metadata; needed when trajectories lack it)')
@@ -1334,7 +1350,8 @@ def main():
             output_files.append(f'{slug}_hillfit.png')
 
         if emb_wake is not None:
-            plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir)
+            plot_isomap_position(emb_wake, pos_wake, layer_name, save_dir,
+                                 native=args.native)
             plot_isomap_wakedream(emb_wake, emb_dream, layer_name, save_dir)
             output_files.extend([
                 f'{slug}_isomap_position.png',
@@ -1349,7 +1366,8 @@ def main():
         key_area = tuple(args.world_area) if args.world_area \
             else metadata.get('area')
         plot_position_colorkey_on_world(pos_wake, layer_name, save_dir,
-                                        env_seed=key_seed, area=key_area)
+                                        env_seed=key_seed, area=key_area,
+                                        native=args.native)
         output_files.append(f'{slug}_position_colorkey_world.png')
 
         # Combined WakeSleep figure (pRNN style)
