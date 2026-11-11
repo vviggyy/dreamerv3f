@@ -61,7 +61,7 @@ import plot_presentable as pp
 # hi=day, so the math is shared rather than reimplemented.
 from vital_place_fields import (  # noqa: E402
     _flatbin, _maps, _ev, _condition, _allneuron_remap, _select,
-    _grid, _occ_grid, _occ_prob_grid, _area)
+    _grid, _occ_grid, _occ_prob_grid, _area, OCC_MIN_VISITS, OCC_UNDER_COLOR)
 
 # crafter day/night cycle (crafter/env.py::_update_time): daylight peaks (noon)
 # at clock-phase ~0.2 and bottoms (midnight) at ~0.7; period 300 steps. We bin by
@@ -217,7 +217,7 @@ def plot(results, save_dir, fmt='svg', world_bg=True, native=False,
         extent = [-0.5, area[0] - 0.5, -0.5, area[1] - 0.5]
         grid_origin = 'lower'
 
-    def show(a, grid, vmin, vmax, cmap='viridis'):
+    def show(a, grid, vmin, vmax, cmap='viridis', visit_counts=None):
         # With a world background, unvisited (NaN) tiles are left transparent so
         # the faint Crafter terrain shows through (matches occupancy_fullset /
         # the EV-sorted tuning maps); otherwise they stay dark grey.
@@ -236,6 +236,17 @@ def plot(results, save_dir, fmt='svg', world_bg=True, native=False,
         im = a.imshow(np.ma.masked_invalid(grid.T), origin=grid_origin, cmap=cm,
                       vmin=vmin, vmax=vmax, interpolation='nearest',
                       extent=extent, aspect='equal', zorder=1)
+        # Occupancy panels: tiles with 1..OCC_MIN_VISITS-1 visits render grey
+        # (matches plot_fullset_occupancy's set_under); unvisited (0) stays
+        # transparent so the world map shows through.
+        if visit_counts is not None:
+            from matplotlib.colors import ListedColormap
+            cg = _grid(visit_counts, area)
+            low = np.where((cg > 0) & (cg < OCC_MIN_VISITS), 1.0, np.nan)
+            gcm = ListedColormap([OCC_UNDER_COLOR]); gcm.set_bad(alpha=0.0)
+            a.imshow(np.ma.masked_invalid(low.T), origin=grid_origin, cmap=gcm,
+                     vmin=0, vmax=1, interpolation='nearest', extent=extent,
+                     aspect='equal', zorder=2)
         a.set_xticks([]); a.set_yticks([])
         return im
 
@@ -259,12 +270,14 @@ def plot(results, save_dir, fmt='svg', world_bg=True, native=False,
                              if np.isfinite(g).any()]) if phase_occ else np.array([])
     occ_vmax = np.percentile(pooled, 98) if pooled.size else 1
     ff = full_occ[np.isfinite(full_occ)]
-    show(ax[0, 0], full_occ, 0, np.percentile(ff, 98) if ff.size else None, 'magma')
+    show(ax[0, 0], full_occ, 0, np.percentile(ff, 98) if ff.size else None, 'magma',
+         visit_counts=results['occ_full'])
     ax[0, 0].set_title('occupancy (all)', fontsize=8)
     ax[0, 0].set_ylabel('OCCUPANCY', fontsize=8)
     im_occ = None
     for i, lab in enumerate(labels):
-        im_occ = show(ax[0, i + 1], phase_occ[i], 0, occ_vmax, 'magma')
+        im_occ = show(ax[0, i + 1], phase_occ[i], 0, occ_vmax, 'magma',
+                      visit_counts=results['phase_occ'][i])
         col = _PHASE4_COLORS.get(lab, 'k')
         ax[0, i + 1].set_title(f'{lab}\n(daylight {results["phase_daylight"][i]:.2f})',
                                fontsize=8, color=col)
@@ -313,19 +326,14 @@ def plot_population(results, save_dir, fmt='svg'):
     if 'remap' not in results or not len(results['remap']):
         return
     ev = np.asarray(results['ev']); remap = np.asarray(results['remap'])
-    sel = results['selected']; reason = results.get('reason', {})
+    min_ev = float(results.get('args', {}).get('ev_floor', 0.0) or 0.0)
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
     fin = np.isfinite(ev) & np.isfinite(remap)
-    # Monochrome: all neurons one grey; selected (shown) neurons kept visible via
-    # a darker grey + black edge, but NOT color-coded.
-    a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
-    sel_fin = [i for i in sel if np.isfinite(ev[i]) and np.isfinite(remap[i])]
-    if sel_fin:
-        a0.scatter(ev[sel_fin], remap[sel_fin], s=42, c='0.35', edgecolor='k',
-                   label='shown', zorder=3)
-    if np.isfinite(results.get('ev_floor', np.nan)):
-        a0.axvline(results['ev_floor'], color='0.4', ls='--', lw=1,
-                   label='remap EV floor')
+    # Every neuron drawn identically — no highlight of the shown/selected cells.
+    a0.scatter(ev[fin], remap[fin], s=10, c='0.55', alpha=0.5,
+               edgecolors='none', label='all neurons')
+    if min_ev > 0:
+        a0.axvline(min_ev, color='k', ls='--', lw=1.2, label=f'EV = {min_ev:g}')
     a0.set_xlabel('EV (spatial reliability)')
     a0.set_ylabel('day/night remap score (1 - r, day vs night)')
     a0.set_title('Spatial reliability vs day/night remapping')
@@ -383,6 +391,9 @@ def main():
                     help='[--select medium] remap window "lo,hi"')
     ap.add_argument('--remap_ev_pct', type=float, default=75.0,
                     help='remap candidates must have EV >= this percentile of EV')
+    ap.add_argument('--ev_floor', type=float, default=0.0,
+                    help='HARD absolute EV floor (e.g. 0.4): only EV>=this are '
+                    'selectable, and the remap-vs-EV scatter marks the threshold')
     ap.add_argument('--bright', type=float, default=0.8,
                     help='daylight >= bright  => DAY (hi) bin for the contrast')
     ap.add_argument('--dark', type=float, default=0.2,
@@ -446,7 +457,8 @@ def main():
     _ev_band = tuple(float(x) for x in args.ev_band.split(','))
     _remap_band = tuple(float(x) for x in args.remap_band.split(','))
     selected, reason, ev_floor = _select(ev, remap, args.top_n, args.select,
-                                         args.remap_ev_pct, _ev_band, _remap_band)
+                                         args.remap_ev_pct, _ev_band, _remap_band,
+                                         min_ev=args.ev_floor)
     print(f'Selected {len(selected)} neurons (mode={args.select}, EV floor '
           f'{ev_floor:.2f}):\n  ' + '\n  '.join(
               f'n{i}[{reason[i]}] EV={ev[i]:.2f} remap={remap[i]:.2f}'

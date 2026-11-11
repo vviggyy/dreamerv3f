@@ -55,6 +55,12 @@ FIELD_SMOOTH = 1.0      # gaussian sigma (tiles) before peak/COM location
 VITAL_COLORS = {'health': '#d62728', 'food': '#2ca02c',
                 'drink': '#1f77b4', 'energy': '#ff7f0e'}
 
+# Occupancy "visited but too few to trust" rule (mirrors decode_position's
+# OCC_LOG_VMIN / OCC_UNDER_COLOR): tiles with 1..OCC_MIN_VISITS-1 visits render
+# as a single grey; unvisited tiles stay transparent (world map shows through).
+OCC_MIN_VISITS = 10
+OCC_UNDER_COLOR = '#9a9a9a'
+
 
 # ---------------------------------------------------------------------------
 # Data
@@ -219,7 +225,7 @@ def _pctrank(x):
 
 
 def _select(ev, remap, top_n, mode, remap_ev_pct, ev_band=(0.5, 0.8),
-            remap_band=(0.4, 0.8)):
+            remap_band=(0.4, 0.8), min_ev=0.0):
     """Pick neurons to display. Returns (indices, reason-per-index dict).
 
     mode 'ev'    -> top EV (stable spatial baseline).
@@ -228,10 +234,16 @@ def _select(ev, remap, top_n, mode, remap_ev_pct, ev_band=(0.5, 0.8),
     mode 'conj'  -> JOINT top-right: high EV AND high remap, ranked by the product
                     of EV & remap percentile ranks (candidate conjunctive/
                     "splitter" place x vital cells). Still EV-floor gated.
-    mode 'both'  -> half from each, unioned (dedup, EV-pick fills any shortfall)."""
+    mode 'both'  -> half from each, unioned (dedup, EV-pick fills any shortfall).
+
+    ``min_ev``: a HARD absolute EV floor (e.g. 0.4) — only reliably spatial cells
+    are candidates, so the displayed cells are all above it (restricts the whole
+    analysis to tuned cells)."""
     ev_floor = np.nanpercentile(ev, remap_ev_pct)
-    eligible = np.where(ev >= ev_floor, remap, -np.inf)       # gate remap on EV
-    ev_rank = np.argsort(ev)[::-1]
+    # Hard EV gate: cells below min_ev (or non-finite EV) can never be picked.
+    ok = np.isfinite(ev) & (ev >= min_ev)
+    eligible = np.where((ev >= ev_floor) & ok, remap, -np.inf)  # gate remap on EV
+    ev_rank = np.argsort(np.where(ok, ev, -np.inf))[::-1]
     remap_rank = np.argsort(np.nan_to_num(eligible, nan=-np.inf))[::-1]
     reason = {}
     if mode == 'ev':
@@ -242,13 +254,13 @@ def _select(ev, remap, top_n, mode, remap_ev_pct, ev_band=(0.5, 0.8),
         for i in picks: reason[int(i)] = 'remap'
     elif mode == 'conj':
         conj = _pctrank(ev) * _pctrank(remap)                 # high only if BOTH high
-        conj = np.where(ev >= ev_floor, conj, -np.inf)        # keep the noise gate
+        conj = np.where((ev >= ev_floor) & ok, conj, -np.inf)  # keep the noise gate
         picks = list(np.argsort(conj)[::-1][:top_n])
         for i in picks: reason[int(i)] = 'conj'
     elif mode == 'medium':
         lo_e, hi_e = ev_band; lo_r, hi_r = remap_band
         band = ((ev > lo_e) & (ev < hi_e) & (remap > lo_r) & (remap < hi_r)
-                & np.isfinite(ev) & np.isfinite(remap))
+                & ok)
         cand = np.where(band)[0]
         ce, cr = (lo_e + hi_e) / 2, (lo_r + hi_r) / 2   # rank by centrality in band
         order = np.argsort((ev[cand] - ce) ** 2 + (remap[cand] - cr) ** 2)
@@ -330,7 +342,7 @@ def _plot_one_vital(results, v, save_dir, fmt, world_img=None, native=False,
         extent = [-0.5, area[0] - 0.5, -0.5, area[1] - 0.5]
         grid_origin = 'lower'
 
-    def show(a, grid, vmin, vmax, cmap='viridis'):
+    def show(a, grid, vmin, vmax, cmap='viridis', visit_counts=None):
         # With a world background, unvisited (NaN) tiles are left transparent so
         # the faint Crafter terrain shows through (matches occupancy_fullset /
         # the EV-sorted tuning maps); otherwise they stay dark grey.
@@ -349,6 +361,17 @@ def _plot_one_vital(results, v, save_dir, fmt, world_img=None, native=False,
         im = a.imshow(np.ma.masked_invalid(grid.T), origin=grid_origin, cmap=cm,
                       vmin=vmin, vmax=vmax, interpolation='nearest',
                       extent=extent, aspect='equal', zorder=1)
+        # Occupancy panels: tiles with 1..OCC_MIN_VISITS-1 visits render as a
+        # single grey (matches plot_fullset_occupancy's set_under) — "visited but
+        # too few to trust"; unvisited (0) stays transparent (world shows).
+        if visit_counts is not None:
+            from matplotlib.colors import ListedColormap
+            cg = _grid(visit_counts, area)
+            low = np.where((cg > 0) & (cg < OCC_MIN_VISITS), 1.0, np.nan)
+            gcm = ListedColormap([OCC_UNDER_COLOR]); gcm.set_bad(alpha=0.0)
+            a.imshow(np.ma.masked_invalid(low.T), origin=grid_origin, cmap=gcm,
+                     vmin=0, vmax=1, interpolation='nearest', extent=extent,
+                     aspect='equal', zorder=2)
         a.set_xticks([]); a.set_yticks([])
         return im
 
@@ -368,12 +391,13 @@ def _plot_one_vital(results, v, save_dir, fmt, world_img=None, native=False,
     occ_vmax = np.percentile(pooled, 98) if pooled.size else 1
     full_occ = _occ_prob_grid(results['occ_full'], area)
     ff = full_occ[np.isfinite(full_occ)]
-    show(ax[0, 0], full_occ, 0, np.percentile(ff, 98) if ff.size else None, 'magma')
+    show(ax[0, 0], full_occ, 0, np.percentile(ff, 98) if ff.size else None, 'magma',
+         visit_counts=results['occ_full'])
     ax[0, 0].set_title('occupancy (all)', fontsize=8)
     ax[0, 0].set_ylabel('OCCUPANCY', fontsize=8)
-    show(ax[0, 1], g_lo, 0, occ_vmax, 'magma')
+    show(ax[0, 1], g_lo, 0, occ_vmax, 'magma', visit_counts=cv['c_lo'])
     ax[0, 1].set_title(f'{v}_lo', fontsize=8, color=VITAL_COLORS.get(v, 'k'))
-    im_occ = show(ax[0, 2], g_hi, 0, occ_vmax, 'magma')
+    im_occ = show(ax[0, 2], g_hi, 0, occ_vmax, 'magma', visit_counts=cv['c_hi'])
     ax[0, 2].set_title(f'{v}_hi', fontsize=8, color=VITAL_COLORS.get(v, 'k'))
     cbar(im_occ, 0, 'visit prob (lo/hi, shared)')
 
@@ -420,26 +444,23 @@ def plot(results, save_dir, fmt='svg', world_bg=True, native=False,
 
 
 def plot_population(results, save_dir, fmt='svg'):
-    """Population view PER vital: EV vs that vital's remap-score scatter (selected
-    highlighted) + its remap-score histogram over all neurons. One r per vital —
-    no averaging across vitals — so remapping is vital-specific."""
+    """Population view PER vital: EV vs that vital's remap-score scatter + its
+    remap-score histogram over all neurons. One r per vital — no averaging across
+    vitals — so remapping is vital-specific. All points are drawn identically
+    (no per-cell highlight); an optional EV floor (--ev_floor) is marked."""
     ev = np.asarray(results['ev'])
+    min_ev = float(results.get('args', {}).get('ev_floor', 0.0) or 0.0)
     for v in results['vitals']:
         pv = results['per_vital'][v]
         remap = np.asarray(pv['remap'])
-        sel = pv['selected']; reason = pv['reason']
         fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
         fin = np.isfinite(ev) & np.isfinite(remap)
-        # Monochrome: all neurons one grey; the selected (shown) neurons kept
-        # visible via a darker grey + black edge, but NOT color-coded.
-        a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
-        sel_fin = [i for i in sel if np.isfinite(ev[i]) and np.isfinite(remap[i])]
-        if sel_fin:
-            a0.scatter(ev[sel_fin], remap[sel_fin], s=42, c='0.35', edgecolor='k',
-                       label='shown', zorder=3)
-        if np.isfinite(pv.get('ev_floor', np.nan)):
-            a0.axvline(pv['ev_floor'], color='0.4', ls='--', lw=1,
-                       label='remap EV floor')
+        # Every neuron drawn identically — no highlight of the shown/selected cells.
+        a0.scatter(ev[fin], remap[fin], s=10, c='0.55', alpha=0.5,
+                   edgecolors='none', label='all neurons')
+        if min_ev > 0:
+            a0.axvline(min_ev, color='k', ls='--', lw=1.2,
+                       label=f'EV = {min_ev:g}')
         a0.set_xlabel('EV (spatial reliability)')
         a0.set_ylabel(f'remap score  (1 − r,  {v} low vs high)')
         a0.set_title(f'Spatial reliability vs {v}-remapping')
@@ -498,6 +519,10 @@ def main():
                     help='remap candidates must have EV >= this percentile of EV '
                     '(gates out weakly-spatial vital-gain cells; raise toward 90 if '
                     'remap picks still look non-spatial)')
+    ap.add_argument('--ev_floor', type=float, default=0.0,
+                    help='HARD absolute EV floor (e.g. 0.4): restrict the analysis '
+                    'to reliably spatial cells — only EV>=this are selectable, and '
+                    'the remap-vs-EV scatter marks the threshold')
     ap.add_argument('--lo', type=int, default=3, help='vital<=lo => low bin')
     ap.add_argument('--hi', type=int, default=7, help='vital>=hi => high bin')
     ap.add_argument('--min_visits', type=int, default=5,
@@ -561,7 +586,8 @@ def main():
     for v in vitals:
         remap_v = 1.0 - np.asarray(allr[v])       # this vital's remap score (D,)
         selected, reason, ev_floor = _select(ev, remap_v, args.top_n, args.select,
-                                             args.remap_ev_pct, _ev_band, _remap_band)
+                                             args.remap_ev_pct, _ev_band, _remap_band,
+                                             min_ev=args.ev_floor)
         print(f'[{v}] selected {len(selected)} neurons (mode={args.select}, EV '
               f'floor {ev_floor:.2f}): ' + ', '.join(
                   f'n{i}[{reason[i]}]' for i in selected))
