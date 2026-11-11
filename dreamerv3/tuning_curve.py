@@ -1163,6 +1163,17 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
             cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cb.set_label('Mean activation', fontsize=5)
             cb.ax.tick_params(labelsize=5)
+            # Plain decimal tick labels (no scientific "1e-5" offset text, which
+            # from near-dead cells with tiny activation otherwise overlaps the
+            # panel title). Set via cb.formatter + update_ticks so it sticks and
+            # the labels stay HONEST (true values, e.g. 0.00001 — not a bare
+            # mantissa with the exponent hidden).
+            from matplotlib.ticker import ScalarFormatter, MaxNLocator
+            _sf = ScalarFormatter(useOffset=False)
+            _sf.set_scientific(False)
+            cb.formatter = _sf
+            cb.ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+            cb.update_ticks()
 
     # Hide unused axes
     for idx in range(n_show, nrows * neurons_per_row):
