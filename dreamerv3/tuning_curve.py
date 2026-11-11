@@ -1030,8 +1030,14 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
                                save_path, n_examples=20, area=None,
                                sort_by='SI', ev_filter=0.0,
                                show_autocorr=False, world_img=None,
-                               two_tailed=False, native=False):
+                               two_tailed=False, native=False,
+                               annotate_ev=False, descending=None):
     """Grid of example tuning curves sorted by a metric (SI, EV, morans_i, etc.).
+
+    ``annotate_ev``: also print each neuron's EV reliability in its title (so you
+    can eyeball which high-metric cells are actually spatially tuned, without
+    subsetting by an EV threshold). ``descending``: None = metric-appropriate
+    default (high-first except gearys_c); True/False force highest/lowest-first.
 
     Args:
         ev_filter: For autocorr metrics (morans_i, gearys_c, getis_ord_g),
@@ -1047,7 +1053,8 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     _sort_key_map = {'EV': 'EVs', 'SI': 'SI',
                      'morans_i': 'morans_i', 'gearys_c': 'gearys_c',
                      'getis_ord_g': 'getis_ord_g', 'fieldsize': 'fieldsize',
-                     'pf_peaks': 'pf_peaks'}
+                     'pf_peaks': 'pf_peaks', 'coherence': 'coherence',
+                     'sparsity': 'sparsity'}
     metric_key = _sort_key_map.get(sort_by, sort_by)
     if metric_key not in metrics:
         print(f"  Warning: metric '{metric_key}' not found, falling back to SI")
@@ -1072,6 +1079,10 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
         lo = list(asc[:k])
         hi = [i for i in asc[::-1] if i not in set(lo)][:n_show - k]
         selected = np.array(lo + hi, dtype=int)[:n_show]
+    elif descending is True:
+        selected = asc[::-1][:n_show]    # forced highest-first (all metrics)
+    elif descending is False:
+        selected = asc[:n_show]          # forced lowest-first
     elif sort_by == 'gearys_c':
         selected = asc[:n_show]          # ascending — lowest C = most clustered
     else:
@@ -1095,6 +1106,14 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
     elif ncols == 1:
         axes = axes[:, np.newaxis]
 
+    _evs = metrics.get('EVs') if annotate_ev else None
+
+    def _title(neuron_idx, val):
+        t = f'n{neuron_idx}\n{sort_by}={val:.2f}'
+        if _evs is not None:
+            t += f'\nEV={float(_evs[neuron_idx]):.2f}'
+        return t
+
     for idx, neuron_idx in enumerate(selected):
         r = idx // neurons_per_row
         tc = tc_array[neuron_idx]
@@ -1107,8 +1126,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
             # Tuning curve
             ax = axes[r, c_tc]
             im = _draw_tuning_map(ax, tc, world_img=world_img, native=native)
-            ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
-                         fontsize=7)
+            ax.set_title(_title(neuron_idx, val), fontsize=7)
             ax.set_xticks([])
             ax.set_yticks([])
             for spine in ax.spines.values():
@@ -1136,8 +1154,7 @@ def plot_example_tuning_curves(tc_array, metrics, group_ids, layer_name,
             c = idx % ncols
             ax = axes[r, c]
             im = _draw_tuning_map(ax, tc, world_img=world_img, native=native)
-            ax.set_title(f'n{neuron_idx}\n{sort_by}={val:.2f}',
-                         fontsize=7)
+            ax.set_title(_title(neuron_idx, val), fontsize=7)
             ax.set_xticks([])
             ax.set_yticks([])
             for spine in ax.spines.values():
