@@ -557,7 +557,7 @@ def plot_world_only(metadata=None, tile_size=8, save_path=None):
 
 
 def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
-                  trail=True, frame='native', save_path=None):
+                  trail=True, frame='native', save_path=None, daylight=None):
     """Two-panel view of a single step: allocentric world (left) + egocentric obs (right).
 
     Left: the full Crafter world map with upright sprites, the agent's path up
@@ -571,10 +571,16 @@ def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
         overlays (a vertical reflection of gameplay).
 
     Right: the stored egocentric observation ``image[step]`` exactly as the
-    agent saw it (includes the inventory bar).
+    agent saw it (includes the inventory bar) — already carries Crafter's real
+    day/night lighting for that step.
 
     ``step`` defaults to the middle of the episode; negative indexes from the
-    end. Requires an episode that stored ``image`` (not a behavior-only run).
+    end; ``'night'`` picks the darkest (lowest-daylight) step so the ego panel is
+    a genuine night observation. ``daylight`` (in [0,1]) sets the LEFT panel's
+    night lighting; if None it auto-matches the step's recorded ``daylight`` so
+    the two panels agree.
+
+    Requires an episode that stored ``image`` (not a behavior-only run).
     """
     episodes = _filter_valid_episodes(episodes, 'plot_allo_ego')
     if not episodes:
@@ -592,13 +598,20 @@ def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
     pos = np.asarray(ep['player_pos'])
     imgs = np.asarray(ep['image'])
     n = min(len(pos), len(imgs))
+    dl_series = np.asarray(ep['daylight']) if 'daylight' in ep else None
+    if step == 'night':   # pick the darkest step so the ego panel is real night
+        step = int(np.argmin(dl_series[:n])) if dl_series is not None else n // 2
     if step is None:
         step = n // 2
     step = int(step) % n  # supports negative indexing
     fac = np.asarray(ep['player_facing']) if 'player_facing' in ep else None
 
+    # Left-panel lighting: explicit --daylight, else the step's recorded daylight
+    # (so the allo world matches the real ego obs); default full day.
+    dl_left = (daylight if daylight is not None
+               else (float(dl_series[step]) if dl_series is not None else 1.0))
     world_img, env_seed, tile_size = _render_crafter_world(
-        metadata, tile_size, include_player=False, frame=frame)
+        metadata, tile_size, include_player=False, frame=frame, daylight=dl_left)
     if world_img is None:
         print("Could not reconstruct world (missing env_seed metadata).")
         return
@@ -636,7 +649,8 @@ def plot_allo_ego(episodes, metadata=None, step=None, ep_index=0, tile_size=16,
     axL.set_xlabel('x')
     axL.set_ylabel(ylabel)
     axL.set_title(f'Allocentric world ({frame_txt})\n'
-                  f'step {step}, pos=({x:.0f},{y:.0f}){facing_txt}', fontsize=10)
+                  f'step {step}, pos=({x:.0f},{y:.0f}){facing_txt}  ·  '
+                  f'daylight={dl_left:.2f}', fontsize=10)
 
     # RIGHT: egocentric observation exactly as the agent saw it
     axR.imshow(imgs[step], origin='upper')
@@ -1344,15 +1358,18 @@ def main():
                         help='Island land fraction for --island (default 0.72).')
     parser.add_argument('--island_roughness', type=float, default=0.16,
                         help='Island coastline roughness for --island (default 0.16).')
-    parser.add_argument('--step', type=int, default=None,
+    parser.add_argument('--step', type=str, default=None,
                         help='Step index for --plot allo_ego (default: middle; '
-                             'negative indexes from the end).')
+                             "negative indexes from the end; 'night' = darkest step).")
     parser.add_argument('--ep_index', type=int, default=0,
                         help='Episode index for --plot allo_ego (default: 0).')
     parser.add_argument('--allo_frame', type=str, default='native',
                         choices=['native', 'tuning'],
                         help='allo_ego left-panel orientation: native (Crafter '
                              'gameplay, matches the ego; default) or tuning (y-up).')
+    parser.add_argument('--daylight', type=float, default=None,
+                        help="allo_ego left-panel night lighting in [0,1] "
+                             '(1=day; <1 darkens). Default: auto-match the step.')
     _pstyle.add_presentable_arg(parser)
     args = parser.parse_args()
     _pstyle.maybe_apply(args, poster=True, small_figsize=False)  # Tier-2 poster; no-op unless --presentable
@@ -1426,10 +1443,14 @@ def main():
         animate_fullworld_trajectories(episodes, metadata, save_path=save_path)
 
     if args.plot in ('allo_ego',):
+        # --step is a string: 'night' stays a keyword, otherwise parse to int.
+        step_arg = args.step
+        if step_arg is not None and step_arg != 'night':
+            step_arg = int(step_arg)
         sfx = f'_ep{args.ep_index}_step{args.step}' if args.step is not None else f'_ep{args.ep_index}'
         save_path = save_dir / f'allo_ego{sfx}.png' if save_dir else None
-        plot_allo_ego(episodes, metadata, step=args.step, ep_index=args.ep_index,
-                      frame=args.allo_frame, save_path=save_path)
+        plot_allo_ego(episodes, metadata, step=step_arg, ep_index=args.ep_index,
+                      frame=args.allo_frame, save_path=save_path, daylight=args.daylight)
 
     if args.plot in ('worldview',):
         save_path = save_dir / f'worldview_agentview{ext}' if save_dir else None
