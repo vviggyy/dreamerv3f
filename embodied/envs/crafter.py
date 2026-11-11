@@ -8,6 +8,20 @@ import elements
 import embodied
 import numpy as np
 
+
+def _night_tile(tile, daylight):
+    """Apply crafter's day/night color transform (engine._light, minus the
+    local-view vignette noise) to one RGB tile. Reproduces desaturate-to-40% +
+    dark-blue tint, blended ``daylight*day + (1-daylight)*night``, with no RNG
+    (so it never perturbs training). daylight=1 -> unchanged."""
+    t = np.asarray(tile, np.float32)
+    gray = (t @ np.array([0.299, 0.587, 0.114], np.float32))[..., None]
+    desat = 0.6 * gray + 0.4 * t                       # ImageEnhance.Color(0.4)
+    night = 0.5 * desat + 0.5 * np.array([0, 16, 64], np.float32)   # _tint
+    out = daylight * t + (1 - daylight) * night
+    return np.clip(out, 0, 255)
+
+
 # Mapping from single-char codes to crafter material names
 MATERIAL_CODES = {
     '.': 'water',    # empty / border
@@ -244,7 +258,7 @@ class Crafter(embodied.Env):
                cow_worldgen_scale=1.0, mob_spawn_prob_scale=1.0,
                mob_target_scale=1.0, mob_worldgen_scale=1.0,
                mob_scale_dist='off', mob_scale_min=0.0, mob_scale_max=2.0,
-               mob_scale_mean=0.5, vital_reward=False):
+               mob_scale_mean=0.5, vital_reward=False, ego_light_player=False):
     assert task in ('reward', 'noreward')
     # Reward shaping: stock crafter rewards only the health delta (±0.1/point,
     # i.e. (health-last_health)/10) plus +1 per new achievement. `vital_reward`
@@ -421,6 +435,11 @@ class Crafter(embodied.Env):
     # egocentric view setup
     self._pixel_size = size[0] if hasattr(size, '__len__') else size
     self._egocentric_view = egocentric_view if egocentric_view else None
+    # Dim the stamped player tile by the day/night cycle. The sprite is stamped
+    # AFTER crafter's _light (to hide facing), so by default it stays full
+    # daytime brightness even at night; this makes it dim with the scene. OFF by
+    # default so existing training obs are unchanged (opt-in, mainly for figures).
+    self._ego_light_player = ego_light_player
     if self._egocentric_view is not None:
       assert egocentric_view % 2 == 1, 'egocentric_view must be odd'
       V = egocentric_view
@@ -944,6 +963,11 @@ class Crafter(embodied.Env):
     alpha = sprite[:, :, 3:4].astype(np.float32) / 255.0
     region = result[pr:pr+upx, pc:pc+upx].astype(np.float32)
     blended = region * (1 - alpha) + sprite[:, :, :3].astype(np.float32) * alpha
+    # This tile was stamped from RAW (un-lit) textures over crafter's already
+    # night-darkened terrain, so without this it stays full daytime brightness.
+    # Optionally dim it to match the scene's day/night level.
+    if self._ego_light_player:
+        blended = _night_tile(blended, float(self._env._world.daylight))
     result[pr:pr+upx, pc:pc+upx] = blended.astype(np.uint8)
     # Copy inventory bar from standard crafter image into bottom rows
     result[-self._ego_inv_rows:] = raw_image[-self._ego_inv_rows:]
