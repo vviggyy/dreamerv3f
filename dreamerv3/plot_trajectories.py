@@ -384,8 +384,27 @@ def _reconstruct_crafter_env(metadata=None):
     return env, env_seed
 
 
+def _apply_night(img, daylight):
+    """Apply Crafter's day/night lighting (engine._light) to an RGB uint8 image.
+
+    ``daylight`` in [0,1]: 1 = full day (no change), 0 = deep night. Reproduces
+    crafter's night look — desaturate to 40%, tint toward dark blue (0,16,64),
+    then blend ``daylight*day + (1-daylight)*night``. SKIPS the local-view
+    vignette noise (that darkens the edges of the agent's circular observation;
+    on a flat world map it would spuriously darken the center)."""
+    if daylight >= 1.0:
+        return img
+    from PIL import Image, ImageEnhance
+    canvas = img.astype(np.float32)
+    night = np.asarray(ImageEnhance.Color(
+        Image.fromarray(img.astype(np.uint8))).enhance(0.4)).astype(np.float32)
+    night = 0.5 * night + 0.5 * np.array([0, 16, 64], np.float32)   # _tint
+    out = daylight * canvas + (1 - daylight) * night
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def _render_crafter_world(metadata=None, tile_size=8, include_player=True,
-                          frame='tuning'):
+                          frame='tuning', daylight=1.0):
     """Render the full Crafter world map image.
 
     ``include_player=False`` skips the Player object so the agent's spawn sprite
@@ -400,6 +419,10 @@ def _render_crafter_world(metadata=None, tile_size=8, include_player=True,
         downward, ``origin='upper'``) — matches the egocentric observation's
         handedness.
     Both keep sprites upright.
+
+    ``daylight`` in [0,1] applies Crafter's night lighting (1=day default; <1
+    darkens/blue-tints toward night via ``_apply_night``) so the map can be
+    overlaid as a nighttime view.
 
     Returns (world_img, env_seed, tile_size) or (None, None, None) on failure.
     """
@@ -451,6 +474,7 @@ def _render_crafter_world(metadata=None, tile_size=8, include_player=True,
         world_img = native[::-1]
         H, W = world_img.shape[:2]
         world_img = world_img.reshape(H // tile_size, tile_size, W, 3)[:, ::-1].reshape(H, W, 3)
+    world_img = _apply_night(world_img, daylight)
     return world_img, env_seed, tile_size
 
 
