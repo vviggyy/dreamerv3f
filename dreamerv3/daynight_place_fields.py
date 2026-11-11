@@ -190,7 +190,8 @@ def _get_world_img(results, frame='tuning'):
         return None
 
 
-def plot(results, save_dir, fmt='svg', world_bg=True, native=False):
+def plot(results, save_dir, fmt='svg', world_bg=True, native=False,
+         tuning_cmap=False):
     area = tuple(results['area'])
     labels = results['phase_labels']
     sel = results['selected']
@@ -220,13 +221,18 @@ def plot(results, save_dir, fmt='svg', world_bg=True, native=False):
         # With a world background, unvisited (NaN) tiles are left transparent so
         # the faint Crafter terrain shows through (matches occupancy_fullset /
         # the EV-sorted tuning maps); otherwise they stay dark grey.
-        cm = plt.get_cmap(cmap).copy()
+        # tuning_cmap=True uses the exact black->red->orange tuning/occupancy
+        # colormap for ALL panels so these figures match the poster occupancy
+        # & tuning instead of viridis/magma.
+        if tuning_cmap:
+            from tuning_curve import _tc_cmap
+            cm = _tc_cmap(world_bg=world_img is not None)   # set_bad handled inside
+        else:
+            cm = plt.get_cmap(cmap).copy()
+            cm.set_bad(alpha=0.0) if world_img is not None else cm.set_bad('#4d4d4d')
         if world_img is not None:
-            cm.set_bad(alpha=0.0)
             a.imshow(world_img, origin='upper', aspect='equal', extent=extent,
                      alpha=0.4, zorder=0)
-        else:
-            cm.set_bad('#4d4d4d')
         im = a.imshow(np.ma.masked_invalid(grid.T), origin=grid_origin, cmap=cm,
                       vmin=vmin, vmax=vmax, interpolation='nearest',
                       extent=extent, aspect='equal', zorder=1)
@@ -310,13 +316,13 @@ def plot_population(results, save_dir, fmt='svg'):
     sel = results['selected']; reason = results.get('reason', {})
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(11, 4.2))
     fin = np.isfinite(ev) & np.isfinite(remap)
+    # Monochrome: all neurons one grey; selected (shown) neurons kept visible via
+    # a darker grey + black edge, but NOT color-coded.
     a0.scatter(ev[fin], remap[fin], s=4, c='0.7', alpha=0.4, label='all neurons')
-    for rsn, col in (('ev', '#1f77b4'), ('remap', '#d62728'), ('conj', '#2ca02c'),
-                     ('medium', '#9467bd')):
-        idx = [i for i in sel if reason.get(i) == rsn]
-        if idx:
-            a0.scatter(ev[idx], remap[idx], s=42, c=col, edgecolor='k',
-                       label=f'shown ({rsn})', zorder=3)
+    sel_fin = [i for i in sel if np.isfinite(ev[i]) and np.isfinite(remap[i])]
+    if sel_fin:
+        a0.scatter(ev[sel_fin], remap[sel_fin], s=42, c='0.35', edgecolor='k',
+                   label='shown', zorder=3)
     if np.isfinite(results.get('ev_floor', np.nan)):
         a0.axvline(results['ev_floor'], color='0.4', ls='--', lw=1,
                    label='remap EV floor')
@@ -324,7 +330,7 @@ def plot_population(results, save_dir, fmt='svg'):
     a0.set_ylabel('day/night remap score (1 - r, day vs night)')
     a0.set_title('Spatial reliability vs day/night remapping')
     a0.legend(fontsize=8, frameon=False); a0.grid(alpha=0.3)
-    a1.hist(remap[np.isfinite(remap)], bins=60, color='#8888cc')
+    a1.hist(remap[np.isfinite(remap)], bins=60, color='0.6')
     a1.set_xlabel('day/night remap score (1 - r)'); a1.set_ylabel('neurons')
     a1.set_title('Remap-score distribution (all neurons)')
     a1.grid(alpha=0.3)
@@ -395,6 +401,10 @@ def main():
     ap.add_argument('--native', action='store_true',
                     help="Crafter's upright gameplay orientation (y down) instead "
                          'of the y-up tuning frame (vertical reflection)')
+    ap.add_argument('--tuning_cmap', action='store_true',
+                    help='Use the black->red->orange tuning/occupancy colormap for '
+                         'all map panels (match the poster occupancy & tuning) '
+                         'instead of viridis/magma')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
     pp.maybe_apply(args, small_figsize=False)  # Tier-1 style + --out_fmt; no-op otherwise
@@ -404,7 +414,8 @@ def main():
             results = pickle.load(f)
         sd = args.save if args.save != './daynight_place_fields' else str(Path(args.from_pkl).parent)
         Path(sd).mkdir(parents=True, exist_ok=True)
-        plot(results, sd, args.fmt, world_bg=args.world_bg, native=args.native)
+        plot(results, sd, args.fmt, world_bg=args.world_bg, native=args.native,
+             tuning_cmap=args.tuning_cmap)
         plot_population(results, sd, args.fmt)
         print_summary(results)
         print(f'\nReplotted {args.from_pkl} -> {sd}')
@@ -469,7 +480,8 @@ def main():
         pickle.dump(results, f)
     print(f'Saved {pkl}')
 
-    plot(results, str(save_dir), args.fmt, world_bg=args.world_bg, native=args.native)
+    plot(results, str(save_dir), args.fmt, world_bg=args.world_bg, native=args.native,
+         tuning_cmap=args.tuning_cmap)
     plot_population(results, str(save_dir), args.fmt)
     print_summary(results)
 
