@@ -74,6 +74,7 @@ def _load_metric(pkl_path, layer, metric, exclude_dead=False, dead_tol=0.0):
         raise SystemExit(f'metric {metric!r} not in {pkl_path}:{layer} (have: {list(metrics)})')
     vals = np.asarray(metrics[metric], dtype=float)
     keep = np.isfinite(vals)
+    n_total = int(keep.sum())   # finite units BEFORE dead exclusion (= full pop)
     if exclude_dead:
         dead = _dead_mask(ldict, tol=dead_tol)
         if dead is None:
@@ -84,7 +85,7 @@ def _load_metric(pkl_path, layer, metric, exclude_dead=False, dead_tol=0.0):
             print(f'  [exclude_dead] {pkl_path}:{layer} dropped {n_dead} dead '
                   f'(never-activating) neurons of {int(keep.sum())}')
             keep &= ~dead
-    return vals[keep]
+    return vals[keep], n_total
 
 
 def main():
@@ -116,6 +117,11 @@ def main():
                     help='y-axis = fraction of neurons per bin (bars sum to 1 '
                          'per condition); more interpretable than density. '
                          'Overrides --density/--counts.')
+    ap.add_argument('--tuned_thresh', type=float, default=None,
+                    help='Mark "tuned" cells at metric > THRESH (e.g. 0.4 for EV): '
+                         'draws a threshold line and annotates each condition with '
+                         'the %% of tuned cells (of the plotted population; the '
+                         'of-all-units %% incl. dead is also printed).')
     ap.add_argument('--title', default='', help='plot title')
     pp.add_presentable_arg(ap)
     args = ap.parse_args()
@@ -144,8 +150,9 @@ def main():
     # would bury the first condition; set an explicit decreasing z-order.
     n = len(conds)
     for i, (label, path) in enumerate(conds):
-        vals = _load_metric(path, args.layer, args.metric,
-                            exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
+        vals, n_total = _load_metric(path, args.layer, args.metric,
+                                     exclude_dead=args.exclude_dead,
+                                     dead_tol=args.dead_tol)
         col = colors[i % len(colors)]
         z = (n - i)  # cond 0 (A) highest -> drawn in front
         # --fraction: weight each neuron by 1/N so bar heights are the fraction
@@ -153,12 +160,26 @@ def main():
         # exclusive with density normalization.
         weights = (np.full(len(vals), 1.0 / len(vals)) if args.fraction and len(vals)
                    else None)
+        lab = f'{label}  (N={len(vals)}, med={np.median(vals):.3f})'
+        if args.tuned_thresh is not None and len(vals):
+            n_tuned = int((vals > args.tuned_thresh).sum())
+            # Fraction of ALL cells (denominator = every finite unit incl. dead),
+            # NOT just the non-dead plotted population.
+            pct_all = 100.0 * n_tuned / n_total if n_total else float('nan')
+            pct_plot = 100.0 * n_tuned / len(vals)
+            lab = f'{label}  ({pct_all:.0f}% tuned, {n_tuned}/{n_total})'
+            print(f'  {label:20s} tuned ({args.metric}>{args.tuned_thresh:g}): '
+                  f'{n_tuned:4d}  ->  {pct_all:5.1f}% of ALL units ({n_total}), '
+                  f'{pct_plot:5.1f}% of non-dead plotted ({len(vals)})')
         ax.hist(vals, bins=bins, density=(args.density and not args.fraction),
                 weights=weights, histtype='stepfilled', zorder=z,
-                color=col, alpha=0.45, edgecolor=col, linewidth=1.4,
-                label=f'{label}  (N={len(vals)}, med={np.median(vals):.3f})')
+                color=col, alpha=0.45, edgecolor=col, linewidth=1.4, label=lab)
         ax.axvline(np.median(vals), color=col, linestyle='--', linewidth=1.2,
                    alpha=0.9, zorder=z + 0.5)
+
+    if args.tuned_thresh is not None:
+        ax.axvline(args.tuned_thresh, color='0.3', linestyle=':', linewidth=1.6,
+                   zorder=20, label=f'tuned: {args.metric} > {args.tuned_thresh:g}')
 
     ax.set_xlabel(disp)
     ax.set_ylabel('Fraction of neurons' if args.fraction
@@ -177,8 +198,8 @@ def main():
     fig.savefig(str(out), bbox_inches='tight')
     print(f'Saved {out}')
     for label, path in conds:
-        vals = _load_metric(path, args.layer, args.metric,
-                            exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
+        vals, _ = _load_metric(path, args.layer, args.metric,
+                               exclude_dead=args.exclude_dead, dead_tol=args.dead_tol)
         print(f'  {label:28s} N={len(vals):5d} median={np.median(vals):.3f} '
               f'mean={np.mean(vals):.3f}')
 
